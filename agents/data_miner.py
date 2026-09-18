@@ -229,3 +229,47 @@ class DataMinerAgent:
         except Exception as e:
             logging.error(f"Failed to load data from database: {e}")
             return None
+
+    def load_train_chunks(self, chunk_size=100000, split_ratio=0.80):
+        try:
+            query_count = "SELECT COUNT(*) FROM market_data_merged"
+            total_rows = pd.read_sql(query_count, con=sync_engine).iloc[0, 0]
+            train_limit = int(total_rows * split_ratio)
+            
+            if train_limit == 0:
+                logging.error("Tidak ada data di database untuk dilatih.")
+                return 0, None
+                
+            total_chunks = (train_limit + chunk_size - 1) // chunk_size
+            logging.info(f"Mempersiapkan {total_chunks} chunks untuk training (total {train_limit} baris).")
+            
+            def chunk_generator():
+                for offset in range(0, train_limit, chunk_size):
+                    limit = min(chunk_size, train_limit - offset)
+                    query = f"SELECT * FROM market_data_merged ORDER BY time ASC LIMIT {limit} OFFSET {offset}"
+                    df = pd.read_sql(query, con=sync_engine, index_col='time')
+                    df.index = pd.to_datetime(df.index)
+                    yield df
+                    
+            return total_chunks, chunk_generator()
+        except Exception as e:
+            logging.error(f"Gagal memuat train chunks: {e}")
+            return 0, None
+            
+    def load_test_data(self, split_ratio=0.80):
+        try:
+            query_count = "SELECT COUNT(*) FROM market_data_merged"
+            total_rows = pd.read_sql(query_count, con=sync_engine).iloc[0, 0]
+            train_limit = int(total_rows * split_ratio)
+            test_limit = total_rows - train_limit
+            
+            if test_limit == 0:
+                return None
+                
+            query = f"SELECT * FROM market_data_merged ORDER BY time ASC LIMIT {test_limit} OFFSET {train_limit}"
+            df = pd.read_sql(query, con=sync_engine, index_col='time')
+            df.index = pd.to_datetime(df.index)
+            return df
+        except Exception as e:
+            logging.error(f"Gagal memuat test data: {e}")
+            return None

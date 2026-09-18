@@ -46,33 +46,37 @@ class ExecutorAgent:
                     logging.error(f"[HOURLY SYNC] Gagal sinkronisasi data ke database: {e}")
                 
             # Cek Friday Liquidator
-            now = datetime.datetime.now()
-            if now.weekday() == 4 and now.hour >= 23:
-                logging.warning("[SEKRING] Friday Liquidator Active! Closing all positions.")
-                self.supervisor.trigger_friday_liquidator()
-                # Tutup seluruh posisi aktif via MT5
-                open_positions = mt5.positions_get(symbol=Config.SYMBOL)
-                if open_positions:
-                    for p in open_positions:
-                        close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                        tick = mt5.symbol_info_tick(Config.SYMBOL)
-                        close_price = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
-                        req = {
-                            "action": mt5.TRADE_ACTION_DEAL,
-                            "symbol": Config.SYMBOL,
-                            "volume": p.volume,
-                            "type": close_type,
-                            "position": p.ticket,
-                            "price": float(close_price),
-                            "deviation": 20,
-                            "magic": 234000,
-                            "comment": "Friday Liquidator Close",
-                            "type_time": mt5.ORDER_TIME_GTC,
-                            "type_filling": mt5.ORDER_FILLING_IOC,
-                        }
-                        mt5.order_send(req)
-                await asyncio.sleep(60) 
-                continue
+            tick_data = mt5.symbol_info_tick(Config.SYMBOL)
+            if tick_data is not None:
+                wib_tz = datetime.timezone(datetime.timedelta(hours=7))
+                now_wib = datetime.datetime.fromtimestamp(tick_data.time, tz=wib_tz)
+                
+                if now_wib.weekday() == 4 and now_wib.hour >= 3:
+                    logging.warning("[SEKRING] Friday Liquidator Active! Closing all positions.")
+                    self.supervisor.trigger_friday_liquidator()
+                    # Tutup seluruh posisi aktif via MT5
+                    open_positions = mt5.positions_get(symbol=Config.SYMBOL)
+                    if open_positions:
+                        for p in open_positions:
+                            close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                            tick = mt5.symbol_info_tick(Config.SYMBOL)
+                            close_price = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
+                            req = {
+                                "action": mt5.TRADE_ACTION_DEAL,
+                                "symbol": Config.SYMBOL,
+                                "volume": p.volume,
+                                "type": close_type,
+                                "position": p.ticket,
+                                "price": float(close_price),
+                                "deviation": 20,
+                                "magic": 234000,
+                                "comment": "Friday Liquidator Close",
+                                "type_time": mt5.ORDER_TIME_GTC,
+                                "type_filling": mt5.ORDER_FILLING_IOC,
+                            }
+                            mt5.order_send(req)
+                    await asyncio.sleep(60) 
+                    continue
                 
             # Cek status sekring Spread
             spread = check_spread(Config.SYMBOL)

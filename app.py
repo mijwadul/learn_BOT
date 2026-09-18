@@ -93,19 +93,25 @@ def start_system():
         with st.spinner("Menyelaraskan data inkremental terbaru dari broker ke database..."):
             st.session_state.data_miner.backfill_data(5000000)
             
-        df = st.session_state.data_miner.load_from_db()
+        total_chunks, train_gen = st.session_state.data_miner.load_train_chunks(split_ratio=TEMPORAL_SPLIT_RATIO)
         
-        if df is not None and not df.empty:
-            # Temporal Train-Test Split (80% Train / 20% Test Walk-Forward Standard)
-            split_idx = int(len(df) * TEMPORAL_SPLIT_RATIO)
-            train_df = df.iloc[:split_idx]
-            test_df = df.iloc[split_idx:]
-            
+        if total_chunks > 0 and train_gen is not None:
             st.session_state.supervisor.start_research()
-            st.session_state.researcher.train_models(train_df)
+            
+            progress_bar = st.progress(0, text="Memulai pelatihan Incremental Learning...")
+            def update_progress(chunk_idx, total):
+                pct = int((chunk_idx / total) * 100)
+                progress_bar.progress(pct, text=f"Melatih AI (Chunk {chunk_idx}/{total})...")
+                
+            st.session_state.researcher.train_models(train_gen, total_chunks=total_chunks, progress_callback=update_progress)
+            progress_bar.empty()
+            
+            test_df = st.session_state.data_miner.load_test_data(split_ratio=TEMPORAL_SPLIT_RATIO)
             
             st.session_state.supervisor.start_evaluation()
-            valid = st.session_state.gatekeeper.validate_model(test_df)
+            valid = False
+            if test_df is not None and not test_df.empty:
+                valid = st.session_state.gatekeeper.validate_model(test_df)
             
             st.session_state.supervisor.set_model_validity(valid)
             if valid:
@@ -586,15 +592,22 @@ with tab_incubator:
             
         st.markdown("### ⚡ Manual Incubator Trigger")
         if st.button("🚀 Latih Ulang AI (Train Models Now)", width="stretch"):
-            df_train_raw = st.session_state.data_miner.load_from_db()
-            if df_train_raw is not None and len(df_train_raw) > 500:
-                with st.spinner("Melatih model LightGBM Dual-Target pada data historis..."):
-                    # Temporal Train-Test Split (80% Train / 20% Test Walk-Forward Standard)
-                    split_idx = int(len(df_train_raw) * TEMPORAL_SPLIT_RATIO)
-                    train_df = df_train_raw.iloc[:split_idx]
-                    test_df = df_train_raw.iloc[split_idx:]
-                    st.session_state.researcher.train_models(train_df)
-                    valid = st.session_state.gatekeeper.validate_model(test_df)
+            total_chunks, train_gen = st.session_state.data_miner.load_train_chunks(split_ratio=TEMPORAL_SPLIT_RATIO)
+            if total_chunks > 0 and train_gen is not None:
+                with st.spinner("Mempersiapkan data pelatihan Incremental..."):
+                    progress_bar = st.progress(0, text="Memulai pelatihan Incremental Learning...")
+                    def update_progress(chunk_idx, total):
+                        pct = int((chunk_idx / total) * 100)
+                        progress_bar.progress(pct, text=f"Melatih AI (Chunk {chunk_idx}/{total})...")
+                        
+                    st.session_state.researcher.train_models(train_gen, total_chunks=total_chunks, progress_callback=update_progress)
+                    progress_bar.empty()
+                    
+                    test_df = st.session_state.data_miner.load_test_data(split_ratio=TEMPORAL_SPLIT_RATIO)
+                    
+                    valid = False
+                    if test_df is not None and not test_df.empty:
+                        valid = st.session_state.gatekeeper.validate_model(test_df)
                     st.session_state.supervisor.set_model_validity(valid)
                     if valid:
                         st.success("Pelatihan Selesai! Model LULUS uji Walk-Forward.")

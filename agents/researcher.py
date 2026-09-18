@@ -68,45 +68,77 @@ class ResearcherAgent:
         # Simpan fitur ATR_14 untuk analisis volatilitas di model
         return df
 
-    def train_models(self, df):
-        logging.info("Training LightGBM Dual-Target models with RLHF Sample Weighting...")
-        df = self.generate_targets(df)
-        df = df.dropna()
+    def train_models(self, data_generator, total_chunks=1, progress_callback=None):
+        import gc
+        logging.info("Training LightGBM Dual-Target models with RLHF Sample Weighting (Incremental Learning)...")
         
-        # Features (excluding target columns)
-        self.features = [col for col in df.columns if 'Target' not in col]
-        X = df[self.features]
+        self.model_normal = None
+        self.model_runner = None
         
-        y_normal = df['Target_Normal']
-        y_runner = df['Target_Runner']
-        
-        # RLHF (Human-in-the-Loop): Berikan sample weights lebih tinggi pada data yang sudah di-Approve
-        sample_weights = np.ones(len(df), dtype=float)
         try:
             from database import get_approved_setup_ids
             approved_ids = get_approved_setup_ids()
+        except Exception as e:
+            logging.warning(f"[RLHF] Tidak dapat memuat approved_setups untuk weighting: {e}")
+            approved_ids = []
+
+        chunk_idx = 1
+        for df in data_generator:
+            if df.empty:
+                continue
+                
+            df = self.generate_targets(df)
+            df = df.dropna()
+            
+            if df.empty:
+                continue
+                
+            # Features (excluding target columns)
+            self.features = [col for col in df.columns if 'Target' not in col]
+            X = df[self.features]
+            
+            y_normal = df['Target_Normal']
+            y_runner = df['Target_Runner']
+            
+            # RLHF
+            sample_weights = np.ones(len(df), dtype=float)
             if approved_ids:
                 matched_count = 0
                 for i in range(len(df)):
-                    # Format index sebagai string untuk dicocokkan dengan ID setup
                     row_id_str = str(df.index[i])
                     row_time_str = df.index[i].strftime("%Y-%m-%d %H:%M:%S") if hasattr(df.index[i], "strftime") else row_id_str
                     if row_id_str in approved_ids or row_time_str in approved_ids:
-                        sample_weights[i] = 5.0 # Bobot 5.0x untuk setup yang disetujui manusia
+                        sample_weights[i] = 5.0
                         matched_count += 1
-                logging.info(f"[RLHF] Ditemukan {matched_count} setup yang telah di-Approve. Diberi bobot prioritas 5.0x.")
-        except Exception as e:
-            logging.warning(f"[RLHF] Tidak dapat memuat approved_setups untuk weighting: {e}")
+                if matched_count > 0:
+                    logging.info(f"[RLHF] Ditemukan {matched_count} setup Approve di chunk {chunk_idx}.")
 
-        # Train Normal Model (dengan sample_weight RLHF)
-        self.model_normal = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
-        self.model_normal.fit(X, y_normal, sample_weight=sample_weights)
-        
-        # Train Runner Model (dengan sample_weight RLHF)
-        self.model_runner = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
-        self.model_runner.fit(X, y_runner, sample_weight=sample_weights)
-        
-        logging.info("Models trained successfully with RLHF weights.")
+            # Train Normal Model
+            if self.model_normal is None:
+                self.model_normal = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
+                self.model_normal.fit(X, y_normal, sample_weight=sample_weights)
+            else:
+                self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=self.model_normal)
+                
+            # Train Runner Model
+            if self.model_runner is None:
+                self.model_runner = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
+                self.model_runner.fit(X, y_runner, sample_weight=sample_weights)
+            else:
+                self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=self.model_runner)
+                
+            logging.info(f"Chunk {chunk_idx}/{total_chunks} processed.")
+            
+            if progress_callback:
+                progress_callback(chunk_idx, total_chunks)
+                
+            chunk_idx += 1
+            
+            # Garbage Collection
+            del df, X, y_normal, y_runner, sample_weights
+            gc.collect()
+            
+        logging.info("Models trained successfully with RLHF weights (Incremental).")
         return True
 
     def get_top_feature_contributions(self, X_row, top_n=3):
