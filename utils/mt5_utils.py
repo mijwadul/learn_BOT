@@ -1,0 +1,38 @@
+import MetaTrader5 as mt5
+import pandas as pd
+
+def init_mt5(server, login, password):
+    if login == 0 or not password:
+        # Connect to the currently active MT5 terminal
+        success = mt5.initialize()
+    else:
+        # Connect to a specific account
+        success = mt5.initialize(server=server, login=login, password=password)
+        
+    if not success:
+        print(f"initialize() failed, error code = {mt5.last_error()}")
+        return False
+    print("MT5 Initialized Successfully.")
+    return True
+
+def get_rates(symbol, timeframe_constant, n_candles=1000):
+    """
+    timeframe_constant: e.g. mt5.TIMEFRAME_M1
+    """
+    rates = mt5.copy_rates_from_pos(symbol, timeframe_constant, 0, n_candles)
+    if rates is None:
+        print(f"Failed to get rates for {symbol}, error = {mt5.last_error()}")
+        return None
+    
+    df = pd.DataFrame(rates)
+    df['time'] = pd.to_datetime(df['time'], unit='s')
+    return df
+
+def check_spread(symbol):
+    symbol_info = mt5.symbol_info(symbol)
+    if symbol_info is None:
+        return None
+    return symbol_info.spread
+
+def shutdown_mt5():
+    mt5.shutdown()

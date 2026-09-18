@@ -1,0 +1,11 @@
+MetaTrader5
+pandas
+numpy
+lightgbm
+xgboost
+scikit-learn
+streamlit
+SQLAlchemy
+psycopg2-binary
+asyncpg
+transitions
