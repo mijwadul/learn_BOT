@@ -42,6 +42,20 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+from sqlalchemy import text
+
 def get_db_size():
-    with Session(sync_engine) as session:
-        return session.query(func.count(MarketData.id)).scalar()
+    with sync_engine.connect() as conn:
+        result = conn.execute(text("SELECT COUNT(*) FROM market_data_merged"))
+        return result.scalar()
+
+def get_db_date_range():
+    with sync_engine.connect() as conn:
+        try:
+            result = conn.execute(text("SELECT MIN(time), MAX(time) FROM market_data_merged"))
+            row = result.fetchone()
+            if row:
+                return row[0], row[1]
+            return None, None
+        except:
+            return None, None

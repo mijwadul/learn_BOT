@@ -1,17 +1,30 @@
 import MetaTrader5 as mt5
 import pandas as pd
+import os
+import subprocess
 
-def init_mt5(server, login, password):
+def init_mt5(server, login, password, path=""):
+    kwargs = {}
+    if path and os.path.exists(path):
+        kwargs["path"] = path
+
     if login == 0 or not password:
         # Connect to the currently active MT5 terminal
-        success = mt5.initialize()
+        success = mt5.initialize(**kwargs)
     else:
         # Connect to a specific account
-        success = mt5.initialize(server=server, login=login, password=password)
+        success = mt5.initialize(server=server, login=login, password=password, **kwargs)
         
     if not success:
         print(f"initialize() failed, error code = {mt5.last_error()}")
         return False
+        
+    if path and os.path.exists(path):
+        try:
+            subprocess.Popen([path])
+        except Exception as e:
+            print(f"Failed to focus MT5: {e}")
+            
     print("MT5 Initialized Successfully.")
     return True
 

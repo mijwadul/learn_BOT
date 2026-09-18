@@ -108,12 +108,97 @@ class DataMinerAgent:
         return df_merged
 
     def backfill_data(self, total_candles=20000):
-        logging.info(f"Starting Historical Backfill for {total_candles} candles...")
-        df = self.fetch_and_merge_data(n_candles=total_candles)
-        if df is not None:
-            logging.info(f"Saving {len(df)} rows to database...")
-            # Gunakan pandas to_sql (Replace for now, can be 'append' for incremental)
-            df.to_sql('market_data_merged', con=sync_engine, if_exists='replace', index=True)
-            logging.info("Backfill complete.")
-            return len(df)
+        logging.info(f"Starting Historical Backfill / Incremental Download...")
+        try:
+            # Check schema first
+            query = "SELECT * FROM market_data_merged LIMIT 1"
+            sample_df = pd.read_sql(query, con=sync_engine)
+            if 'dist_Close_EMA50' not in sample_df.columns:
+                raise Exception("Outdated schema: missing dist_Close_EMA50")
+                
+            # Check last date in DB
+            query_max = "SELECT MAX(time) as last_time FROM market_data_merged"
+            last_date_df = pd.read_sql(query_max, con=sync_engine)
+            last_time = pd.to_datetime(last_date_df['last_time'].iloc[0])
+        except Exception as e:
+            logging.info(f"Existing table missing or outdated schema. Forcing full backfill. Detail: {e}")
+            last_time = pd.NaT
+
+        if pd.isna(last_time):
+            logging.info(f"No existing data found. Downloading {total_candles} candles.")
+            candles_to_fetch = total_candles
+            if_exists = 'append'
+        else:
+            # Make last_time timezone aware if it isn't
+            if last_time.tzinfo is None:
+                last_time = last_time.tz_localize('UTC')
+            now_utc = datetime.now(timezone.utc)
+            # Estimate missing M1 candles (diff in minutes)
+            missing_minutes = int((now_utc - last_time).total_seconds() / 60)
+            
+            # Tambahkan buffer
+            candles_to_fetch = missing_minutes + 100
+            
+            if candles_to_fetch < 100:
+                logging.info("Database is already up to date.")
+                return 0
+                
+            logging.info(f"Found existing data up to {last_time}. Fetching ~{candles_to_fetch} new candles.")
+            if_exists = 'append'
+
+        # Ensure we don't fetch more than total_candles if missing is huge
+        candles_to_fetch = min(candles_to_fetch, total_candles)
+        
+        df = self.fetch_and_merge_data(n_candles=candles_to_fetch)
+        
+        if df is not None and not df.empty:
+            if not pd.isna(last_time):
+                # Filter to only insert new rows
+                # Assumes df.index is tz-aware UTC
+                if df.index.tzinfo is None:
+                    df.index = df.index.tz_localize('UTC')
+                df = df[df.index > last_time]
+                
+            if not df.empty:
+                total_rows = len(df)
+                chunk_size = 50000
+                total_batches = (total_rows + chunk_size - 1) // chunk_size
+                logging.info(f"Saving {total_rows:,} new rows to database in {total_batches} batches (chunksize={chunk_size:,})...")
+
+                for batch_idx, start_idx in enumerate(range(0, total_rows, chunk_size), 1):
+                    end_idx = min(start_idx + chunk_size, total_rows)
+                    chunk_df = df.iloc[start_idx:end_idx]
+                    
+                    chunk_df.to_sql(
+                        'market_data_merged',
+                        con=sync_engine,
+                        if_exists='append',
+                        index=True,
+                        chunksize=chunk_size,
+                        method='multi'
+                    )
+                    
+                    pct = (end_idx / total_rows) * 100
+                    logging.info(
+                        f"[DB Progress] Batch {batch_idx}/{total_batches} selesai: "
+                        f"{end_idx:,}/{total_rows:,} baris ({pct:.1f}%) tersimpan ke database."
+                    )
+
+                logging.info("Backfill/Incremental complete.")
+                return len(df)
+            else:
+                logging.info("No new rows to insert after filtering.")
+                return 0
         return 0
+
+    def load_from_db(self):
+        logging.info("Loading all data from database for training...")
+        try:
+            df = pd.read_sql("SELECT * FROM market_data_merged ORDER BY time ASC", con=sync_engine, index_col='time')
+            # Konversi index kembali ke datetime UTC jika diperlukan (read_sql biasanya mengembalikan string jika SQLite/tidak ter-parse sempurna, namun psycopg2 parsing otomatis)
+            df.index = pd.to_datetime(df.index)
+            logging.info(f"Loaded {len(df)} rows from database.")
+            return df
+        except Exception as e:
+            logging.error(f"Failed to load data from database: {e}")
+            return None

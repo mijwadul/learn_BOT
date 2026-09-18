@@ -8,6 +8,7 @@ class Config:
     MT5_SERVER = os.getenv("MT5_SERVER", "Demo Server") # Ubah sesuai broker
     MT5_LOGIN = int(os.getenv("MT5_LOGIN", "0"))
     MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
+    MT5_PATH = os.getenv("MT5_PATH", "") # Path opsional ke terminal64.exe
     
     # PostgreSQL Configuration
     DB_USER = os.getenv("DB_USER", "postgres")

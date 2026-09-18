@@ -17,10 +17,41 @@ class ResearcherAgent:
         self.features = []
         
     def generate_targets(self, df):
-        # Contoh sederhana: Target Normal (RR 1:2), Target Runner (RR 1:5)
-        # Pada praktek nyata, ini menggunakan perhitungan ATR atau Lebar BB
-        df['Target_Normal'] = np.where(df['close'].shift(-5) > df['close'] + 2.0, 1, 0)
+        from utils.indicators import calculate_atr
+        df['ATR_14'] = calculate_atr(df, 14)
+        
+        closes = df['close'].values
+        highs = df['high'].values
+        lows = df['low'].values
+        atrs = df['ATR_14'].values
+        
+        n = len(df)
+        labels_normal = np.zeros(n)
+        
+        # Look forward up to 100 candles
+        for i in range(n):
+            if np.isnan(atrs[i]):
+                continue
+                
+            sl_dist = atrs[i]
+            tp_dist = sl_dist * 2.0
+            entry_price = closes[i]
+            
+            tp_level = entry_price + tp_dist
+            sl_level = entry_price - sl_dist
+            
+            for j in range(i + 1, min(i + 101, n)):
+                if lows[j] <= sl_level:
+                    labels_normal[i] = 0
+                    break
+                if highs[j] >= tp_level:
+                    labels_normal[i] = 1
+                    break
+                    
+        df['Target_Normal'] = labels_normal
         df['Target_Runner'] = np.where(df['close'].shift(-20) > df['close'] + 5.0, 1, 0)
+        
+        # Drop temporary ATR column if not used as feature, or keep it
         return df
 
     def train_models(self, df):
