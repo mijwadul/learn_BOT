@@ -140,8 +140,8 @@ class DataMinerAgent:
             # Check schema first
             query = "SELECT * FROM market_data_merged LIMIT 1"
             sample_df = pd.read_sql(query, con=sync_engine)
-            if 'dist_Close_EMA50' not in sample_df.columns:
-                raise Exception("Outdated schema: missing dist_Close_EMA50")
+            if 'upper_wick' not in sample_df.columns:
+                raise Exception("Outdated schema: missing upper_wick (candlestick pattern features)")
                 
             # Check last date in DB
             query_max = "SELECT MAX(time) as last_time FROM market_data_merged"
@@ -149,6 +149,12 @@ class DataMinerAgent:
             last_time = pd.to_datetime(last_date_df['last_time'].iloc[0])
         except Exception as e:
             logging.info(f"Existing table missing or outdated schema. Forcing full backfill. Detail: {e}")
+            from sqlalchemy import text
+            try:
+                with sync_engine.begin() as conn:
+                    conn.execute(text("DROP TABLE IF EXISTS market_data_merged"))
+            except Exception as drop_e:
+                pass
             last_time = pd.NaT
 
         if pd.isna(last_time):

@@ -49,4 +49,10 @@ def calculate_bbma(df):
     df['BB_Width'] = df['BB_Upper'] - df['BB_Lower']
     df['dist_LWMA_High_BB_Upper'] = df['LWMA_5_High'] - df['BB_Upper']
     
+    # Karakteristik Candlestick (Pola Ekor & Body)
+    df['upper_wick'] = df['high'] - np.maximum(df['open'], df['close'])
+    df['lower_wick'] = np.minimum(df['open'], df['close']) - df['low']
+    df['body_size'] = np.abs(df['close'] - df['open'])
+    df['candle_dir'] = np.where(df['close'] >= df['open'], 1, -1)
+    
     return df

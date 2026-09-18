@@ -93,6 +93,21 @@ def start_system():
         with st.spinner("Menyelaraskan data inkremental terbaru dari broker ke database..."):
             st.session_state.data_miner.backfill_data(5000000)
             
+        if st.session_state.researcher.load_models():
+            st.success("Model Checkpoint ditemukan! Melewati fase pelatihan dan validasi.")
+            st.session_state.supervisor.set_model_validity(True)
+            st.session_state.supervisor.start_live()
+            
+            if st.session_state.executor_thread is None or not st.session_state.executor_thread.is_alive():
+                st.session_state.executor_thread = threading.Thread(
+                    target=start_executor_loop, 
+                    args=(st.session_state.executor,), 
+                    daemon=True
+                )
+                st.session_state.executor_thread.start()
+            st.success("Sistem beroperasi dalam mode LIVE!")
+            return
+            
         total_chunks, train_gen = st.session_state.data_miner.load_train_chunks(split_ratio=TEMPORAL_SPLIT_RATIO)
         
         if total_chunks > 0 and train_gen is not None:
@@ -165,11 +180,14 @@ def render_candlestick_chart(
         return fig
 
     df_plot = df.copy()
+    if 'time' in df_plot.columns and df_plot.index.name == 'time':
+        df_plot.index.name = None
     if 'time' not in df_plot.columns and isinstance(df_plot.index, pd.DatetimeIndex):
         df_plot['time'] = df_plot.index
     elif 'time' in df_plot.columns:
         df_plot['time'] = pd.to_datetime(df_plot['time'])
 
+    df_plot = df_plot.reset_index(drop=True)
     df_plot = df_plot.sort_values('time').reset_index(drop=True)
 
     fig = go.Figure()
@@ -537,7 +555,7 @@ with tab_cmd:
         title=f"{Config.SYMBOL} ({tf_choice}) - Live Monitoring & Active Fuses",
         height=480
     )
-    st.plotly_chart(fig_cmd, width="stretch")
+    st.plotly_chart(fig_cmd, use_container_width=True)
 
     # Terminal Log
     st.markdown("---")
@@ -591,7 +609,16 @@ with tab_incubator:
             st.markdown(f"Status Validasi Terakhir: `{'✅ PASSED (LAYAK LIVE)' if valid_status else '⚠️ PENDING / REJECTED'}`")
             
         st.markdown("### ⚡ Manual Incubator Trigger")
-        if st.button("🚀 Latih Ulang AI (Train Models Now)", width="stretch"):
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            btn_train = st.button("🚀 Latih Ulang (Incremental)", use_container_width=True)
+        with col_btn2:
+            btn_force = st.button("🧹 Force Latih Ulang (Clean Slate)", use_container_width=True, type="primary")
+
+        if btn_train or btn_force:
+            if btn_force:
+                st.session_state.researcher.model_normal = None
+                st.session_state.researcher.model_runner = None
             total_chunks, train_gen = st.session_state.data_miner.load_train_chunks(split_ratio=TEMPORAL_SPLIT_RATIO)
             if total_chunks > 0 and train_gen is not None:
                 with st.spinner("Mempersiapkan data pelatihan Incremental..."):
@@ -638,7 +665,7 @@ with tab_incubator:
             paper_bgcolor="#0E1117",
             plot_bgcolor="#0E1117"
         )
-        st.plotly_chart(fig_fi, width="stretch")
+        st.plotly_chart(fig_fi, use_container_width=True)
     else:
         st.info("Visualisasi bobot fitur akan tersedia setelah model AI dilatih.")
 
@@ -658,6 +685,8 @@ with tab_incubator:
     if df_raw is not None and len(df_raw) > 200 and st.session_state.researcher.model_normal is not None:
         split_idx = int(len(df_raw) * TEMPORAL_SPLIT_RATIO)
         oos_df = df_raw.iloc[split_idx:].copy()
+        oos_df = st.session_state.researcher.generate_targets(oos_df)
+        oos_df = oos_df.dropna()
         features = st.session_state.researcher.features
         valid_cols = [c for c in features if c in oos_df.columns]
 
@@ -705,9 +734,9 @@ with tab_incubator:
                             trade_entries=entry_marker,
                             active_trade=entry_marker[0],
                             title=f"Setup OOS: {setup_id} ({action_type})",
-                            height=380
+                            height=600
                         )
-                        st.plotly_chart(fig_setup, width="stretch")
+                        st.plotly_chart(fig_setup, use_container_width=True)
 
                         btn_col1, btn_col2 = st.columns([0.3, 0.7])
                         with btn_col1:
@@ -752,8 +781,8 @@ with tab_incubator:
                     'probability': f"{s['prob']*100:.0f}%",
                     'ticket': f"SIM-{i+1}"
                 }]
-                fig_sim = render_candlestick_chart(dummy_df, trade_entries=marker, active_trade=marker[0], title=f"Setup {s_id}", height=360)
-                st.plotly_chart(fig_sim, width="stretch")
+                fig_sim = render_candlestick_chart(dummy_df, trade_entries=marker, active_trade=marker[0], title=f"Setup {s_id}", height=600)
+                st.plotly_chart(fig_sim, use_container_width=True)
                 if is_app:
                     st.success("✅ Setup ini Sudah Di-Approve")
                 else:
@@ -871,9 +900,9 @@ with tab_journal:
                             trade_entries=marker,
                             active_trade=marker[0],
                             title=f"Snapshot Black Box: {cur_entry['event_type']} Tiket #{cur_entry['tiket']} @ {cur_entry['harga']:.2f}",
-                            height=520
+                            height=600
                         )
-                        st.plotly_chart(fig_snap, width="stretch")
+                        st.plotly_chart(fig_snap, use_container_width=True)
                         chart_rendered = True
             except Exception as e:
                 logging.debug(f"Snapshot parse error: {e}")
@@ -894,9 +923,9 @@ with tab_journal:
                 trade_entries=sim_marker,
                 active_trade=sim_marker[0],
                 title=f"Snapshot Candlestick 50 M1 (Simulasi)",
-                height=520
+                height=600
             )
-            st.plotly_chart(fig_sim_chart, width="stretch")
+            st.plotly_chart(fig_sim_chart, use_container_width=True)
 
     st.markdown("---")
     st.markdown("### 📋 Riwayat Transaksi Lengkap (Database & Broker Deals)")

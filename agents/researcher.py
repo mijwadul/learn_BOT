@@ -3,6 +3,8 @@ import lightgbm as lgb
 from sklearn.model_selection import train_test_split
 import numpy as np
 import pandas as pd
+import os
+import joblib
 
 logging.basicConfig(level=logging.INFO)
 
@@ -16,6 +18,28 @@ class ResearcherAgent:
         self.model_normal = None
         self.model_runner = None
         self.features = []
+        
+    def save_models(self):
+        try:
+            os.makedirs("models", exist_ok=True)
+            if self.model_normal is not None:
+                joblib.dump(self.model_normal, "models/model_normal.pkl")
+            if self.model_runner is not None:
+                joblib.dump(self.model_runner, "models/model_runner.pkl")
+            logging.info("Model checkpoints saved to 'models/' directory.")
+        except Exception as e:
+            logging.error(f"Failed to save models: {e}")
+
+    def load_models(self):
+        try:
+            if os.path.exists("models/model_normal.pkl") and os.path.exists("models/model_runner.pkl"):
+                self.model_normal = joblib.load("models/model_normal.pkl")
+                self.model_runner = joblib.load("models/model_runner.pkl")
+                logging.info("Model checkpoints loaded successfully.")
+                return True
+        except Exception as e:
+            logging.error(f"Failed to load models: {e}")
+        return False
         
     def generate_targets(self, df):
         from utils.indicators import calculate_atr
@@ -93,8 +117,16 @@ class ResearcherAgent:
             if df.empty:
                 continue
                 
-            # Features (excluding target columns)
-            self.features = [col for col in df.columns if 'Target' not in col]
+            # Features (excluding target columns and absolute prices to prevent memorization/100% prob)
+            forbidden_exact = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
+            forbidden_cols = []
+            for tf in ['', '_m5', '_m15']:
+                for c in forbidden_exact:
+                    forbidden_cols.append(f"{c}{tf}")
+                for c in ['SMA_20', 'BB_Upper', 'BB_Lower', 'EMA_50', 'LWMA_5_High', 'LWMA_10_High', 'LWMA_5_Low', 'LWMA_10_Low']:
+                    forbidden_cols.append(f"{c}{tf}")
+
+            self.features = [col for col in df.columns if col not in forbidden_cols and 'Target' not in col]
             X = df[self.features]
             
             y_normal = df['Target_Normal']
@@ -113,16 +145,28 @@ class ResearcherAgent:
                 if matched_count > 0:
                     logging.info(f"[RLHF] Ditemukan {matched_count} setup Approve di chunk {chunk_idx}.")
 
+            # Parameter anti-overfitting
+            params = {
+                'n_estimators': 100,
+                'learning_rate': 0.05,
+                'max_depth': 4,
+                'num_leaves': 15,
+                'min_child_samples': 50,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'random_state': 42
+            }
+
             # Train Normal Model
             if self.model_normal is None:
-                self.model_normal = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
+                self.model_normal = lgb.LGBMClassifier(**params)
                 self.model_normal.fit(X, y_normal, sample_weight=sample_weights)
             else:
                 self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=self.model_normal)
                 
             # Train Runner Model
             if self.model_runner is None:
-                self.model_runner = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
+                self.model_runner = lgb.LGBMClassifier(**params)
                 self.model_runner.fit(X, y_runner, sample_weight=sample_weights)
             else:
                 self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=self.model_runner)
@@ -139,6 +183,7 @@ class ResearcherAgent:
             gc.collect()
             
         logging.info("Models trained successfully with RLHF weights (Incremental).")
+        self.save_models()
         return True
 
     def get_top_feature_contributions(self, X_row, top_n=3):

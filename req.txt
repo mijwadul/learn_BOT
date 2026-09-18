@@ -10,3 +10,4 @@ psycopg2-binary
 asyncpg
 transitions
 plotly>=5.18.0
+joblib
