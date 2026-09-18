@@ -19,23 +19,50 @@ class DataMinerAgent:
     
     def __init__(self, symbol=Config.SYMBOL):
         self.symbol = symbol
+        self._calendar_cache = pd.DataFrame(columns=['date', 'title'])
+        self._last_calendar_fetch = None
 
     def fetch_economic_calendar(self):
+        now = datetime.now(timezone.utc)
+        # 1. Gunakan cache jika baru saja diambil dalam 15 menit terakhir (mencegah spam request saat UI rerun)
+        if self._last_calendar_fetch is not None and (now - self._last_calendar_fetch).total_seconds() < 900:
+            if not self._calendar_cache.empty:
+                return self._calendar_cache
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
         try:
-            r = requests.get(Config.MACRO_JSON_URL)
+            r = requests.get(Config.MACRO_JSON_URL, headers=headers, timeout=5)
+            if r.status_code != 200:
+                logging.warning(f"Economic calendar HTTP status {r.status_code}. Menggunakan cache kalender.")
+                return self._calendar_cache
+
+            text_content = r.text.strip()
+            if not text_content or not text_content.startswith(("[", "{")):
+                logging.warning("Economic calendar response bukan format JSON yang valid. Menggunakan cache.")
+                return self._calendar_cache
+
             data = r.json()
+            if not isinstance(data, list):
+                return self._calendar_cache
+
             # Filter USD and High impact
-            events = [e for e in data if e['country'] == 'USD' and e['impact'] == 'High']
+            events = [e for e in data if isinstance(e, dict) and e.get('country') == 'USD' and e.get('impact') == 'High']
             if not events:
-                return pd.DataFrame()
-            
-            df_events = pd.DataFrame(events)
-            # JSON format usually provides iso format or similar for date
-            df_events['date'] = pd.to_datetime(df_events['date'], utc=True)
-            return df_events[['date', 'title']]
+                self._calendar_cache = pd.DataFrame(columns=['date', 'title'])
+            else:
+                df_events = pd.DataFrame(events)
+                df_events['date'] = pd.to_datetime(df_events['date'], utc=True)
+                self._calendar_cache = df_events[['date', 'title']]
+
+            self._last_calendar_fetch = now
+            return self._calendar_cache
         except Exception as e:
-            logging.error(f"Error fetching economic calendar: {e}")
-            return pd.DataFrame()
+            logging.warning(f"Gagal mengambil economic calendar ({e}). Menggunakan cache data kalender.")
+            return self._calendar_cache
 
     def merge_macro_data(self, df):
         events_df = self.fetch_economic_calendar()

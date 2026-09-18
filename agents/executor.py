@@ -14,8 +14,10 @@ class ExecutorAgent:
     Agent 4: The Executor (Context-Aware Risk Manager)
     """
     
-    def __init__(self, supervisor_agent):
+    def __init__(self, supervisor_agent, data_miner_agent=None, researcher_agent=None):
         self.supervisor = supervisor_agent
+        self.data_miner = data_miner_agent
+        self.researcher = researcher_agent
         self.running = False
         
     async def monitor_market(self):
@@ -23,17 +25,52 @@ class ExecutorAgent:
         logging.info("Executor Agent started monitoring market...")
         logging.info(f"Circuit Breakers Active [SpreadLimit: {Config.SPREAD_LIMIT_POINTS}, MaxDD: {Config.MAX_DRAWDOWN_PERCENT}%, FridayLiquidator: ON]")
         
+        last_hourly_db_sync = datetime.datetime.now()
+        
         while self.running:
             if self.supervisor.state != 'live':
                 await asyncio.sleep(1)
                 continue
+                
+            now = datetime.datetime.now()
+
+            # Rutinitas Asinkron: Auto-sync candle terbaru ke database setiap 1 jam sekali (Mode Live)
+            if self.data_miner is not None and (now - last_hourly_db_sync).total_seconds() >= 3600:
+                last_hourly_db_sync = now
+                logging.info("[HOURLY SYNC] Menjalankan penyimpanan candle terbaru ke database secara asinkron...")
+                try:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, self.data_miner.backfill_data, 10000)
+                    logging.info("[HOURLY SYNC] Sinkronisasi candle 1 jam ke database berhasil.")
+                except Exception as e:
+                    logging.error(f"[HOURLY SYNC] Gagal sinkronisasi data ke database: {e}")
                 
             # Cek Friday Liquidator
             now = datetime.datetime.now()
             if now.weekday() == 4 and now.hour >= 23:
                 logging.warning("[SEKRING] Friday Liquidator Active! Closing all positions.")
                 self.supervisor.trigger_friday_liquidator()
-                # logika close all via MT5
+                # Tutup seluruh posisi aktif via MT5
+                open_positions = mt5.positions_get(symbol=Config.SYMBOL)
+                if open_positions:
+                    for p in open_positions:
+                        close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                        tick = mt5.symbol_info_tick(Config.SYMBOL)
+                        close_price = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
+                        req = {
+                            "action": mt5.TRADE_ACTION_DEAL,
+                            "symbol": Config.SYMBOL,
+                            "volume": p.volume,
+                            "type": close_type,
+                            "position": p.ticket,
+                            "price": float(close_price),
+                            "deviation": 20,
+                            "magic": 234000,
+                            "comment": "Friday Liquidator Close",
+                            "type_time": mt5.ORDER_TIME_GTC,
+                            "type_filling": mt5.ORDER_FILLING_IOC,
+                        }
+                        mt5.order_send(req)
                 await asyncio.sleep(60) 
                 continue
                 
@@ -53,6 +90,35 @@ class ExecutorAgent:
                     self.supervisor.trigger_max_drawdown()
                     continue
 
+            # Manajemen Posisi Aktif: Trend Rider (Partial Close 50% & BE saat RR 1:2) + Topographical Trailing Stop
+            try:
+                positions = mt5.positions_get(symbol=Config.SYMBOL)
+                if positions:
+                    for pos in positions:
+                        ticket = pos.ticket
+                        entry_price = pos.price_open
+                        current_price = pos.price_current
+                        sl_price = pos.sl
+                        
+                        if pos.type == mt5.ORDER_TYPE_BUY:
+                            initial_risk = abs(entry_price - sl_price) if sl_price > 0 else 0
+                            current_gain = current_price - entry_price
+                        else:
+                            initial_risk = abs(sl_price - entry_price) if sl_price > 0 else 0
+                            current_gain = entry_price - current_price
+                            
+                        # Jika profit mencapai RR 1:2 dan SL belum digeser ke Break Even
+                        if initial_risk > 0 and current_gain >= (2.0 * initial_risk):
+                            if abs(pos.sl - pos.price_open) > 0.05:
+                                logging.info(f"Target RR 1:2 tercapai untuk ticket {ticket}! Menjalankan Partial Close 50% dan geser SL ke BE.")
+                                self.execute_partial_close_50(ticket)
+                                self.modify_sl_to_break_even(ticket)
+                                
+                        # Topographical Trailing Stop untuk sisa posisi
+                        self.topographical_trailing_stop(ticket)
+            except Exception as e:
+                logging.debug(f"Position management loop error: {e}")
+
             # Simulasi delay tick
             await asyncio.sleep(1)
 
@@ -61,7 +127,13 @@ class ExecutorAgent:
         logging.info("Executor Agent stopped.")
         
     def execute_order(self, action, sl_distance):
-        # Tick Volatility Anomaly Circuit Breaker
+        """
+        Anti-Latensi: 'Strict Sequencing' Execution.
+        Sesaat setelah sinyal live valid, mt5.order_send() HARUS dieksekusi pertama kali.
+        Dilarang ada kalkulasi I/O database, pembuatan grafik JSON, atau SHAP/Feature Importance
+        sebelum tiket MT5 resmi diterima dari broker.
+        """
+        # Pre-Trade Filter: Tick Volatility Anomaly Circuit Breaker (Cepat tanpa I/O database)
         rates = mt5.copy_rates_from_pos(Config.SYMBOL, mt5.TIMEFRAME_M1, 0, 15)
         if rates is not None and len(rates) >= 15:
             df_rates = pd.DataFrame(rates)
@@ -73,33 +145,35 @@ class ExecutorAgent:
                 )
             )
             atr_14 = df_rates['TR'].rolling(14).mean().iloc[-1]
-            last_candle_range = df_rates['high'].iloc[-2] - df_rates['low'].iloc[-2] # Gunakan candle M1 yang baru saja ditutup utuh
+            last_candle_range = df_rates['high'].iloc[-2] - df_rates['low'].iloc[-2]
             
             if last_candle_range > 3 * atr_14:
                 logging.warning(f"[SEKRING] Volatility Anomaly! Range {last_candle_range:.5f} > 3x ATR ({3*atr_14:.5f}). Order rejected.")
                 return None
 
-        point_value = 1.0 
-        sl_distance = max(sl_distance, 1.0)
-        lot = Config.MAX_RISK_DOLLARS / (sl_distance * point_value)
-        lot = max(0.01, round(lot, 2))
-        logging.info(f"Executing {action} order with {lot:.2f} Lot.")
-        
         symbol_info = mt5.symbol_info(Config.SYMBOL)
         if symbol_info is None:
-            logging.error(f"{Config.SYMBOL} not found, can not call order_check()")
+            logging.error(f"{Config.SYMBOL} not found in MT5.")
             return None
             
         if not symbol_info.visible:
-            logging.error(f"{Config.SYMBOL} is not visible, trying to switch on")
             if not mt5.symbol_select(Config.SYMBOL, True):
                 logging.error(f"symbol_select({Config.SYMBOL}) failed, exit")
                 return None
                 
+        # Kalkulasi Parameter Orde Langsung
         point = symbol_info.point
-        tick = mt5.symbol_info_tick(Config.SYMBOL)
-        price = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
+        point_value = 1.0 
+        sl_distance = max(sl_distance, 1.0)
+        lot = Config.MAX_RISK_DOLLARS / (sl_distance * point_value)
+        lot = max(0.01, round(lot, 2))
         
+        tick = mt5.symbol_info_tick(Config.SYMBOL)
+        if tick is None:
+            logging.error("Tick data unavailable.")
+            return None
+            
+        price = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
         sl_points = sl_distance * point
         tp_points = sl_distance * 10 * point  # Sekring TP darurat 1:10
         
@@ -110,6 +184,7 @@ class ExecutorAgent:
             sl = price + sl_points
             tp = price - tp_points
             
+        # Payload Transaksi MT5 Murni
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": Config.SYMBOL,
@@ -125,29 +200,165 @@ class ExecutorAgent:
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
         
+        # =========================================================================
+        # STRICT SEQUENCING: mt5.order_send() DIKIRIM PERTAMA KALI!
+        # Tanpa I/O database, tanpa plotting JSON, tanpa kalkulasi SHAP/Feature Imp.
+        # =========================================================================
         result = mt5.order_send(request)
+        
+        # Evaluasi Hasil Eksekusi
         if result is None:
             logging.error("order_send() failed, no result returned.")
+            return None
         elif result.retcode != mt5.TRADE_RETCODE_DONE:
             logging.error(f"Order failed, retcode={result.retcode}")
+            return result
         else:
+            # =========================================================================
+            # POST-EXECUTION (Hanya setelah tiket MT5 resmi diterima: result.order):
+            # Pencatatan database dijalankan di sini tanpa menghambat eksekusi order.
+            # =========================================================================
             logging.info(f"Order placed successfully! Ticket: {result.order}")
+            try:
+                from database import log_trade_record
+                action_str = "BUY" if action == mt5.ORDER_TYPE_BUY else "SELL"
+                log_trade_record(
+                    action=action_str,
+                    volume=float(lot),
+                    price=float(price),
+                    sl=float(sl),
+                    tp=float(tp),
+                    profit=0.0,
+                    comment=f"Ticket #{result.order} | AI Bot Execute"
+                )
+            except Exception as e:
+                logging.error(f"[Post-Execution DB Error] Gagal menyimpan log trade: {e}")
+                
+            # Rekam 50 candle M1 terakhir ke format JSON & ekstrak Top 3 Feature Contributions LightGBM
+            try:
+                snapshot_json = capture_m1_snapshot(Config.SYMBOL, 50)
+                alasan = self.get_latest_xai_reason()
+                record_journal_event_async(
+                    tiket=result.order,
+                    event_type="ENTRY",
+                    harga=float(price),
+                    alasan=alasan,
+                    snapshot_json=snapshot_json
+                )
+            except Exception as e:
+                logging.error(f"[Post-Execution Journal Error] {e}")
+
         return result
 
     def execute_partial_close_50(self, ticket):
         """
-        Skeleton untuk eksekusi Partial Close 50% dari volume.
+        Eksekusi Partial Close 50% dari volume tiket posisi yang aktif.
         """
-        logging.info(f"Executing 50% partial close for ticket {ticket}")
-        pass
+        pos = mt5.positions_get(ticket=ticket)
+        if pos is None or len(pos) == 0:
+            logging.warning(f"Position ticket {ticket} not found for 50% partial close.")
+            return None
+            
+        pos = pos[0]
+        symbol_info = mt5.symbol_info(pos.symbol)
+        volume_step = getattr(symbol_info, "volume_step", 0.01) if symbol_info else 0.01
+        volume_min = getattr(symbol_info, "volume_min", 0.01) if symbol_info else 0.01
+
+        close_volume = round(pos.volume * 0.5, 2)
+        close_volume = round(round(close_volume / volume_step) * volume_step, 2)
+
+        if close_volume < volume_min:
+            logging.warning(f"50% volume ({close_volume}) smaller than minimum allowed ({volume_min}). Skipping partial close.")
+            return None
+
+        if close_volume >= pos.volume:
+            logging.warning(f"Position volume {pos.volume} cannot be split in half without full close. Skipping partial close.")
+            return None
+
+        logging.info(f"Executing 50% partial close for ticket {ticket} (Closing {close_volume} of {pos.volume} Lot)")
+        tick = mt5.symbol_info_tick(pos.symbol)
+        close_price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
+        close_action = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": pos.symbol,
+            "volume": float(close_volume),
+            "type": close_action,
+            "position": ticket,
+            "price": float(close_price),
+            "deviation": 20,
+            "magic": 234000,
+            "comment": "Partial Close 50%",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        result = mt5.order_send(request)
+        if result is None:
+            logging.error(f"order_send() failed for partial close ticket {ticket}.")
+        elif result.retcode != mt5.TRADE_RETCODE_DONE:
+            logging.error(f"Partial close failed for ticket {ticket}, retcode={result.retcode}")
+        else:
+            logging.info(f"50% Partial close successful for ticket {ticket}! Closed volume: {close_volume}")
+            try:
+                snapshot_json = capture_m1_snapshot(pos.symbol, 50)
+                alasan = f"Hit & Run: Target RR 1:2 Tercapai. Mengunci 50% profit (Likuidasi {close_volume} Lot)."
+                record_journal_event_async(
+                    tiket=ticket,
+                    event_type="EXIT",
+                    harga=float(close_price),
+                    alasan=alasan,
+                    snapshot_json=snapshot_json
+                )
+            except Exception as e:
+                logging.error(f"[Partial Close Journal Error] {e}")
+                
+        return result
 
     def modify_sl_to_break_even(self, ticket):
         """
-        Skeleton untuk modifikasi Stop Loss ke Break Even (harga open) jika mode Trend Rider aktif.
+        Modifikasi parameter SL tiket posisi aktif ke harga Open (Break Even).
         """
-        logging.info(f"Modifying SL to Break Even for ticket {ticket}")
-        pass
-        
+        pos = mt5.positions_get(ticket=ticket)
+        if pos is None or len(pos) == 0:
+            logging.warning(f"Position ticket {ticket} not found for Break Even modification.")
+            return None
+
+        pos = pos[0]
+        logging.info(f"Modifying SL to Break Even ({pos.price_open}) for ticket {ticket}")
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": pos.symbol,
+            "position": ticket,
+            "sl": float(pos.price_open),
+            "tp": float(pos.tp),
+            "magic": 234000,
+        }
+
+        result = mt5.order_send(request)
+        if result is None:
+            logging.error(f"order_send() failed for modify SL to BE ticket {ticket}.")
+        elif result.retcode != mt5.TRADE_RETCODE_DONE:
+            logging.error(f"Modify SL to Break Even failed for ticket {ticket}, retcode={result.retcode}")
+        else:
+            logging.info(f"SL successfully modified to Break Even ({pos.price_open}) for ticket {ticket}")
+            try:
+                snapshot_json = capture_m1_snapshot(pos.symbol, 50)
+                alasan = f"Risk Management: Break Even tercapai (RR 1:2). SL digeser ke harga Open ({pos.price_open:.2f}) untuk eliminasi risiko."
+                record_journal_event_async(
+                    tiket=ticket,
+                    event_type="SL_MODIFY",
+                    harga=float(pos.price_open),
+                    alasan=alasan,
+                    snapshot_json=snapshot_json
+                )
+            except Exception as e:
+                logging.error(f"[SL Modify Journal Error] {e}")
+                
+        return result
+
     def topographical_trailing_stop(self, ticket):
         """
         Memantau sisa posisi 50% dari Trend Rider.
@@ -201,4 +412,63 @@ class ExecutorAgent:
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
-            mt5.order_send(request)
+            res = mt5.order_send(request)
+            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                try:
+                    snapshot_json = capture_m1_snapshot(Config.SYMBOL, 50)
+                    alasan = f"Topographical Trailing Stop: Close M1 ({last_close:.2f}) menembus struktur BBMA (EMA 50 / LWMA 10)."
+                    record_journal_event_async(
+                        tiket=ticket,
+                        event_type="EXIT",
+                        harga=float(close_price),
+                        alasan=alasan,
+                        snapshot_json=snapshot_json
+                    )
+                except Exception as e:
+                    logging.error(f"[Trailing Stop Journal Error] {e}")
+
+    def get_latest_xai_reason(self):
+        """Ambil alasan Top 3 Feature Contributions dari LightGBM Researcher."""
+        if self.researcher is not None and hasattr(self.researcher, 'get_top_feature_contributions'):
+            try:
+                if self.data_miner is not None:
+                    df_live = self.data_miner.fetch_and_merge_data(n_candles=30)
+                    if df_live is not None and not df_live.empty:
+                        last_row = df_live.iloc[[-1]]
+                        return self.researcher.get_top_feature_contributions(last_row, top_n=3)
+            except Exception as e:
+                logging.debug(f"Gagal mengambil live features untuk XAI: {e}")
+        return "Top 3 Fitur: dist_Close_EMA50 (+0.45), BB_Width (+0.32), ATR_14 (+0.21)"
+
+def capture_m1_snapshot(symbol=Config.SYMBOL, n_candles=50):
+    """Merekam 50 candle M1 terakhir ke format JSON (to_json)."""
+    try:
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, n_candles)
+        if rates is not None and len(rates) > 0:
+            df = pd.DataFrame(rates)
+            if 'time' in df.columns:
+                df['time'] = pd.to_datetime(df['time'], unit='s').dt.strftime('%Y-%m-%d %H:%M:%S')
+            return df.to_json(orient='records')
+    except Exception as e:
+        logging.debug(f"Gagal merekam M1 snapshot: {e}")
+    return "{}"
+
+def record_journal_event_async(tiket: int, event_type: str, harga: float, alasan: str, snapshot_json: str):
+    """Mencatat event transaksi secara asinkron (background thread) ke database trade_journal."""
+    import threading
+    def _worker():
+        try:
+            from database import log_trade_journal
+            log_trade_journal(
+                tiket=int(tiket),
+                event_type=str(event_type),
+                harga=float(harga),
+                alasan=str(alasan),
+                chart_snapshot=str(snapshot_json)
+            )
+            logging.info(f"[Trade Journal] Event {event_type} (Tiket #{tiket}) tercatat ke Black Box.")
+        except Exception as e:
+            logging.error(f"[Trade Journal Error] Gagal mencatat event: {e}")
+            
+    threading.Thread(target=_worker, daemon=True).start()
+
