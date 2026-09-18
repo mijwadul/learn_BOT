@@ -2,3 +2,18 @@
 __pycache__/
 venv/
 .DS_Store
+
+# Models / AI training results
+models/
+*.pkl
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# Streamlit
+.streamlit/secrets.toml
