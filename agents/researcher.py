@@ -230,3 +230,28 @@ class ResearcherAgent:
             pass
 
         return "BBMA Convergence & Momentum ATR"
+
+    def get_live_probabilities(self, X_live):
+        """
+        Membaca skor probabilitas seketika (live) dari model yang telah dilatih
+        (Digunakan untuk pemicu Dynamic Exhaustion Exit).
+        """
+        if self.model_normal is None or self.model_runner is None:
+            return {"normal": 0.5, "runner": 0.5}
+
+        # Filter kolom fitur yang valid
+        if isinstance(X_live, pd.Series):
+            X_live = pd.DataFrame([X_live])
+            
+        valid_cols = [c for c in self.features if c in X_live.columns]
+        if not valid_cols:
+            return {"normal": 0.5, "runner": 0.5}
+
+        try:
+            X_eval = X_live[valid_cols]
+            prob_normal = self.model_normal.predict_proba(X_eval)[0, 1]
+            prob_runner = self.model_runner.predict_proba(X_eval)[0, 1]
+            return {"normal": float(prob_normal), "runner": float(prob_runner)}
+        except Exception as e:
+            logging.debug(f"Gagal kalkulasi live probabilities: {e}")
+            return {"normal": 0.5, "runner": 0.5}

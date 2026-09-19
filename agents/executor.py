@@ -19,6 +19,7 @@ class ExecutorAgent:
         self.data_miner = data_miner_agent
         self.researcher = researcher_agent
         self.running = False
+        self.MAX_PYRAMIDING = 3
         
     async def monitor_market(self):
         self.running = True
@@ -26,6 +27,7 @@ class ExecutorAgent:
         logging.info(f"Circuit Breakers Active [SpreadLimit: {Config.SPREAD_LIMIT_POINTS}, MaxDD: {Config.MAX_DRAWDOWN_PERCENT}%, FridayLiquidator: ON]")
         
         last_hourly_db_sync = datetime.datetime.now()
+        last_exhaustion_check = datetime.datetime.now()
         
         while self.running:
             if self.supervisor.state != 'live':
@@ -94,7 +96,38 @@ class ExecutorAgent:
                     self.supervisor.trigger_max_drawdown()
                     continue
 
-            # Manajemen Posisi Aktif: Trend Rider (Partial Close 50% & BE saat RR 1:2) + Topographical Trailing Stop
+            # --- Dynamic Exhaustion Exit (Mass Liquidation) ---
+            if (now - last_exhaustion_check).total_seconds() >= 5:
+                last_exhaustion_check = now
+                if self.researcher is not None and self.data_miner is not None:
+                    try:
+                        positions = mt5.positions_get(symbol=Config.SYMBOL)
+                        if positions:
+                            runner_buys = [p for p in positions if p.type == mt5.ORDER_TYPE_BUY and "RUNNER" in p.comment.upper()]
+                            runner_sells = [p for p in positions if p.type == mt5.ORDER_TYPE_SELL and "RUNNER" in p.comment.upper()]
+                            
+                            if runner_buys or runner_sells:
+                                df_live = await asyncio.to_thread(self.data_miner.fetch_and_merge_data, 30)
+                                if df_live is not None and not df_live.empty:
+                                    last_row = df_live.iloc[[-1]]
+                                    probs = await asyncio.to_thread(self.researcher.get_live_probabilities, last_row)
+                                    prob_runner = probs.get("runner", 0.5)
+                                    
+                                    if runner_buys and prob_runner < 0.30:
+                                        logging.warning("[EXHAUSTION] Probabilitas SELL > 70%. Melikuidasi semua posisi BUY!")
+                                        for p in positions:
+                                            if p.type == mt5.ORDER_TYPE_BUY:
+                                                self.execute_full_close(p.ticket, reason="Trend Exhaustion Exit: Probabilitas berlawanan > 70%")
+                                                
+                                    if runner_sells and prob_runner > 0.70:
+                                        logging.warning("[EXHAUSTION] Probabilitas BUY > 70%. Melikuidasi semua posisi SELL!")
+                                        for p in positions:
+                                            if p.type == mt5.ORDER_TYPE_SELL:
+                                                self.execute_full_close(p.ticket, reason="Trend Exhaustion Exit: Probabilitas berlawanan > 70%")
+                    except Exception as e:
+                        logging.debug(f"[EXHAUSTION] Gagal cek: {e}")
+
+            # --- Manajemen Posisi Aktif (Anti-Wick & Partial Close) ---
             try:
                 positions = mt5.positions_get(symbol=Config.SYMBOL)
                 if positions:
@@ -111,15 +144,29 @@ class ExecutorAgent:
                             initial_risk = abs(sl_price - entry_price) if sl_price > 0 else 0
                             current_gain = entry_price - current_price
                             
-                        # Jika profit mencapai RR 1:2 dan SL belum digeser ke Break Even
-                        if initial_risk > 0 and current_gain >= (2.0 * initial_risk):
-                            if abs(pos.sl - pos.price_open) > 0.05:
-                                logging.info(f"Target RR 1:2 tercapai untuk ticket {ticket}! Menjalankan Partial Close 50% dan geser SL ke BE.")
-                                self.execute_partial_close_50(ticket)
-                                self.modify_sl_to_break_even(ticket)
-                                
-                        # Topographical Trailing Stop untuk sisa posisi
-                        self.topographical_trailing_stop(ticket)
+                        is_runner = "RUNNER" in pos.comment.upper()
+                        
+                        if not is_runner:
+                            # --- Logika HIT_RUN ---
+                            if initial_risk > 0:
+                                # BE saat RR 1:1 secepatnya
+                                if current_gain >= (1.0 * initial_risk) and abs(pos.sl - pos.price_open) > 0.05:
+                                    logging.info(f"[HIT_RUN] Target RR 1:1 tercapai untuk tiket {ticket}. Geser SL ke BE.")
+                                    self.modify_sl_to_break_even(ticket)
+                                # Full Close saat RR 1:2
+                                if current_gain >= (2.0 * initial_risk):
+                                    logging.info(f"[HIT_RUN] Target RR 1:2 tercapai untuk tiket {ticket}. Menjalankan Full Close.")
+                                    self.execute_full_close(ticket, reason="Hit & Run: Target RR 1:2 Tercapai (Full Close)")
+                        else:
+                            # --- Logika RUNNER ---
+                            if initial_risk > 0 and current_gain >= (2.0 * initial_risk):
+                                if abs(pos.sl - pos.price_open) > 0.05:
+                                    logging.info(f"[RUNNER] Target RR 1:2 tercapai untuk tiket {ticket}. Partial Close 50% & SL ke BE.")
+                                    self.execute_partial_close_50(ticket)
+                                    self.modify_sl_to_break_even(ticket)
+                                    
+                            # Trailing stop murni untuk sisa posisi Runner
+                            self.topographical_trailing_stop(ticket)
             except Exception as e:
                 logging.debug(f"Position management loop error: {e}")
 
@@ -130,13 +177,31 @@ class ExecutorAgent:
         self.running = False
         logging.info("Executor Agent stopped.")
         
-    def execute_order(self, action, sl_distance):
+    def execute_order(self, action, sl_distance, trade_mode="HIT_RUN"):
         """
         Anti-Latensi: 'Strict Sequencing' Execution.
         Sesaat setelah sinyal live valid, mt5.order_send() HARUS dieksekusi pertama kali.
         Dilarang ada kalkulasi I/O database, pembuatan grafik JSON, atau SHAP/Feature Importance
         sebelum tiket MT5 resmi diterima dari broker.
         """
+        # --- PYRAMIDING CHECK ---
+        positions = mt5.positions_get(symbol=Config.SYMBOL)
+        same_dir_positions = []
+        if positions:
+            for p in positions:
+                if p.type == action:
+                    same_dir_positions.append(p)
+                    
+        if len(same_dir_positions) >= getattr(self, 'MAX_PYRAMIDING', 3):
+            logging.warning(f"[PYRAMIDING] Limit {getattr(self, 'MAX_PYRAMIDING', 3)} tercapai. Order ditolak.")
+            return None
+            
+        for p in same_dir_positions:
+            if p.profit <= 0:
+                logging.warning(f"[PYRAMIDING] Posisi sebelumnya (Tiket {p.ticket}) belum profit. Scale-In ditolak.")
+                return None
+        # ------------------------
+        
         # Pre-Trade Filter: Tick Volatility Anomaly Circuit Breaker (Cepat tanpa I/O database)
         rates = mt5.copy_rates_from_pos(Config.SYMBOL, mt5.TIMEFRAME_M1, 0, 15)
         if rates is not None and len(rates) >= 15:
@@ -199,7 +264,7 @@ class ExecutorAgent:
             "tp": float(tp),
             "deviation": 20,
             "magic": 234000,
-            "comment": "AI Bot Execute",
+            "comment": f"AI {trade_mode}",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
@@ -223,6 +288,22 @@ class ExecutorAgent:
             # Pencatatan database dijalankan di sini tanpa menghambat eksekusi order.
             # =========================================================================
             logging.info(f"Order placed successfully! Ticket: {result.order}")
+            
+            # --- Trailing BE Berantai (Risk-Free Pyramid) ---
+            if len(same_dir_positions) > 0:
+                for p in same_dir_positions:
+                    logging.info(f"[PYRAMIDING] Menggeser SL posisi lama (Tiket {p.ticket}) ke Open Price posisi baru ({price}).")
+                    req_sl = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "symbol": Config.SYMBOL,
+                        "position": p.ticket,
+                        "sl": float(price),
+                        "tp": float(p.tp),
+                        "magic": 234000,
+                    }
+                    mt5.order_send(req_sl)
+            # ------------------------------------------------
+            
             try:
                 from database import log_trade_record
                 action_str = "BUY" if action == mt5.ORDER_TYPE_BUY else "SELL"
@@ -317,6 +398,56 @@ class ExecutorAgent:
                 )
             except Exception as e:
                 logging.error(f"[Partial Close Journal Error] {e}")
+                
+        return result
+
+    def execute_full_close(self, ticket, reason="Full Close"):
+        """
+        Eksekusi Penutupan Penuh (100% Volume) dari posisi aktif.
+        """
+        pos = mt5.positions_get(ticket=ticket)
+        if pos is None or len(pos) == 0:
+            logging.warning(f"Position ticket {ticket} not found for Full Close.")
+            return None
+            
+        pos = pos[0]
+        logging.info(f"Executing Full Close for ticket {ticket} ({pos.volume} Lot)")
+        tick = mt5.symbol_info_tick(pos.symbol)
+        close_price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
+        close_action = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": pos.symbol,
+            "volume": float(pos.volume),
+            "type": close_action,
+            "position": ticket,
+            "price": float(close_price),
+            "deviation": 20,
+            "magic": 234000,
+            "comment": "Full Close",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        result = mt5.order_send(request)
+        if result is None:
+            logging.error(f"order_send() failed for full close ticket {ticket}.")
+        elif result.retcode != mt5.TRADE_RETCODE_DONE:
+            logging.error(f"Full close failed for ticket {ticket}, retcode={result.retcode}")
+        else:
+            logging.info(f"Full close successful for ticket {ticket}! Closed volume: {pos.volume}")
+            try:
+                snapshot_json = capture_m1_snapshot(pos.symbol, 50)
+                record_journal_event_async(
+                    tiket=ticket,
+                    event_type="EXIT",
+                    harga=float(close_price),
+                    alasan=reason,
+                    snapshot_json=snapshot_json
+                )
+            except Exception as e:
+                logging.error(f"[Full Close Journal Error] {e}")
                 
         return result
 
