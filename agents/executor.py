@@ -113,17 +113,19 @@ class ExecutorAgent:
                                     probs = await asyncio.to_thread(self.researcher.get_live_probabilities, last_row)
                                     prob_runner = probs.get("runner", 0.5)
                                     
-                                    if runner_buys and prob_runner < 0.30:
-                                        logging.warning("[EXHAUSTION] Probabilitas SELL > 70%. Melikuidasi semua posisi BUY!")
+                                    threshold = getattr(Config, 'AI_RUNNER_EXIT_THRESHOLD', 35.0) / 100.0
+                                    
+                                    if runner_buys and prob_runner < threshold:
+                                        logging.warning(f"[AI_TRAILING] Probabilitas trend turun ke {prob_runner*100:.0f}%. Melikuidasi semua posisi BUY RUNNER!")
                                         for p in positions:
                                             if p.type == mt5.ORDER_TYPE_BUY:
-                                                self.execute_full_close(p.ticket, reason="Trend Exhaustion Exit: Probabilitas berlawanan > 70%")
+                                                self.execute_full_close(p.ticket, reason=f"AI Probability Trailing Stop triggered: Probabilitas turun ke {prob_runner*100:.0f}%")
                                                 
-                                    if runner_sells and prob_runner > 0.70:
-                                        logging.warning("[EXHAUSTION] Probabilitas BUY > 70%. Melikuidasi semua posisi SELL!")
+                                    if runner_sells and prob_runner > (1.0 - threshold):
+                                        logging.warning(f"[AI_TRAILING] Probabilitas pembalikan arah naik ke {prob_runner*100:.0f}%. Melikuidasi semua posisi SELL RUNNER!")
                                         for p in positions:
                                             if p.type == mt5.ORDER_TYPE_SELL:
-                                                self.execute_full_close(p.ticket, reason="Trend Exhaustion Exit: Probabilitas berlawanan > 70%")
+                                                self.execute_full_close(p.ticket, reason=f"AI Probability Trailing Stop triggered: Probabilitas naik ke {prob_runner*100:.0f}%")
                     except Exception as e:
                         logging.debug(f"[EXHAUSTION] Gagal cek: {e}")
 
@@ -165,8 +167,9 @@ class ExecutorAgent:
                                     self.execute_partial_close_50(ticket)
                                     self.modify_sl_to_break_even(ticket)
                                     
-                            # Trailing stop murni untuk sisa posisi Runner
-                            self.topographical_trailing_stop(ticket)
+                            # Trailing stop seketika kini ditangani oleh AI Probability Loop di atas
+                            # self.topographical_trailing_stop(ticket) # Dinonaktifkan, pindah ke AI Driven
+                            pass
             except Exception as e:
                 logging.debug(f"Position management loop error: {e}")
 
@@ -177,7 +180,7 @@ class ExecutorAgent:
         self.running = False
         logging.info("Executor Agent stopped.")
         
-    def execute_order(self, action, sl_distance, trade_mode="HIT_RUN"):
+    def execute_order(self, action, sl_distance, trade_mode="HIT_RUN", prob_runner=None):
         """
         Anti-Latensi: 'Strict Sequencing' Execution.
         Sesaat setelah sinyal live valid, mt5.order_send() HARUS dieksekusi pertama kali.
@@ -192,7 +195,10 @@ class ExecutorAgent:
                 if p.type == action:
                     same_dir_positions.append(p)
                     
-        if len(same_dir_positions) >= getattr(self, 'MAX_PYRAMIDING', 3):
+        # Tidak dibatasi jumlahnya (unlimited pyramid) JIKA probabilitas runner >= 70%
+        is_high_prob = prob_runner is not None and prob_runner >= 0.70
+        
+        if not is_high_prob and len(same_dir_positions) >= getattr(self, 'MAX_PYRAMIDING', 3):
             logging.warning(f"[PYRAMIDING] Limit {getattr(self, 'MAX_PYRAMIDING', 3)} tercapai. Order ditolak.")
             return None
             
@@ -521,12 +527,13 @@ class ExecutorAgent:
         lwma_high = df['LWMA_10_High'].iloc[-1]
         
         should_close = False
-        if pos.type == mt5.ORDER_TYPE_BUY:
-            if last_close < ema_50 or last_close < lwma_low:
-                should_close = True
-        elif pos.type == mt5.ORDER_TYPE_SELL:
-            if last_close > ema_50 or last_close > lwma_high:
-                should_close = True
+        # Logika exit konvensional dinonaktifkan (Pindah ke AI-Driven Probability)
+        # if pos.type == mt5.ORDER_TYPE_BUY:
+        #     if last_close < ema_50 or last_close < lwma_low:
+        #         should_close = True
+        # elif pos.type == mt5.ORDER_TYPE_SELL:
+        #     if last_close > ema_50 or last_close > lwma_high:
+        #         should_close = True
                 
         if should_close:
             logging.info(f"Topographical Trailing Stop triggered for ticket {ticket}. Closing position.")
