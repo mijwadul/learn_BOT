@@ -21,73 +21,116 @@ class DataMinerAgent:
         self.symbol = symbol
         self._calendar_cache = pd.DataFrame(columns=['date', 'title'])
         self._last_calendar_fetch = None
+        self._last_csv_mtime = 0
 
-    def fetch_economic_calendar(self):
+    def get_live_calendar(self):
+        """Ambil data minggu ini dari database lokal, dan auto-sync jika CSV MQL5 berubah."""
+        import os
+        from database import get_macro_data
+        
+        # Auto-sync logic: cek apakah EA MQL5 baru saja memperbarui file CSV
+        info = mt5.terminal_info()
+        if info is not None:
+            csv_path = os.path.join(info.data_path, "MQL5", "Files", "economic_calendar.csv")
+            if os.path.exists(csv_path):
+                current_mtime = os.path.getmtime(csv_path)
+                if current_mtime > getattr(self, '_last_csv_mtime', 0):
+                    self.sync_mt5_calendar_to_db()
+                    self._last_csv_mtime = current_mtime
+                    
         now = datetime.now(timezone.utc)
-        # 1. Gunakan cache jika baru saja diambil dalam 15 menit terakhir (mencegah spam request saat UI rerun)
-        if self._last_calendar_fetch is not None and (now - self._last_calendar_fetch).total_seconds() < 900:
-            if not self._calendar_cache.empty:
-                return self._calendar_cache
+        start_date = (now - pd.Timedelta(days=now.weekday())).strftime('%Y-%m-%d')
+        end_date = (now + pd.Timedelta(days=(6 - now.weekday()))).strftime('%Y-%m-%d')
+        return get_macro_data(start_date, end_date)
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
+    def sync_mt5_calendar_to_db(self):
+        """
+        Membaca file economic_calendar.csv yang dihasilkan oleh EA MQL5 (MacroBridge.mq5)
+        dan menyimpannya ke database PostgreSQL.
+        """
+        import os
+        from database import save_macro_data
+        
+        info = mt5.terminal_info()
+        if info is None:
+            logging.error("MT5 terminal_info is None. Pastikan MT5 berjalan.")
+            return pd.DataFrame()
+            
+        data_path = info.data_path
+        csv_path = os.path.join(data_path, "MQL5", "Files", "economic_calendar.csv")
+        
+        if not os.path.exists(csv_path):
+            logging.error(f"File {csv_path} tidak ditemukan. Pastikan MacroBridge.mq5 berjalan di MT5.")
+            return pd.DataFrame()
+            
         try:
-            r = requests.get(Config.MACRO_JSON_URL, headers=headers, timeout=5)
-            if r.status_code != 200:
-                logging.warning(f"Economic calendar HTTP status {r.status_code}. Menggunakan cache kalender.")
-                return self._calendar_cache
-
-            text_content = r.text.strip()
-            if not text_content or not text_content.startswith(("[", "{")):
-                logging.warning("Economic calendar response bukan format JSON yang valid. Menggunakan cache.")
-                return self._calendar_cache
-
-            data = r.json()
-            if not isinstance(data, list):
-                return self._calendar_cache
-
-            # Filter USD and High impact
-            events = [e for e in data if isinstance(e, dict) and e.get('country') == 'USD' and e.get('impact') == 'High']
-            if not events:
-                self._calendar_cache = pd.DataFrame(columns=['date', 'title'])
+            df = pd.read_csv(csv_path)
+            if df.empty:
+                return df
+                
+            # Rename columns to match save_macro_data expectations
+            if 'event_name' in df.columns:
+                df.rename(columns={'event_name': 'event'}, inplace=True)
+                
+            df['date'] = pd.to_datetime(df['date'], utc=True)
+            
+            # Hitung 'change' (Actual - Previous) jika kolom tersedia
+            if 'actual' in df.columns and 'previous' in df.columns:
+                df['change'] = df['actual'] - df['previous']
             else:
-                df_events = pd.DataFrame(events)
-                df_events['date'] = pd.to_datetime(df_events['date'], utc=True)
-                self._calendar_cache = df_events[['date', 'title']]
-
-            self._last_calendar_fetch = now
-            return self._calendar_cache
+                df['change'] = None
+                
+            # Save to db
+            count = save_macro_data(df)
+            logging.info(f"Berhasil mensinkronisasi {count} event dari MT5 ke database.")
+            return df
         except Exception as e:
-            logging.warning(f"Gagal mengambil economic calendar ({e}). Menggunakan cache data kalender.")
-            return self._calendar_cache
+            logging.error(f"Gagal membaca atau memproses CSV dari MT5: {e}")
+            return pd.DataFrame()
 
     def merge_macro_data(self, df):
-        events_df = self.fetch_economic_calendar()
+        # Gunakan rentang tanggal dari df untuk mengambil macro data dari DB
+        if df.empty:
+            return df
+            
+        start_date = df.index.min().strftime('%Y-%m-%d')
+        end_date = df.index.max().strftime('%Y-%m-%d')
+        
+        # Panggil get_live_calendar untuk memastikan data minggu ini ada (jika ini live data)
+        self.get_live_calendar()
+        
+        from database import get_macro_data
+        events_df = get_macro_data(start_date, end_date)
+        
         df['minutes_to_high_impact_news'] = 9999.0
+        df['actual_vs_estimate_surprise'] = 0.0
         
         if events_df.empty:
             return df
             
-        # Convert df index (which is MT5 time, roughly UTC+2/3) to UTC for diff
-        # Simplification: we'll treat MT5 time as UTC for this diff calculation just to demonstrate
-        df_times = df.index.tz_localize('UTC')
+        df_times = df.index
+        if df_times.tzinfo is None:
+            df_times = df_times.tz_localize('UTC')
         
         for idx, row in events_df.iterrows():
             event_time = row['date']
-            # difference in minutes
             diffs = (event_time - df_times).total_seconds() / 60.0
             
-            # only future events (diff >= 0)
+            # 1. minutes_to_high_impact_news (only future events diff >= 0)
             valid_mask = diffs >= 0
             if valid_mask.any():
-                # assign minimum time to news
                 df.loc[valid_mask, 'minutes_to_high_impact_news'] = np.minimum(
                     df.loc[valid_mask, 'minutes_to_high_impact_news'], 
                     diffs[valid_mask]
                 )
+                
+            # 2. actual_vs_estimate_surprise
+            if pd.notna(row.get('actual')) and pd.notna(row.get('estimate')):
+                surprise = float(row['actual']) - float(row['estimate'])
+                surprise_mask = (diffs <= 0) & (diffs >= -60)
+                if surprise_mask.any():
+                    df.loc[surprise_mask, 'actual_vs_estimate_surprise'] = surprise
+                    
         return df
 
     def fetch_and_merge_data(self, n_candles=2000):
@@ -134,7 +177,7 @@ class DataMinerAgent:
         logging.info(f"Data merged successfully. Shape: {df_merged.shape}")
         return df_merged
 
-    def backfill_data(self, total_candles=20000):
+    def backfill_data(self, total_candles=20000, progress_callback=None):
         logging.info(f"Starting Historical Backfill / Incremental Download...")
         try:
             # Check schema first
@@ -216,6 +259,9 @@ class DataMinerAgent:
                         f"[DB Progress] Batch {batch_idx}/{total_batches} selesai: "
                         f"{end_idx:,}/{total_rows:,} baris ({pct:.1f}%) tersimpan ke database."
                     )
+                    
+                    if progress_callback:
+                        progress_callback(batch_idx, total_batches, end_idx, total_rows)
 
                 logging.info("Backfill/Incremental complete.")
                 return len(df)

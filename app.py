@@ -90,8 +90,13 @@ def start_system():
         st.session_state.executor.researcher = st.session_state.researcher
         st.session_state.supervisor.start_ingestion()
         
-        with st.spinner("Menyelaraskan data inkremental terbaru dari broker ke database..."):
-            st.session_state.data_miner.backfill_data(5000000)
+        progress_bar = st.progress(0, text="Menyelaraskan data inkremental terbaru...")
+        def update_progress(batch_idx, total_batches, end_idx, total_rows):
+            pct = int((end_idx / total_rows) * 100)
+            progress_bar.progress(pct, text=f"Menyelaraskan data ({end_idx:,}/{total_rows:,} baris)...")
+            
+        st.session_state.data_miner.backfill_data(100000, progress_callback=update_progress)
+        progress_bar.empty()
             
         if st.session_state.researcher.load_models():
             st.success("Model Checkpoint ditemukan! Melewati fase pelatihan dan validasi.")
@@ -148,7 +153,13 @@ def start_system():
 
 def backfill_db():
     if init_mt5(Config.MT5_SERVER, Config.MT5_LOGIN, Config.MT5_PASSWORD, Config.MT5_PATH):
-        count = st.session_state.data_miner.backfill_data(5000000)
+        progress_bar = st.progress(0, text="Memulai penarikan data...")
+        def update_progress(batch_idx, total_batches, end_idx, total_rows):
+            pct = int((end_idx / total_rows) * 100)
+            progress_bar.progress(pct, text=f"Menyimpan data ({end_idx:,}/{total_rows:,} baris)...")
+            
+        count = st.session_state.data_miner.backfill_data(5000000, progress_callback=update_progress)
+        progress_bar.empty()
         st.success(f"Backfill berhasil! Menyimpan {count} baris data.")
 
 # ==========================================
@@ -440,6 +451,18 @@ with tab_cmd:
         if st.button("FORCE DATA BACKFILL", width="stretch"):
             with st.spinner("Menarik data historis dari broker... (mungkin butuh waktu beberapa saat)"):
                 backfill_db()
+                
+        st.markdown("---")
+        st.write("**Sync MT5 Calendar Bridge**")
+        st.caption("Pastikan MacroBridge.mq5 sedang berjalan di grafik MT5.")
+        
+        if st.button("FORCE SYNC FROM MT5 CSV", width="stretch"):
+            with st.spinner("Membaca file CSV dari MT5 dan menyimpan ke DB..."):
+                df = st.session_state.data_miner.sync_mt5_calendar_to_db()
+                if df is not None and not df.empty:
+                    st.success(f"Berhasil sinkronisasi {len(df)} jadwal High Impact dari MT5.")
+                else:
+                    st.warning("Gagal membaca CSV atau data kosong.")
 
     # System Status & Live Metrics
     with col2:
@@ -466,9 +489,23 @@ with tab_cmd:
         # Macro Radar
         st.markdown("---")
         st.write("**📡 Macro Radar**")
-        events_df = st.session_state.data_miner.fetch_economic_calendar()
+        events_df = st.session_state.data_miner.get_live_calendar()
         if not events_df.empty:
-            st.dataframe(events_df.head(3), hide_index=True, width="stretch")
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            upcoming = events_df[events_df['date'] > now_utc].sort_values('date')
+            
+            if not upcoming.empty:
+                next_event = upcoming.iloc[0]
+                time_to = next_event['date'] - now_utc
+                hours, remainder = divmod(time_to.total_seconds(), 3600)
+                minutes, _ = divmod(remainder, 60)
+                
+                st.info(f"⏳ **Next Event:** {next_event['event']} in **{int(hours)}h {int(minutes)}m**\n\n🗓️ {next_event['date'].strftime('%Y-%m-%d %H:%M UTC')}")
+            else:
+                st.success("Tugas selesai! Tidak ada lagi event High Impact minggu ini.")
+                
+            st.write("*Recent Events:*")
+            st.dataframe(events_df.tail(3), hide_index=True, width="stretch")
         else:
             st.write("Tidak ada High Impact News terdeteksi minggu ini.")
 
@@ -555,7 +592,7 @@ with tab_cmd:
         title=f"{Config.SYMBOL} ({tf_choice}) - Live Monitoring & Active Fuses",
         height=480
     )
-    st.plotly_chart(fig_cmd, use_container_width=True)
+    st.plotly_chart(fig_cmd, width="stretch")
 
     # Terminal Log
     st.markdown("---")
@@ -611,9 +648,9 @@ with tab_incubator:
         st.markdown("### ⚡ Manual Incubator Trigger")
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
-            btn_train = st.button("🚀 Latih Ulang (Incremental)", use_container_width=True)
+            btn_train = st.button("🚀 Latih Ulang (Incremental)", width="stretch")
         with col_btn2:
-            btn_force = st.button("🧹 Force Latih Ulang (Clean Slate)", use_container_width=True, type="primary")
+            btn_force = st.button("🧹 Force Latih Ulang (Clean Slate)", width="stretch", type="primary")
 
         if btn_train or btn_force:
             if btn_force:
@@ -649,6 +686,10 @@ with tab_incubator:
     if st.session_state.researcher.model_normal is not None and hasattr(st.session_state.researcher.model_normal, 'feature_importances_'):
         features = st.session_state.researcher.features
         importances = st.session_state.researcher.model_normal.feature_importances_
+        
+        if len(features) != len(importances):
+            features = [f"Feature_{i}" for i in range(len(importances))]
+            
         fi_df = pd.DataFrame({'Feature': features, 'Importance': importances}).sort_values('Importance', ascending=True).tail(15)
         
         fig_fi = go.Figure(go.Bar(
@@ -665,7 +706,7 @@ with tab_incubator:
             paper_bgcolor="#0E1117",
             plot_bgcolor="#0E1117"
         )
-        st.plotly_chart(fig_fi, use_container_width=True)
+        st.plotly_chart(fig_fi, width="stretch")
     else:
         st.info("Visualisasi bobot fitur akan tersedia setelah model AI dilatih.")
 
@@ -681,7 +722,14 @@ with tab_incubator:
 
     min_prob = st.slider("Minimal Probabilitas Setup OOS (Filter Ambang Batas):", min_value=0.50, max_value=0.99, value=0.65, step=0.01)
 
-    df_raw = st.session_state.data_miner.load_from_db()
+    if st.button("🔍 Muat Data OOS untuk Analisis RLHF", use_container_width=True):
+        st.session_state.load_rlhf = True
+
+    df_raw = None
+    if st.session_state.get('load_rlhf', False):
+        with st.spinner("Memuat data historis dari database..."):
+            df_raw = st.session_state.data_miner.load_from_db()
+
     if df_raw is not None and len(df_raw) > 200 and st.session_state.researcher.model_normal is not None:
         split_idx = int(len(df_raw) * TEMPORAL_SPLIT_RATIO)
         oos_df = df_raw.iloc[split_idx:].copy()
@@ -699,7 +747,7 @@ with tab_incubator:
 
             if not high_prob_df.empty:
                 # Tampilkan SEMUA setup OOS yang lolos batas (tanpa batasan jumlah)
-                for idx_num, (setup_time, row) in enumerate(high_prob_df.iterrows()):
+                for idx_num, (setup_time, row) in enumerate(high_prob_df.head(50).iterrows()):
                     setup_id = setup_time.strftime("%Y-%m-%d %H:%M:%S") if hasattr(setup_time, "strftime") else str(setup_time)
                     prob_pct = f"{row['prob']*100:.1f}%"
                     is_approved = setup_id in approved_ids
@@ -736,7 +784,7 @@ with tab_incubator:
                             title=f"Setup OOS: {setup_id} ({action_type})",
                             height=600
                         )
-                        st.plotly_chart(fig_setup, use_container_width=True)
+                        st.plotly_chart(fig_setup, width="stretch")
 
                         btn_col1, btn_col2 = st.columns([0.3, 0.7])
                         with btn_col1:
@@ -782,7 +830,7 @@ with tab_incubator:
                     'ticket': f"SIM-{i+1}"
                 }]
                 fig_sim = render_candlestick_chart(dummy_df, trade_entries=marker, active_trade=marker[0], title=f"Setup {s_id}", height=600)
-                st.plotly_chart(fig_sim, use_container_width=True)
+                st.plotly_chart(fig_sim, width="stretch")
                 if is_app:
                     st.success("✅ Setup ini Sudah Di-Approve")
                 else:
@@ -902,7 +950,7 @@ with tab_journal:
                             title=f"Snapshot Black Box: {cur_entry['event_type']} Tiket #{cur_entry['tiket']} @ {cur_entry['harga']:.2f}",
                             height=600
                         )
-                        st.plotly_chart(fig_snap, use_container_width=True)
+                        st.plotly_chart(fig_snap, width="stretch")
                         chart_rendered = True
             except Exception as e:
                 logging.debug(f"Snapshot parse error: {e}")
@@ -925,7 +973,7 @@ with tab_journal:
                 title=f"Snapshot Candlestick 50 M1 (Simulasi)",
                 height=600
             )
-            st.plotly_chart(fig_sim_chart, use_container_width=True)
+            st.plotly_chart(fig_sim_chart, width="stretch")
 
     st.markdown("---")
     st.markdown("### 📋 Riwayat Transaksi Lengkap (Database & Broker Deals)")

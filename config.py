@@ -22,7 +22,7 @@ class Config:
     SYNC_DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     
     # Trading Configurations
-    MACRO_JSON_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    MACRO_JSON_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json" # Akan segera ditinggalkan
     SYMBOL = "XAUUSDm" # Contoh symbol default
     MAGIC_NUMBER = 123456
     MAX_RISK_DOLLARS = 10.0 # Toleransi batas rugi per transaksi ($)

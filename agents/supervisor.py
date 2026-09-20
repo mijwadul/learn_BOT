@@ -17,7 +17,7 @@ class SupervisorAgent:
         self.machine.add_transition(trigger='start_ingestion', source='*', dest='ingestion')
         self.machine.add_transition(trigger='start_research', source='ingestion', dest='research')
         self.machine.add_transition(trigger='start_evaluation', source='research', dest='evaluation')
-        self.machine.add_transition(trigger='start_live', source='evaluation', dest='live', conditions=['is_model_valid'])
+        self.machine.add_transition(trigger='start_live', source=['evaluation', 'ingestion'], dest='live', conditions=['is_model_valid'])
         self.machine.add_transition(trigger='fail_evaluation', source='evaluation', dest='research')
         
         # Circuit Breakers

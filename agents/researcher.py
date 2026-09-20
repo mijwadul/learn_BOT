@@ -35,6 +35,12 @@ class ResearcherAgent:
             if os.path.exists("models/model_normal.pkl") and os.path.exists("models/model_runner.pkl"):
                 self.model_normal = joblib.load("models/model_normal.pkl")
                 self.model_runner = joblib.load("models/model_runner.pkl")
+                
+                if hasattr(self.model_normal, 'feature_name_'):
+                    self.features = list(self.model_normal.feature_name_)
+                elif hasattr(self.model_normal, 'booster_'):
+                    self.features = self.model_normal.booster_.feature_name()
+                
                 logging.info("Model checkpoints loaded successfully.")
                 return True
         except Exception as e:
@@ -42,6 +48,7 @@ class ResearcherAgent:
         return False
         
     def generate_targets(self, df):
+        logging.info("Generating dynamic ATR-based targets...")
         from utils.indicators import calculate_atr
         df['ATR_14'] = calculate_atr(df, 14)
         
@@ -129,6 +136,8 @@ class ResearcherAgent:
             self.features = [col for col in df.columns if col not in forbidden_cols and 'Target' not in col]
             X = df[self.features]
             
+            logging.info(f"Chunk {chunk_idx}/{total_chunks}: Extracting {len(self.features)} features for training.")
+            
             y_normal = df['Target_Normal']
             y_runner = df['Target_Runner']
             
@@ -183,6 +192,21 @@ class ResearcherAgent:
             gc.collect()
             
         logging.info("Models trained successfully with RLHF weights (Incremental).")
+        
+        # Log Top 10 Feature Importances
+        if hasattr(self.model_normal, 'feature_importances_') and self.features:
+            try:
+                importances = self.model_normal.feature_importances_
+                top_indices = np.argsort(importances)[-10:][::-1]
+                logging.info("=== TOP 10 FEATURE IMPORTANCES ===")
+                for rank, idx in enumerate(top_indices, 1):
+                    feat_name = self.features[idx]
+                    feat_imp = importances[idx]
+                    logging.info(f"{rank}. {feat_name}: {feat_imp}")
+                logging.info("==================================")
+            except Exception as e:
+                logging.debug(f"Failed to log feature importances: {e}")
+                
         self.save_models()
         return True
 

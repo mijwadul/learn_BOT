@@ -39,7 +39,8 @@ class GatekeeperAgent:
         acc_normal = accuracy_score(y_normal_oos, pred_normal)
         acc_runner = accuracy_score(y_runner_oos, pred_runner)
         
-        logging.info(f"OOS Accuracy - Normal: {acc_normal:.2f}, Runner: {acc_runner:.2f}")
+        logging.info(f"OOS Accuracy - Normal: {acc_normal:.2f} (Threshold: >0.50)")
+        logging.info(f"OOS Accuracy - Runner: {acc_runner:.2f} (Threshold: >0.50)")
         
         # Threshold kelulusan (Contoh 50% untuk dummy baseline)
         if acc_normal > 0.50 and acc_runner > 0.50:

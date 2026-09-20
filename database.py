@@ -60,6 +60,21 @@ class TradeJournal(Base):
     alasan = Column(String) # Alasan AI / Top 3 Feature Contributions
     chart_snapshot = Column(String) # JSON 50 M1 candles
 
+class EconomicEvent(Base):
+    __tablename__ = "economic_events"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(String, index=True, unique=True)
+    date = Column(DateTime, index=True)
+    country = Column(String)
+    event_name = Column(String)
+    currency = Column(String)
+    estimate = Column(Float, nullable=True)
+    previous = Column(Float, nullable=True)
+    actual = Column(Float, nullable=True)
+    change = Column(Float, nullable=True)
+    impact = Column(String)
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -205,4 +220,64 @@ def get_trade_journal_entries(limit: int = 100):
         return df
     except Exception as e:
         print(f"Failed to read trade journal: {e}")
+        return pd.DataFrame()
+
+# ==========================================
+# MACRO DATA: ECONOMIC CALENDAR CACHE
+# ==========================================
+def save_macro_data(events_df):
+    """Simpan data jadwal kalender ekonomi ke database untuk cache."""
+    try:
+        Base.metadata.create_all(sync_engine)
+        import pandas as pd
+        if events_df.empty:
+            return 0
+            
+        with Session(sync_engine) as session:
+            count = 0
+            for _, row in events_df.iterrows():
+                event_id_val = f"{row['date']}_{row['event']}"
+                
+                # Check if exists to update actual if needed
+                existing = session.query(EconomicEvent).filter(EconomicEvent.event_id == event_id_val).first()
+                if existing:
+                    # Update if actual is now available
+                    if pd.notna(row.get('actual')) and existing.actual is None:
+                        existing.actual = float(row['actual'])
+                        if pd.notna(row.get('change')):
+                            existing.change = float(row['change'])
+                else:
+                    new_event = EconomicEvent(
+                        event_id=event_id_val,
+                        date=row['date'],
+                        country=row.get('country', ''),
+                        event_name=row.get('event', ''),
+                        currency=row.get('currency', ''),
+                        estimate=float(row['estimate']) if pd.notna(row.get('estimate')) else None,
+                        previous=float(row['previous']) if pd.notna(row.get('previous')) else None,
+                        actual=float(row['actual']) if pd.notna(row.get('actual')) else None,
+                        change=float(row['change']) if pd.notna(row.get('change')) else None,
+                        impact=row.get('impact', '')
+                    )
+                    session.add(new_event)
+                    count += 1
+                    
+            session.commit()
+            return count
+    except Exception as e:
+        print(f"Failed to save macro data to DB: {e}")
+        return 0
+
+def get_macro_data(start_date: str, end_date: str):
+    """Ambil data kalender ekonomi dari cache database."""
+    import pandas as pd
+    try:
+        Base.metadata.create_all(sync_engine)
+        query = f"SELECT * FROM economic_events WHERE date >= '{start_date}' AND date <= '{end_date}' ORDER BY date ASC"
+        df = pd.read_sql(query, con=sync_engine)
+        if not df.empty and 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], utc=True)
+        return df
+    except Exception as e:
+        print(f"Failed to read macro data from DB: {e}")
         return pd.DataFrame()
