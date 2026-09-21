@@ -150,7 +150,9 @@ class DataMinerAgent:
         df_m15.set_index('time', inplace=True)
 
         # Feature engineering BBMA per timeframe
+        from utils.indicators import calculate_atr
         df_m1 = calculate_bbma(df_m1)
+        df_m1['ATR_14'] = calculate_atr(df_m1, 14)
         df_m5 = calculate_bbma(df_m5)
         df_m15 = calculate_bbma(df_m15)
         

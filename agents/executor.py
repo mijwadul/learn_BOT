@@ -24,10 +24,11 @@ class ExecutorAgent:
     async def monitor_market(self):
         self.running = True
         logging.info("Executor Agent started monitoring market...")
-        logging.info(f"Circuit Breakers Active [SpreadLimit: {Config.SPREAD_LIMIT_POINTS}, MaxDD: {Config.MAX_DRAWDOWN_PERCENT}%, FridayLiquidator: ON]")
+        logging.info(f"Circuit Breakers Active [SpreadLimit: Dynamic (Base {Config.SPREAD_LIMIT_POINTS}), MaxDD: {Config.MAX_DRAWDOWN_PERCENT}%, FridayLiquidator: ON]")
         
         last_hourly_db_sync = datetime.datetime.now()
         last_exhaustion_check = datetime.datetime.now()
+        last_signal_check = datetime.datetime.now()
         
         while self.running:
             if self.supervisor.state != 'live':
@@ -145,6 +146,33 @@ class ExecutorAgent:
                                                 self.execute_full_close(p.ticket, reason=f"AI Probability Trailing Stop triggered: Probabilitas naik ke {prob_runner*100:.0f}%")
                     except Exception as e:
                         logging.debug(f"[EXHAUSTION] Gagal cek: {e}")
+
+            # --- AI Signal Generation & Execution ---
+            if (now - last_signal_check).total_seconds() >= 10:
+                last_signal_check = now
+                if self.researcher is not None and self.data_miner is not None:
+                    try:
+                        df_live = await asyncio.to_thread(self.data_miner.fetch_and_merge_data, 30)
+                        if df_live is not None and not df_live.empty:
+                            last_row = df_live.iloc[[-1]]
+                            probs = await asyncio.to_thread(self.researcher.get_live_probabilities, last_row)
+                            prob_normal = probs.get("normal", 0.5)
+                            prob_runner = probs.get("runner", 0.5)
+                            
+                            max_prob = max(prob_normal, prob_runner)
+                            
+                            if max_prob >= 0.70:
+                                row_data = last_row.iloc[0]
+                                dist = row_data.get('dist_Close_EMA50', 10.0)
+                                action_type = mt5.ORDER_TYPE_BUY if dist >= 0 else mt5.ORDER_TYPE_SELL
+                                
+                                sl_dist = max(abs(dist), 5.0)
+                                trade_mode = "RUNNER" if prob_runner >= prob_normal else "HIT_RUN"
+                                
+                                logging.info(f"[SIGNAL] Valid Entry Detected! Normal: {prob_normal:.2f}, Runner: {prob_runner:.2f}. Mode: {trade_mode}")
+                                self.execute_order(action_type, sl_dist, trade_mode=trade_mode, prob_runner=prob_runner)
+                    except Exception as e:
+                        logging.debug(f"[SIGNAL_CHECK] Error fetching/predicting: {e}")
 
             # --- Manajemen Posisi Aktif (Anti-Wick & Partial Close) ---
             try:
