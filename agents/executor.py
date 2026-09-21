@@ -321,11 +321,22 @@ class ExecutorAgent:
             risk_modifier = 1.5 # Agresif jika win rate sangat baik
             logging.info(f"[RISK] Win rate super ({win_rate*100:.0f}%), meningkatkan risiko 50%")
             
-        point = symbol_info.point
-        point_value = 1.0 
-        sl_distance = max(sl_distance, 1.0)
+        # --- Formula Sizing Berbasis Uang (Risk) ---
+        # Contoh user: Jika risk $10, dan jarak SL adalah 500 poin ($5.00 absolut), maka lot harus 0.02 (di XAUUSD).
+        tick_value = symbol_info.trade_tick_value
+        tick_size = symbol_info.trade_tick_size
         
-        lot = (Config.MAX_RISK_DOLLARS * risk_modifier) / (sl_distance * point_value)
+        lot = 0.01
+        if tick_size > 0 and tick_value > 0:
+            # Nilai uang riil untuk setiap 1 poin (absolut) per 1 lot standar
+            money_per_unit = tick_value / tick_size
+            
+            # Total kerugian jika kita open 1 lot penuh untuk jarak SL ini
+            loss_for_one_lot = sl_distance * money_per_unit
+            
+            if loss_for_one_lot > 0:
+                lot = (Config.MAX_RISK_DOLLARS * risk_modifier) / loss_for_one_lot
+                
         lot = max(0.01, round(lot, 2))
         
         tick = mt5.symbol_info_tick(Config.SYMBOL)
@@ -334,15 +345,17 @@ class ExecutorAgent:
             return None
             
         price = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
-        sl_points = sl_distance * point
-        tp_points = sl_distance * 10 * point  # Sekring TP darurat 1:10
+        # sl_distance sudah berupa selisih harga absolut (misal $5.00), bukan poin.
+        # Jadi kita tidak perlu mengalikannya dengan symbol_info.point
+        sl_abs = float(sl_distance)
+        tp_abs = float(sl_distance * 10)  # Sekring TP darurat 1:10
         
         if action == mt5.ORDER_TYPE_BUY:
-            sl = price - sl_points
-            tp = price + tp_points
+            sl = price - sl_abs
+            tp = price + tp_abs
         else:
-            sl = price + sl_points
-            tp = price - tp_points
+            sl = price + sl_abs
+            tp = price - tp_abs
             
         # Payload Transaksi MT5 Murni
         request = {
