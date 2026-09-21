@@ -179,25 +179,18 @@ class DataMinerAgent:
 
     def backfill_data(self, total_candles=20000, progress_callback=None):
         logging.info(f"Starting Historical Backfill / Incremental Download...")
+        sample_df = None
         try:
             # Check schema first
             query = "SELECT * FROM market_data_merged LIMIT 1"
             sample_df = pd.read_sql(query, con=sync_engine)
-            if 'upper_wick' not in sample_df.columns:
-                raise Exception("Outdated schema: missing upper_wick (candlestick pattern features)")
                 
             # Check last date in DB
             query_max = "SELECT MAX(time) as last_time FROM market_data_merged"
             last_date_df = pd.read_sql(query_max, con=sync_engine)
             last_time = pd.to_datetime(last_date_df['last_time'].iloc[0])
         except Exception as e:
-            logging.info(f"Existing table missing or outdated schema. Forcing full backfill. Detail: {e}")
-            from sqlalchemy import text
-            try:
-                with sync_engine.begin() as conn:
-                    conn.execute(text("DROP TABLE IF EXISTS market_data_merged"))
-            except Exception as drop_e:
-                pass
+            logging.info(f"Existing table missing or empty. Detail: {e}")
             last_time = pd.NaT
 
         if pd.isna(last_time):
@@ -226,6 +219,32 @@ class DataMinerAgent:
         candles_to_fetch = min(candles_to_fetch, total_candles)
         
         df = self.fetch_and_merge_data(n_candles=candles_to_fetch)
+        
+        if df is not None and sample_df is not None:
+            missing_cols = set(df.columns) - set(sample_df.columns)
+            if missing_cols:
+                from sqlalchemy import text
+                try:
+                    print(f"[*] Terdeteksi ada {len(missing_cols)} kolom baru yang belum ada di database: {missing_cols}")
+                    with sync_engine.begin() as conn:
+                        for col in missing_cols:
+                            dtype_str = str(df[col].dtype)
+                            if 'float' in dtype_str:
+                                sql_type = 'FLOAT'
+                            elif 'int' in dtype_str:
+                                sql_type = 'BIGINT'
+                            elif 'bool' in dtype_str:
+                                sql_type = 'BOOLEAN'
+                            else:
+                                sql_type = 'TEXT'
+                            
+                            print(f"[*] Menambahkan kolom baru: ALTER TABLE market_data_merged ADD COLUMN \"{col}\" {sql_type}")
+                            logging.info(f"Adding missing column '{col}' ({sql_type}) to market_data_merged.")
+                            conn.execute(text(f'ALTER TABLE market_data_merged ADD COLUMN "{col}" {sql_type}'))
+                    print("[*] Semua kolom baru berhasil ditambahkan ke database!")
+                except Exception as e:
+                    print(f"[!] GAGAL menambahkan kolom: {e}")
+                    logging.error(f"Failed to add missing columns to database: {e}")
         
         if df is not None and not df.empty:
             if not pd.isna(last_time):

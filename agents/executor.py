@@ -82,8 +82,16 @@ class ExecutorAgent:
                 
             # Cek status sekring Spread
             spread = check_spread(Config.SYMBOL)
-            if spread is not None and spread > Config.SPREAD_LIMIT_POINTS:
-                logging.warning(f"[SEKRING] Eksekusi ditolak: Spread {spread} poin melebihi batas {Config.SPREAD_LIMIT_POINTS}")
+            rates_spread = mt5.copy_rates_from_pos(Config.SYMBOL, mt5.TIMEFRAME_M1, 0, 15)
+            if rates_spread is not None and len(rates_spread) >= 15:
+                df_spread = pd.DataFrame(rates_spread)
+                avg_spread = df_spread['spread'].mean()
+                dynamic_spread_limit = max(Config.SPREAD_LIMIT_POINTS, int(avg_spread * 2.5))
+            else:
+                dynamic_spread_limit = Config.SPREAD_LIMIT_POINTS
+                
+            if spread is not None and spread > dynamic_spread_limit:
+                logging.warning(f"[SEKRING] Eksekusi ditolak: Spread {spread} poin melebihi batas adaptif {dynamic_spread_limit}")
                 await asyncio.sleep(5)
                 continue
                 
@@ -113,8 +121,17 @@ class ExecutorAgent:
                                     probs = await asyncio.to_thread(self.researcher.get_live_probabilities, last_row)
                                     prob_runner = probs.get("runner", 0.5)
                                     
-                                    threshold = getattr(Config, 'AI_RUNNER_EXIT_THRESHOLD', 35.0) / 100.0
+                                    # Dynamic Exhaustion Threshold (Berdasarkan Kekuatan Tren ADX)
+                                    from utils.indicators import calculate_adx
+                                    df_live['adx'] = calculate_adx(df_live, 14)
+                                    adx_val = df_live['adx'].iloc[-1]
                                     
+                                    threshold = 0.35 # Base 35%
+                                    if not np.isnan(adx_val):
+                                        if adx_val > 35:
+                                            threshold = 0.20 # Tren Sangat Kuat: Toleransi tinggi terhadap noise
+                                        elif adx_val < 20:
+                                            threshold = 0.45 # Tren Lemah/Choppy: Sensitif, likuidasi secepatnya
                                     if runner_buys and prob_runner < threshold:
                                         logging.warning(f"[AI_TRAILING] Probabilitas trend turun ke {prob_runner*100:.0f}%. Melikuidasi semua posisi BUY RUNNER!")
                                         for p in positions:
@@ -148,6 +165,18 @@ class ExecutorAgent:
                             
                         is_runner = "RUNNER" in pos.comment.upper()
                         
+                        # --- Dynamic TP Multiplier berdasarkan Tren (ADX) ---
+                        tp_multiplier = 2.0
+                        rates_tp = mt5.copy_rates_from_pos(Config.SYMBOL, mt5.TIMEFRAME_M1, 0, 30)
+                        if rates_tp is not None and len(rates_tp) >= 30:
+                            df_tp = pd.DataFrame(rates_tp)
+                            from utils.indicators import calculate_adx
+                            df_tp['adx'] = calculate_adx(df_tp, 14)
+                            adx_val = df_tp['adx'].iloc[-1]
+                            if not np.isnan(adx_val):
+                                if adx_val > 40: tp_multiplier = 3.0
+                                elif adx_val < 20: tp_multiplier = 1.5
+
                         if not is_runner:
                             # --- Logika HIT_RUN ---
                             if initial_risk > 0:
@@ -155,15 +184,15 @@ class ExecutorAgent:
                                 if current_gain >= (1.0 * initial_risk) and abs(pos.sl - pos.price_open) > 0.05:
                                     logging.info(f"[HIT_RUN] Target RR 1:1 tercapai untuk tiket {ticket}. Geser SL ke BE.")
                                     self.modify_sl_to_break_even(ticket)
-                                # Full Close saat RR 1:2
-                                if current_gain >= (2.0 * initial_risk):
-                                    logging.info(f"[HIT_RUN] Target RR 1:2 tercapai untuk tiket {ticket}. Menjalankan Full Close.")
-                                    self.execute_full_close(ticket, reason="Hit & Run: Target RR 1:2 Tercapai (Full Close)")
+                                # Full Close saat RR dinamis tercapai
+                                if current_gain >= (tp_multiplier * initial_risk):
+                                    logging.info(f"[HIT_RUN] Target RR 1:{tp_multiplier} tercapai untuk tiket {ticket}. Menjalankan Full Close.")
+                                    self.execute_full_close(ticket, reason=f"Hit & Run: Target RR 1:{tp_multiplier} Tercapai (Full Close)")
                         else:
                             # --- Logika RUNNER ---
-                            if initial_risk > 0 and current_gain >= (2.0 * initial_risk):
+                            if initial_risk > 0 and current_gain >= (tp_multiplier * initial_risk):
                                 if abs(pos.sl - pos.price_open) > 0.05:
-                                    logging.info(f"[RUNNER] Target RR 1:2 tercapai untuk tiket {ticket}. Partial Close 50% & SL ke BE.")
+                                    logging.info(f"[RUNNER] Target RR 1:{tp_multiplier} tercapai untuk tiket {ticket}. Partial Close 50% & SL ke BE.")
                                     self.execute_partial_close_50(ticket)
                                     self.modify_sl_to_break_even(ticket)
                                     
@@ -187,31 +216,20 @@ class ExecutorAgent:
         Dilarang ada kalkulasi I/O database, pembuatan grafik JSON, atau SHAP/Feature Importance
         sebelum tiket MT5 resmi diterima dari broker.
         """
-        # --- PYRAMIDING CHECK ---
-        positions = mt5.positions_get(symbol=Config.SYMBOL)
-        same_dir_positions = []
-        if positions:
-            for p in positions:
-                if p.type == action:
-                    same_dir_positions.append(p)
-                    
-        # Tidak dibatasi jumlahnya (unlimited pyramid) JIKA probabilitas runner >= 70%
-        is_high_prob = prob_runner is not None and prob_runner >= 0.70
-        
-        if not is_high_prob and len(same_dir_positions) >= getattr(self, 'MAX_PYRAMIDING', 3):
-            logging.warning(f"[PYRAMIDING] Limit {getattr(self, 'MAX_PYRAMIDING', 3)} tercapai. Order ditolak.")
-            return None
-            
-        for p in same_dir_positions:
-            if p.profit <= 0:
-                logging.warning(f"[PYRAMIDING] Posisi sebelumnya (Tiket {p.ticket}) belum profit. Scale-In ditolak.")
-                return None
-        # ------------------------
-        
-        # Pre-Trade Filter: Tick Volatility Anomaly Circuit Breaker (Cepat tanpa I/O database)
-        rates = mt5.copy_rates_from_pos(Config.SYMBOL, mt5.TIMEFRAME_M1, 0, 15)
-        if rates is not None and len(rates) >= 15:
+        # --- PYRAMIDING & VOLATILITY CHECK ---
+        rates = mt5.copy_rates_from_pos(Config.SYMBOL, mt5.TIMEFRAME_M1, 0, 30)
+        current_adx = 20.0
+        if rates is not None and len(rates) >= 30:
             df_rates = pd.DataFrame(rates)
+            from utils.indicators import calculate_adx
+            df_rates['adx'] = calculate_adx(df_rates, 14)
+            current_adx = df_rates['adx'].iloc[-1]
+            if np.isnan(current_adx): current_adx = 20.0
+            
+            # Dynamic Pyramiding Limit based on ADX (Trend Strength)
+            self.MAX_PYRAMIDING = max(1, min(5, int(current_adx / 10)))
+            
+            # Volatility Anomaly Circuit Breaker (Dynamic)
             df_rates['TR'] = np.maximum(
                 df_rates['high'] - df_rates['low'],
                 np.maximum(
@@ -226,6 +244,26 @@ class ExecutorAgent:
                 logging.warning(f"[SEKRING] Volatility Anomaly! Range {last_candle_range:.5f} > 3x ATR ({3*atr_14:.5f}). Order rejected.")
                 return None
 
+        positions = mt5.positions_get(symbol=Config.SYMBOL)
+        same_dir_positions = []
+        if positions:
+            for p in positions:
+                if p.type == action:
+                    same_dir_positions.append(p)
+                    
+        # Tidak dibatasi jumlahnya (unlimited pyramid) JIKA probabilitas runner >= 70%
+        is_high_prob = prob_runner is not None and prob_runner >= 0.70
+        
+        if not is_high_prob and len(same_dir_positions) >= getattr(self, 'MAX_PYRAMIDING', 3):
+            logging.warning(f"[PYRAMIDING] Limit dinamis {getattr(self, 'MAX_PYRAMIDING', 3)} (ADX: {current_adx:.1f}) tercapai. Order ditolak.")
+            return None
+            
+        for p in same_dir_positions:
+            if p.profit <= 0:
+                logging.warning(f"[PYRAMIDING] Posisi sebelumnya (Tiket {p.ticket}) belum profit. Scale-In ditolak.")
+                return None
+        # ------------------------
+
         symbol_info = mt5.symbol_info(Config.SYMBOL)
         if symbol_info is None:
             logging.error(f"{Config.SYMBOL} not found in MT5.")
@@ -236,11 +274,30 @@ class ExecutorAgent:
                 logging.error(f"symbol_select({Config.SYMBOL}) failed, exit")
                 return None
                 
-        # Kalkulasi Parameter Orde Langsung
+        # Kalkulasi Parameter Orde Langsung (Kelly-Lite Dynamic Risk)
+        win_rate = 0.5
+        try:
+            from database import get_recent_trade_logs
+            logs_df = get_recent_trade_logs(50)
+            if not logs_df.empty:
+                wins = len(logs_df[logs_df['profit'] > 0])
+                win_rate = wins / len(logs_df)
+        except Exception:
+            pass
+            
+        risk_modifier = 1.0
+        if win_rate < 0.40:
+            risk_modifier = 0.5 # Defensif (potong risiko separuh) jika win rate buruk
+            logging.info(f"[RISK] Win rate buruk ({win_rate*100:.0f}%), memotong risiko 50%")
+        elif win_rate > 0.65:
+            risk_modifier = 1.5 # Agresif jika win rate sangat baik
+            logging.info(f"[RISK] Win rate super ({win_rate*100:.0f}%), meningkatkan risiko 50%")
+            
         point = symbol_info.point
         point_value = 1.0 
         sl_distance = max(sl_distance, 1.0)
-        lot = Config.MAX_RISK_DOLLARS / (sl_distance * point_value)
+        
+        lot = (Config.MAX_RISK_DOLLARS * risk_modifier) / (sl_distance * point_value)
         lot = max(0.01, round(lot, 2))
         
         tick = mt5.symbol_info_tick(Config.SYMBOL)

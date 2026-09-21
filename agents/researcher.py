@@ -99,19 +99,58 @@ class ResearcherAgent:
         # Simpan fitur ATR_14 untuk analisis volatilitas di model
         return df
 
+    def optimize_hyperparameters(self, X, y, sample_weights, n_trials=20):
+        import optuna
+        from sklearn.metrics import accuracy_score
+        
+        # Split subset of data for fast evaluation
+        X_train, X_val, y_train, y_val, sw_train, sw_val = train_test_split(
+            X, y, sample_weights, test_size=0.2, shuffle=False
+        )
+
+        def objective(trial):
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 50, 150),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+                'max_depth': trial.suggest_int('max_depth', 3, 7),
+                'num_leaves': trial.suggest_int('num_leaves', 10, 31),
+                'min_child_samples': trial.suggest_int('min_child_samples', 20, 100),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+                'random_state': 42,
+                'verbose': -1
+            }
+            
+            model = lgb.LGBMClassifier(**params)
+            model.fit(X_train, y_train, sample_weight=sw_train)
+            preds = model.predict(X_val)
+            acc = accuracy_score(y_val, preds)
+            return acc
+            
+        study = optuna.create_study(direction='maximize')
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study.optimize(objective, n_trials=n_trials)
+        
+        return study.best_params
+
     def train_models(self, data_generator, total_chunks=1, progress_callback=None):
         import gc
-        logging.info("Training LightGBM Dual-Target models with RLHF Sample Weighting (Incremental Learning)...")
+        logging.info("Training LightGBM Dual-Target models with RLHF & PnL Feedback (Optuna Auto-Tuning)...")
         
         self.model_normal = None
         self.model_runner = None
         
+        best_params_normal = None
+        best_params_runner = None
+        
         try:
-            from database import get_approved_setup_ids
+            from database import get_approved_setup_ids, get_historical_pnl_feedback
             approved_ids = get_approved_setup_ids()
+            pnl_df = get_historical_pnl_feedback()
         except Exception as e:
-            logging.warning(f"[RLHF] Tidak dapat memuat approved_setups untuk weighting: {e}")
+            logging.warning(f"[PnL Feedback] Tidak dapat memuat data historis: {e}")
             approved_ids = []
+            pnl_df = pd.DataFrame()
 
         chunk_idx = 1
         for df in data_generator:
@@ -154,28 +193,53 @@ class ResearcherAgent:
                 if matched_count > 0:
                     logging.info(f"[RLHF] Ditemukan {matched_count} setup Approve di chunk {chunk_idx}.")
 
-            # Parameter anti-overfitting
-            params = {
-                'n_estimators': 100,
-                'learning_rate': 0.05,
-                'max_depth': 4,
-                'num_leaves': 15,
-                'min_child_samples': 50,
-                'subsample': 0.8,
-                'colsample_bytree': 0.8,
-                'random_state': 42
+            # PnL Feedback Loop (Real Live Trade Loss = Penalty, Profit = Reward)
+            if not pnl_df.empty:
+                time_col = df['time'] if 'time' in df.columns else df.index
+                df_time_floor = pd.to_datetime(time_col).dt.floor('Min')
+                pnl_time_floor = pnl_df['time'].dt.floor('Min')
+                
+                matched_pnl = 0
+                for pnl_idx, pnl_row in pnl_df.iterrows():
+                    match_idx = np.where(df_time_floor == pnl_time_floor[pnl_idx])[0]
+                    if len(match_idx) > 0:
+                        idx = match_idx[0]
+                        if pnl_row['profit'] < 0:
+                            sample_weights[idx] = 0.5 # Penalti ringan (bukan 0.1) agar model tetap memperhitungkan kondisi pasar
+                        elif pnl_row['profit'] > 0:
+                            sample_weights[idx] = 1.5 # Reward diseimbangkan menjadi 1.5
+                        matched_pnl += 1
+                if matched_pnl > 0:
+                    logging.info(f"[PnL Feedback] Diterapkan pada {matched_pnl} eksekusi dari riwayat live.")
+
+            # Optuna Auto-Tuning di Chunk Pertama
+            if chunk_idx == 1 and len(X) > 100:
+                logging.info(f"Chunk {chunk_idx}: Menjalankan Optuna Auto-Tuning untuk 20 iterasi...")
+                best_params_normal = self.optimize_hyperparameters(X, y_normal, sample_weights, n_trials=20)
+                best_params_runner = self.optimize_hyperparameters(X, y_runner, sample_weights, n_trials=20)
+                logging.info(f"[Optuna] Parameter Terbaik Normal: {best_params_normal}")
+                logging.info(f"[Optuna] Parameter Terbaik Runner: {best_params_runner}")
+                
+            params_n = best_params_normal if best_params_normal else {
+                'n_estimators': 100, 'learning_rate': 0.05, 'max_depth': 4, 'num_leaves': 15,
+                'min_child_samples': 50, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
             }
+            params_r = best_params_runner if best_params_runner else params_n
+            
+            # Tambahkan verbose = -1 agar tidak berisik
+            params_n['verbose'] = -1
+            params_r['verbose'] = -1
 
             # Train Normal Model
             if self.model_normal is None:
-                self.model_normal = lgb.LGBMClassifier(**params)
+                self.model_normal = lgb.LGBMClassifier(**params_n)
                 self.model_normal.fit(X, y_normal, sample_weight=sample_weights)
             else:
                 self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=self.model_normal)
                 
             # Train Runner Model
             if self.model_runner is None:
-                self.model_runner = lgb.LGBMClassifier(**params)
+                self.model_runner = lgb.LGBMClassifier(**params_r)
                 self.model_runner.fit(X, y_runner, sample_weight=sample_weights)
             else:
                 self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=self.model_runner)

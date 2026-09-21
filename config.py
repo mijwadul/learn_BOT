@@ -28,4 +28,4 @@ class Config:
     MAX_RISK_DOLLARS = 10.0 # Toleransi batas rugi per transaksi ($)
     MAX_DRAWDOWN_PERCENT = 30.0 # Max drawdown reset JIKA menyentuh 30% dari ekuitas
     SPREAD_LIMIT_POINTS = 400 # Blokir eksekusi jika spread > 400 poin
-    AI_RUNNER_EXIT_THRESHOLD = 35.0 # Batas probabilitas AI untuk menutup posisi Runner (%)
+    AI_NORMAL_ENTRY_THRESHOLD = 75.0 # Batas minimal probabilitas AI untuk mengizinkan OP baru (%)

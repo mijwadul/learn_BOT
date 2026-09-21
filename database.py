@@ -132,6 +132,21 @@ def get_recent_trade_logs(limit: int = 100):
         print(f"Failed to read trade logs from DB: {e}")
         return pd.DataFrame()
 
+def get_historical_pnl_feedback():
+    """Ambil riwayat transaksi lengkap untuk PnL Feedback Loop pada AI Researcher."""
+    import pandas as pd
+    try:
+        Base.metadata.create_all(sync_engine)
+        # Ambil max 10000 trade terakhir
+        query = "SELECT time, profit, action FROM trade_logs WHERE action IN ('BUY', 'SELL') ORDER BY time DESC LIMIT 10000"
+        df = pd.read_sql(query, con=sync_engine)
+        if not df.empty and 'time' in df.columns:
+            df['time'] = pd.to_datetime(df['time'])
+        return df
+    except Exception as e:
+        print(f"Failed to fetch historical PnL feedback: {e}")
+        return pd.DataFrame()
+
 # ==========================================
 # RLHF: APPROVED SETUPS HELPERS
 # ==========================================

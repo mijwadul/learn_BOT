@@ -19,6 +19,27 @@ def calculate_atr(df, length=14):
     df_copy['TR'] = df_copy[['H-L', 'H-PC', 'L-PC']].max(axis=1)
     return df_copy['TR'].rolling(window=length).mean()
 
+def calculate_adx(df, length=14):
+    df_copy = df.copy()
+    df_copy['up_move'] = df_copy['high'] - df_copy['high'].shift(1)
+    df_copy['down_move'] = df_copy['low'].shift(1) - df_copy['low']
+    
+    df_copy['+dm'] = np.where((df_copy['up_move'] > df_copy['down_move']) & (df_copy['up_move'] > 0), df_copy['up_move'], 0.0)
+    df_copy['-dm'] = np.where((df_copy['down_move'] > df_copy['up_move']) & (df_copy['down_move'] > 0), df_copy['down_move'], 0.0)
+    
+    tr = df_copy[['high']].copy()
+    tr['H-L'] = df_copy['high'] - df_copy['low']
+    tr['H-PC'] = abs(df_copy['high'] - df_copy['close'].shift(1))
+    tr['L-PC'] = abs(df_copy['low'] - df_copy['close'].shift(1))
+    df_copy['tr'] = tr[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+    
+    atr = df_copy['tr'].ewm(alpha=1/length, adjust=False).mean()
+    plus_di = 100 * (df_copy['+dm'].ewm(alpha=1/length, adjust=False).mean() / atr)
+    minus_di = 100 * (df_copy['-dm'].ewm(alpha=1/length, adjust=False).mean() / atr)
+    
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    return dx.ewm(alpha=1/length, adjust=False).mean()
+
 def calculate_bbma(df):
     """
     Menghitung topografi BBMA berdasarkan spesifikasi:

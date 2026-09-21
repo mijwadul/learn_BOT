@@ -500,7 +500,7 @@ with tab_cmd:
                 hours, remainder = divmod(time_to.total_seconds(), 3600)
                 minutes, _ = divmod(remainder, 60)
                 
-                st.info(f"⏳ **Next Event:** {next_event['event']} in **{int(hours)}h {int(minutes)}m**\n\n🗓️ {next_event['date'].strftime('%Y-%m-%d %H:%M UTC')}")
+                st.info(f"⏳ **Next Event:** {next_event['event_name']} in **{int(hours)}h {int(minutes)}m**\n\n🗓️ {next_event['date'].strftime('%Y-%m-%d %H:%M UTC')}")
             else:
                 st.success("Tugas selesai! Tidak ada lagi event High Impact minggu ini.")
                 
@@ -512,16 +512,10 @@ with tab_cmd:
     # Risk & Account
     with col3:
         st.subheader("Risk & Account")
-        st.number_input("Max Risk per Trade ($)", value=float(Config.MAX_RISK_DOLLARS), step=10.0)
-        st.number_input("Max Drawdown (%)", value=float(Config.MAX_DRAWDOWN_PERCENT), step=1.0)
+        Config.MAX_RISK_DOLLARS = st.number_input("Max Risk per Trade ($)", value=float(Config.MAX_RISK_DOLLARS), step=10.0)
+        Config.MAX_DRAWDOWN_PERCENT = st.number_input("Max Drawdown (%)", value=float(Config.MAX_DRAWDOWN_PERCENT), step=1.0)
         
-        Config.AI_RUNNER_EXIT_THRESHOLD = st.slider(
-            "AI Runner Exit Threshold (%)", 
-            min_value=10.0, max_value=90.0, 
-            value=float(getattr(Config, 'AI_RUNNER_EXIT_THRESHOLD', 35.0)), 
-            step=1.0,
-            help="Batas probabilitas AI untuk menutup sisa posisi Runner. Jika probabilitas tren panjang (Runner) turun di bawah batas ini, posisi akan ditutup."
-        )
+
         
         # Account Metrics
         st.markdown("---")

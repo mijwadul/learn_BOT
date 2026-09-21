@@ -11,3 +11,4 @@ asyncpg
 transitions
 plotly>=5.18.0
 joblib
+optuna
