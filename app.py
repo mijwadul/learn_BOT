@@ -741,7 +741,6 @@ with tab_incubator:
                 split_idx = int(len(df_raw) * TEMPORAL_SPLIT_RATIO)
                 oos_df = df_raw.iloc[split_idx:].copy()
                 oos_df = st.session_state.researcher.generate_targets(oos_df)
-                oos_df = oos_df.dropna()
                 features = st.session_state.researcher.features
                 valid_cols = [c for c in features if c in oos_df.columns]
                 

@@ -393,16 +393,16 @@ class ExecutorAgent:
             # =========================================================================
             logging.info(f"Order placed successfully! Ticket: {result.order}")
             
-            # --- Trailing BE Berantai (Risk-Free Pyramid) ---
+            # --- Trailing BE Berantai (Unified SL & TP) ---
             if len(same_dir_positions) > 0:
                 for p in same_dir_positions:
-                    logging.info(f"[PYRAMIDING] Menggeser SL posisi lama (Tiket {p.ticket}) ke Open Price posisi baru ({price}).")
+                    logging.info(f"[PYRAMIDING] Menyatukan SL/TP posisi lama (Tiket {p.ticket}) dengan posisi baru (SL: {sl}, TP: {tp}).")
                     req_sl = {
                         "action": mt5.TRADE_ACTION_SLTP,
                         "symbol": Config.SYMBOL,
                         "position": p.ticket,
-                        "sl": float(price),
-                        "tp": float(p.tp),
+                        "sl": float(sl),
+                        "tp": float(tp),
                         "magic": 234000,
                     }
                     mt5.order_send(req_sl)
@@ -557,32 +557,49 @@ class ExecutorAgent:
 
     def modify_sl_to_break_even(self, ticket):
         """
-        Modifikasi parameter SL tiket posisi aktif ke harga Open (Break Even).
+        Modifikasi parameter SL ke harga Open (Break Even), dan aplikasikan 
+        Unified SL ini ke SELURUH posisi lain yang searah (Pyramiding SL Sync).
         """
-        pos = mt5.positions_get(ticket=ticket)
-        if pos is None or len(pos) == 0:
+        pos_list = mt5.positions_get(ticket=ticket)
+        if pos_list is None or len(pos_list) == 0:
             logging.warning(f"Position ticket {ticket} not found for Break Even modification.")
             return None
 
-        pos = pos[0]
-        logging.info(f"Modifying SL to Break Even ({pos.price_open}) for ticket {ticket}")
+        pos = pos_list[0]
+        new_sl = float(pos.price_open)
+        logging.info(f"Initiating Unified SL to Break Even ({new_sl}) triggered by ticket {ticket}")
 
-        request = {
-            "action": mt5.TRADE_ACTION_SLTP,
-            "symbol": pos.symbol,
-            "position": ticket,
-            "sl": float(pos.price_open),
-            "tp": float(pos.tp),
-            "magic": 234000,
-        }
-
-        result = mt5.order_send(request)
-        if result is None:
-            logging.error(f"order_send() failed for modify SL to BE ticket {ticket}.")
-        elif result.retcode != mt5.TRADE_RETCODE_DONE:
-            logging.error(f"Modify SL to Break Even failed for ticket {ticket}, retcode={result.retcode}")
-        else:
-            logging.info(f"SL successfully modified to Break Even ({pos.price_open}) for ticket {ticket}")
+        all_positions = mt5.positions_get(symbol=pos.symbol)
+        result = None
+        
+        if all_positions:
+            for p in all_positions:
+                if p.type == pos.type:
+                    # Pastikan SL tidak digeser mundur (worse risk)
+                    if p.type == mt5.ORDER_TYPE_BUY:
+                        if p.sl > 0 and new_sl <= p.sl:
+                            continue
+                    else:
+                        if p.sl > 0 and new_sl >= p.sl:
+                            continue
+                            
+                    request = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "symbol": p.symbol,
+                        "position": p.ticket,
+                        "sl": new_sl,
+                        "tp": float(p.tp),
+                        "magic": 234000,
+                    }
+                    res = mt5.order_send(request)
+                    if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
+                        logging.error(f"Failed to sync Unified SL to {new_sl} for ticket {p.ticket}")
+                    else:
+                        logging.info(f"Unified SL successfully modified to {new_sl} for ticket {p.ticket}")
+                        if p.ticket == ticket:
+                            result = res
+                            
+        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
             try:
                 snapshot_json = capture_m1_snapshot(pos.symbol, 50)
                 alasan = f"Risk Management: Break Even tercapai (RR 1:2). SL digeser ke harga Open ({pos.price_open:.2f}) untuk eliminasi risiko."
