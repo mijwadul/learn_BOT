@@ -49,6 +49,17 @@ class ApprovedSetup(Base):
     approved_at = Column(DateTime, default=func.now())
     notes = Column(String, default="Approved by Trader via RLHF")
 
+class RejectedSetup(Base):
+    __tablename__ = "rejected_setups"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    setup_id = Column(String, index=True, unique=True)
+    symbol = Column(String, default="XAUUSD")
+    action = Column(String, default="BUY")
+    probability = Column(Float, default=0.0)
+    rejected_at = Column(DateTime, default=func.now())
+    notes = Column(String, default="Rejected by Trader via RLHF")
+
 class TradeJournal(Base):
     __tablename__ = "trade_journal"
     
@@ -196,6 +207,41 @@ def get_all_approved_setups():
     except Exception as e:
         print(f"Failed to query approved setups: {e}")
         return pd.DataFrame()
+
+def save_rejected_setup(setup_id: str, symbol: str = "XAUUSD", action: str = "BUY", probability: float = 0.0, notes: str = ""):
+    """Simpan ID setup yang telah ditolak trader (Human-in-the-loop) ke rejected_setups."""
+    try:
+        Base.metadata.create_all(sync_engine)
+        import datetime
+        with Session(sync_engine) as session:
+            existing = session.query(RejectedSetup).filter(RejectedSetup.setup_id == str(setup_id)).first()
+            if not existing:
+                setup = RejectedSetup(
+                    setup_id=str(setup_id),
+                    symbol=str(symbol),
+                    action=str(action),
+                    probability=float(probability),
+                    rejected_at=datetime.datetime.now(),
+                    notes=str(notes) if notes else "Rejected by Trader via RLHF"
+                )
+                session.add(setup)
+                session.commit()
+                return True
+        return False
+    except Exception as e:
+        print(f"Failed to save rejected setup: {e}")
+        return False
+
+def get_rejected_setup_ids():
+    """Ambil himpunan ID setup yang telah di-reject manusia untuk penalty LightGBM."""
+    try:
+        Base.metadata.create_all(sync_engine)
+        with Session(sync_engine) as session:
+            rows = session.query(RejectedSetup.setup_id).all()
+            return {r[0] for r in rows}
+    except Exception as e:
+        print(f"Failed to get rejected setup IDs: {e}")
+        return set()
 
 # ==========================================
 # BLACK BOX: TRADE JOURNAL & XAI HELPERS

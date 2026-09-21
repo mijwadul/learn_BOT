@@ -29,6 +29,8 @@ from database import (
     save_approved_setup,
     get_approved_setup_ids,
     get_all_approved_setups,
+    save_rejected_setup,
+    get_rejected_setup_ids,
     log_trade_journal,
     get_trade_journal_entries
 )
@@ -200,12 +202,15 @@ def render_candlestick_chart(
 
     df_plot = df_plot.reset_index(drop=True)
     df_plot = df_plot.sort_values('time').reset_index(drop=True)
+    
+    # Konversi ke string agar axis type='category' dari Plotly dapat mencocokkan marker dengan presisi absolut
+    df_plot['time_str'] = df_plot['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
 
     fig = go.Figure()
 
     # 1. Candlestick Utama
     fig.add_trace(go.Candlestick(
-        x=df_plot['time'],
+        x=df_plot['time_str'],
         open=df_plot['open'],
         high=df_plot['high'],
         low=df_plot['low'],
@@ -221,7 +226,7 @@ def render_candlestick_chart(
     if show_bbma:
         if 'EMA_50' in df_plot.columns:
             fig.add_trace(go.Scatter(
-                x=df_plot['time'],
+                x=df_plot['time_str'],
                 y=df_plot['EMA_50'],
                 mode='lines',
                 line=dict(color='#00E5FF', width=1.5),
@@ -229,14 +234,14 @@ def render_candlestick_chart(
             ))
         if 'BB_Upper' in df_plot.columns and 'BB_Lower' in df_plot.columns:
             fig.add_trace(go.Scatter(
-                x=df_plot['time'],
+                x=df_plot['time_str'],
                 y=df_plot['BB_Upper'],
                 mode='lines',
                 line=dict(color='rgba(186, 104, 200, 0.7)', width=1, dash='dot'),
                 name='BB Upper'
             ))
             fig.add_trace(go.Scatter(
-                x=df_plot['time'],
+                x=df_plot['time_str'],
                 y=df_plot['BB_Lower'],
                 mode='lines',
                 line=dict(color='rgba(186, 104, 200, 0.7)', width=1, dash='dot'),
@@ -244,7 +249,7 @@ def render_candlestick_chart(
             ))
         if 'SMA_20' in df_plot.columns:
             fig.add_trace(go.Scatter(
-                x=df_plot['time'],
+                x=df_plot['time_str'],
                 y=df_plot['SMA_20'],
                 mode='lines',
                 line=dict(color='rgba(255, 179, 0, 0.7)', width=1, dash='dash'),
@@ -298,8 +303,11 @@ def render_candlestick_chart(
                     f"Waktu: {time_str}"
                 )
 
+            # Pastikan format str persis sama dengan sumbu X kategori
+            entry_time_str = entry_time.strftime('%Y-%m-%d %H:%M:%S')
+
             fig.add_trace(go.Scatter(
-                x=[entry_time],
+                x=[entry_time_str],
                 y=[entry_price],
                 mode='markers',
                 marker=dict(
@@ -360,6 +368,8 @@ def render_candlestick_chart(
             font=dict(size=10)
         ),
         xaxis=dict(
+            type='category',
+            nticks=10,
             showgrid=True,
             gridcolor='rgba(255, 255, 255, 0.07)',
             zeroline=False
@@ -725,88 +735,178 @@ with tab_incubator:
     min_prob = st.slider("Minimal Probabilitas Setup OOS (Filter Ambang Batas):", min_value=0.50, max_value=0.99, value=0.65, step=0.01)
 
     if st.button("🔍 Muat Data OOS untuk Analisis RLHF", use_container_width=True):
-        st.session_state.load_rlhf = True
-
-    df_raw = None
-    if st.session_state.get('load_rlhf', False):
-        with st.spinner("Memuat data historis dari database..."):
+        with st.spinner("Memuat data historis & Menghitung Prediksi AI (Harap Tunggu)..."):
             df_raw = st.session_state.data_miner.load_from_db()
-
-    if df_raw is not None and len(df_raw) > 200 and st.session_state.researcher.model_normal is not None:
-        split_idx = int(len(df_raw) * TEMPORAL_SPLIT_RATIO)
-        oos_df = df_raw.iloc[split_idx:].copy()
-        oos_df = st.session_state.researcher.generate_targets(oos_df)
-        oos_df = oos_df.dropna()
-        features = st.session_state.researcher.features
-        valid_cols = [c for c in features if c in oos_df.columns]
-
-        if valid_cols:
-            probs = st.session_state.researcher.model_normal.predict_proba(oos_df[valid_cols])[:, 1]
-            oos_df['prob'] = probs
-            high_prob_df = oos_df[oos_df['prob'] >= min_prob]
-
-            st.write(f"Menemukan **{len(high_prob_df)}** setup OOS yang lolos ambang batas probabilitas ≥ {min_prob*100:.0f}%.")
-
-            if not high_prob_df.empty:
-                # Tampilkan SEMUA setup OOS yang lolos batas (tanpa batasan jumlah)
-                for idx_num, (setup_time, row) in enumerate(high_prob_df.head(50).iterrows()):
-                    setup_id = setup_time.strftime("%Y-%m-%d %H:%M:%S") if hasattr(setup_time, "strftime") else str(setup_time)
-                    prob_pct = f"{row['prob']*100:.1f}%"
-                    is_approved = setup_id in approved_ids
-
-                    action_type = "BUY" if row.get('dist_Close_EMA50', 0) >= 0 else "SELL"
-                    sl_dist = abs(row.get('dist_Close_EMA50', 10.0))
-                    sl_dist = max(sl_dist, 5.0)
-                    sl_val = row['close'] - sl_dist if action_type == "BUY" else row['close'] + sl_dist
-                    tp_val = row['close'] + (sl_dist * 2.0) if action_type == "BUY" else row['close'] - (sl_dist * 2.0)
-
-                    with st.expander(f"📍 Setup #{idx_num+1} | {setup_id} | Probabilitas: {prob_pct} | {action_type} @ {row['close']:.2f} {'✅ (APPROVED)' if is_approved else ''}", expanded=(idx_num < 2)):
-                        loc = oos_df.index.get_loc(setup_time)
-                        if isinstance(loc, (int, np.integer)):
-                            start_w = max(0, loc - 35)
-                            end_w = min(len(oos_df), loc + 15)
-                            window_df = oos_df.iloc[start_w:end_w].copy()
-                        else:
-                            window_df = oos_df.tail(40).copy()
-
-                        entry_marker = [{
-                            'time': setup_time,
-                            'action': action_type,
-                            'price': float(row['close']),
-                            'sl': float(sl_val),
-                            'tp': float(tp_val),
-                            'probability': prob_pct,
-                            'ticket': f"OOS-{idx_num+1}"
-                        }]
-
-                        fig_setup = render_candlestick_chart(
-                            df=window_df,
-                            trade_entries=entry_marker,
-                            active_trade=entry_marker[0],
-                            title=f"Setup OOS: {setup_id} ({action_type})",
-                            height=600
-                        )
-                        st.plotly_chart(fig_setup, width="stretch")
-
-                        btn_col1, btn_col2 = st.columns([0.3, 0.7])
-                        with btn_col1:
-                            if is_approved:
-                                st.success("✅ Setup ini Sudah Di-Approve")
-                            else:
-                                if st.button(f"👍 Approve Setup #{idx_num+1}", key=f"btn_rlhf_{setup_id}_{idx_num}", width="stretch"):
-                                    save_approved_setup(
-                                        setup_id=setup_id,
-                                        symbol=Config.SYMBOL,
-                                        action=action_type,
-                                        probability=float(row['prob']),
-                                        notes=f"Approved via RLHF UI (Prob {prob_pct})"
-                                    )
-                                    st.success(f"Setup {setup_id} berhasil di-Approve!")
-                                    st.rerun()
-                        with btn_col2:
-                            st.caption(f"Distansi EMA50: {row.get('dist_Close_EMA50', 0):.2f} | Lebar BB: {row.get('BB_Width', 0):.2f} | Menit ke News: {row.get('minutes_to_high_impact_news', 9999):.0f}m")
+            if df_raw is not None and len(df_raw) > 200 and st.session_state.researcher.model_normal is not None:
+                split_idx = int(len(df_raw) * TEMPORAL_SPLIT_RATIO)
+                oos_df = df_raw.iloc[split_idx:].copy()
+                oos_df = st.session_state.researcher.generate_targets(oos_df)
+                oos_df = oos_df.dropna()
+                features = st.session_state.researcher.features
+                valid_cols = [c for c in features if c in oos_df.columns]
+                
+                if valid_cols:
+                    probs = st.session_state.researcher.model_normal.predict_proba(oos_df[valid_cols])[:, 1]
+                    oos_df['prob'] = probs
+                    st.session_state.rlhf_oos_df = oos_df
+                    st.session_state.rlhf_df_raw = df_raw # Simpan data utuh untuk render grafik tanpa gap
+                    st.session_state.rlhf_page = 0
+                else:
+                    st.error("Kolom fitur tidak cocok.")
             else:
-                st.info("Tidak ada setup OOS yang melampaui batas probabilitas slider saat ini. Turunkan nilai slider untuk melihat lebih banyak setup.")
+                st.error("Data tidak cukup atau model belum dilatih.")
+
+    if 'rlhf_oos_df' in st.session_state:
+        oos_df = st.session_state.rlhf_oos_df
+        high_prob_df = oos_df[oos_df['prob'] >= min_prob]
+
+        st.write(f"Menemukan **{len(high_prob_df)}** setup OOS yang lolos ambang batas probabilitas ≥ {min_prob*100:.0f}%.")
+
+        if not high_prob_df.empty:
+            # Pagination
+            if 'rlhf_page' not in st.session_state:
+                st.session_state.rlhf_page = 0
+            
+            total_setups = len(high_prob_df)
+            per_page = 10
+            max_page = max(0, (total_setups - 1) // per_page)
+            
+            st.session_state.rlhf_page = min(st.session_state.rlhf_page, max_page)
+            st.session_state.rlhf_page = max(0, st.session_state.rlhf_page)
+            
+            start_idx = st.session_state.rlhf_page * per_page
+            end_idx = start_idx + per_page
+            page_df = high_prob_df.iloc[start_idx:end_idx]
+            
+            st.write(f"Menampilkan setup {start_idx + 1} - {min(end_idx, total_setups)} dari total {total_setups} setup OOS terpilih (Halaman {st.session_state.rlhf_page + 1}/{max_page + 1}).")
+            
+            rejected_ids = get_rejected_setup_ids()
+
+            for idx_num_rel, (setup_time, row) in enumerate(page_df.iterrows()):
+                idx_num = start_idx + idx_num_rel
+                setup_id = setup_time.strftime("%Y-%m-%d %H:%M:%S") if hasattr(setup_time, "strftime") else str(setup_time)
+                prob_pct = f"{row['prob']*100:.1f}%"
+                is_approved = setup_id in approved_ids
+                is_rejected = setup_id in rejected_ids
+
+                action_type = "BUY" if row.get('dist_Close_EMA50', 0) >= 0 else "SELL"
+                sl_dist = abs(row.get('dist_Close_EMA50', 10.0))
+                sl_dist = max(sl_dist, 5.0)
+                sl_val = row['close'] - sl_dist if action_type == "BUY" else row['close'] + sl_dist
+                tp_val = row['close'] + (sl_dist * 2.0) if action_type == "BUY" else row['close'] - (sl_dist * 2.0)
+
+                status_text = ""
+                if is_approved:
+                    status_text = "✅ (APPROVED)"
+                elif is_rejected:
+                    status_text = "❌ (REJECTED)"
+
+                with st.expander(f"📍 Setup #{idx_num+1} | {setup_id} | Probabilitas: {prob_pct} | {action_type} @ {row['close']:.2f} {status_text}", expanded=(idx_num_rel < 2)):
+                    plot_source_df = st.session_state.get('rlhf_df_raw', oos_df)
+                    try:
+                        loc = plot_source_df.index.get_loc(setup_time)
+                    except KeyError:
+                        loc = -1
+                        
+                    if isinstance(loc, (int, np.integer)) and loc != -1:
+                        end_w = loc
+                        max_w = min(len(plot_source_df), loc + 1000) # Cari hingga maksimal 1000 candle ke depan
+                        
+                        for i in range(loc, max_w):
+                            c_high = plot_source_df.iloc[i]['high']
+                            c_low = plot_source_df.iloc[i]['low']
+                            
+                            if action_type == "BUY":
+                                if c_low <= sl_val or c_high >= tp_val:
+                                    end_w = i
+                                    break
+                            else: # SELL
+                                if c_high >= sl_val or c_low <= tp_val:
+                                    end_w = i
+                                    break
+                                    
+                        end_w = min(len(plot_source_df), end_w + 15) # 15 candle ekstra di kanan setelah hit
+                        start_w = max(0, loc - 30) # Mulai 30 candle sebelum titik open
+                        
+                        window_df = plot_source_df.iloc[start_w:end_w].copy()
+                    else:
+                        window_df = plot_source_df.tail(40).copy()
+
+                    entry_marker = [{
+                        'time': setup_time,
+                        'action': action_type,
+                        'price': float(row['close']),
+                        'sl': float(sl_val),
+                        'tp': float(tp_val),
+                        'probability': prob_pct,
+                        'ticket': f"OOS-{idx_num+1}"
+                    }]
+
+                    fig_setup = render_candlestick_chart(
+                        df=window_df,
+                        trade_entries=entry_marker,
+                        active_trade=entry_marker[0],
+                        title=f"Setup OOS: {setup_id} ({action_type})",
+                        height=600
+                    )
+                    st.plotly_chart(fig_setup, width="stretch")
+
+                    btn_col1, btn_col2, btn_col3 = st.columns([0.25, 0.25, 0.5])
+                    with btn_col1:
+                        if is_approved:
+                            st.success("✅ Sudah Di-Approve")
+                        else:
+                            if st.button(f"👍 Approve Setup #{idx_num+1}", key=f"btn_rlhf_{setup_id}_{idx_num}", width="stretch"):
+                                save_approved_setup(
+                                    setup_id=setup_id,
+                                    symbol=Config.SYMBOL,
+                                    action=action_type,
+                                    probability=float(row['prob']),
+                                    notes=f"Approved via RLHF UI (Prob {prob_pct})"
+                                )
+                                st.success(f"Setup di-Approve!")
+                                st.rerun()
+                    with btn_col2:
+                        if is_rejected:
+                            st.error("❌ Sudah Di-Reject")
+                        else:
+                            if st.button(f"👎 Reject Setup #{idx_num+1}", key=f"btn_rej_{setup_id}_{idx_num}", width="stretch", type="primary"):
+                                save_rejected_setup(
+                                    setup_id=setup_id,
+                                    symbol=Config.SYMBOL,
+                                    action=action_type,
+                                    probability=float(row['prob']),
+                                    notes=f"Rejected via RLHF UI (Prob {prob_pct})"
+                                )
+                                st.error(f"Setup di-Reject!")
+                                st.rerun()
+                    with btn_col3:
+                        st.caption(f"Distansi EMA50: {row.get('dist_Close_EMA50', 0):.2f} | Lebar BB: {row.get('BB_Width', 0):.2f} | Menit ke News: {row.get('minutes_to_high_impact_news', 9999):.0f}m")
+            
+            st.markdown("---")
+            pag_col1, pag_col2, pag_col3 = st.columns([0.2, 0.6, 0.2])
+            with pag_col1:
+                if st.button("⬅️ Prev 10", disabled=(st.session_state.rlhf_page == 0), width="stretch"):
+                    st.session_state.rlhf_page -= 1
+                    st.rerun()
+            with pag_col2:
+                if st.button("🔄 Latih Ulang Model dengan Data Kurasi", width="stretch", type="primary"):
+                    st.session_state.retrain_requested = True
+                    st.rerun()
+            with pag_col3:
+                if st.button("Next 10 ➡️", disabled=(st.session_state.rlhf_page >= max_page), width="stretch"):
+                    st.session_state.rlhf_page += 1
+                    st.rerun()
+                    
+            if st.session_state.get('retrain_requested', False):
+                st.session_state.retrain_requested = False
+                with st.spinner("Melatih ulang model secara incremental dengan data RLHF terbaru..."):
+                    def one_chunk_generator():
+                        yield df_raw
+                    st.session_state.researcher.train_models(data_generator=one_chunk_generator(), total_chunks=1)
+                st.success("🎉 Latih ulang model selesai! Bobot RLHF terbaru telah diaplikasikan.")
+        else:
+            st.info("Tidak ada setup OOS yang melampaui batas probabilitas slider saat ini. Turunkan nilai slider untuk melihat lebih banyak setup.")
     else:
         # Simulasi interaktif jika data/model belum dilatih
         st.info("💡 Menampilkan simulasi kurasi setup RLHF (Model belum dilatih pada database).")

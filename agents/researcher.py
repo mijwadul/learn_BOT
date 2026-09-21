@@ -144,12 +144,14 @@ class ResearcherAgent:
         best_params_runner = None
         
         try:
-            from database import get_approved_setup_ids, get_historical_pnl_feedback
+            from database import get_approved_setup_ids, get_rejected_setup_ids, get_historical_pnl_feedback
             approved_ids = get_approved_setup_ids()
+            rejected_ids = get_rejected_setup_ids()
             pnl_df = get_historical_pnl_feedback()
         except Exception as e:
             logging.warning(f"[PnL Feedback] Tidak dapat memuat data historis: {e}")
             approved_ids = []
+            rejected_ids = []
             pnl_df = pd.DataFrame()
 
         chunk_idx = 1
@@ -182,16 +184,24 @@ class ResearcherAgent:
             
             # RLHF
             sample_weights = np.ones(len(df), dtype=float)
-            if approved_ids:
-                matched_count = 0
+            if approved_ids or rejected_ids:
+                matched_app = 0
+                matched_rej = 0
                 for i in range(len(df)):
                     row_id_str = str(df.index[i])
                     row_time_str = df.index[i].strftime("%Y-%m-%d %H:%M:%S") if hasattr(df.index[i], "strftime") else row_id_str
+                    
                     if row_id_str in approved_ids or row_time_str in approved_ids:
                         sample_weights[i] = 5.0
-                        matched_count += 1
-                if matched_count > 0:
-                    logging.info(f"[RLHF] Ditemukan {matched_count} setup Approve di chunk {chunk_idx}.")
+                        matched_app += 1
+                    elif row_id_str in rejected_ids or row_time_str in rejected_ids:
+                        sample_weights[i] = 0.1
+                        matched_rej += 1
+                        
+                if matched_app > 0:
+                    logging.info(f"[RLHF] Ditemukan {matched_app} setup Approve di chunk {chunk_idx}.")
+                if matched_rej > 0:
+                    logging.info(f"[RLHF] Ditemukan {matched_rej} setup Reject di chunk {chunk_idx}.")
 
             # PnL Feedback Loop (Real Live Trade Loss = Penalty, Profit = Reward)
             if not pnl_df.empty:
