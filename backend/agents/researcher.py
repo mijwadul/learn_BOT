@@ -185,13 +185,7 @@ class ResearcherAgent:
         
         return study.best_params
 
-    def train_models(self, data_generator, total_chunks=1, progress_callback=None, train_normal=True, train_runner=True):
-        import gc
-        logging.info(f"Training LightGBM Dual-Target models with RLHF & PnL Feedback (Optuna Auto-Tuning). Normal: {train_normal}, Runner: {train_runner}")
-        
-        best_params_normal = None
-        best_params_runner = None
-        
+    def _fetch_rlhf_pnl_data(self):
         try:
             from database import get_approved_setup_ids, get_rejected_setup_ids, get_historical_pnl_feedback, get_hard_negative_ids
             approved_ids = set(get_approved_setup_ids())
@@ -200,10 +194,16 @@ class ResearcherAgent:
             pnl_df = get_historical_pnl_feedback()
         except Exception as e:
             logging.error(f"Failed to fetch RLHF/PnL data: {e}")
-            approved_ids = set()
-            rejected_ids = set()
-            hard_negative_ids = set()
+            approved_ids, rejected_ids, hard_negative_ids = set(), set(), set()
             pnl_df = pd.DataFrame()
+        return approved_ids, rejected_ids, hard_negative_ids, pnl_df
+
+    def train_normal_mode(self, data_generator, total_chunks=1, progress_callback=None):
+        import gc
+        logging.info("Training LightGBM Normal Mode (Scalping) with RLHF & PnL Feedback (Optuna Auto-Tuning).")
+        
+        best_params_normal = None
+        approved_ids, rejected_ids, hard_negative_ids, pnl_df = self._fetch_rlhf_pnl_data()
 
         chunk_idx = 1
         for df in data_generator:
@@ -211,9 +211,6 @@ class ResearcherAgent:
                 continue
                 
             df = self.generate_targets(df)
-
-            # --- GOLDEN RULE BBMA: Saring noise, hanya latih AI pada candle Re-entry ---
-            # Kita lakukan filter SETELAH target dibuat agar perhitungan lookahead (waktu ke depan) tidak berantakan
             reentry_sell_mask = df['high'] >= df[['LWMA_5_High', 'LWMA_10_High']].min(axis=1)
             reentry_buy_mask = df['low'] <= df[['LWMA_5_Low', 'LWMA_10_Low']].max(axis=1)
             df = df[reentry_sell_mask | reentry_buy_mask].copy()
@@ -221,9 +218,99 @@ class ResearcherAgent:
             if df.empty or len(df) < 50:
                 continue
                 
-            # Features (excluding target columns and absolute prices to prevent memorization/100% prob)
             forbidden_exact = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
             forbidden_cols = []
+            # Isolasi Dataset: Normal Mode tidak memuat fitur kompleks H4 untuk menghemat memori drastis
+            for tf in ['', '_m5', '_m15', '_h1']:
+                for c in forbidden_exact:
+                    forbidden_cols.append(f"{c}{tf}")
+                for c in ['SMA_20', 'BB_Upper', 'BB_Lower', 'EMA_50', 'LWMA_5_High', 'LWMA_10_High', 'LWMA_5_Low', 'LWMA_10_Low']:
+                    forbidden_cols.append(f"{c}{tf}")
+
+            self.features = [col for col in df.columns if col not in forbidden_cols and 'Target' not in col and not col.endswith('_h4')]
+            
+            for col in self.features:
+                if df[col].dtype == 'object':
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                    
+            X = df[self.features]
+            y_normal = df['Target_Normal']
+            
+            sample_weights = np.ones(len(df), dtype=float)
+            if approved_ids or rejected_ids or hard_negative_ids:
+                for i in range(len(df)):
+                    row_id_str = str(df.index[i])
+                    row_time_str = df.index[i].strftime("%Y-%m-%d %H:%M:%S") if hasattr(df.index[i], "strftime") else row_id_str
+                    if row_id_str in hard_negative_ids or row_time_str in hard_negative_ids:
+                        sample_weights[i] = 3.0
+                    elif row_id_str in approved_ids or row_time_str in approved_ids:
+                        sample_weights[i] = 5.0
+                    elif row_id_str in rejected_ids or row_time_str in rejected_ids:
+                        sample_weights[i] = 0.1
+
+            if not pnl_df.empty:
+                if 'time' in df.columns:
+                    df_time_floor = pd.to_datetime(df['time']).dt.floor('Min')
+                else:
+                    df_time_floor = pd.to_datetime(df.index).floor('Min')
+                pnl_time_floor = pnl_df['time'].dt.floor('Min')
+                for pnl_idx, pnl_row in pnl_df.iterrows():
+                    match_idx = np.where(df_time_floor == pnl_time_floor[pnl_idx])[0]
+                    if len(match_idx) > 0:
+                        idx = match_idx[0]
+                        if pnl_row['profit'] < 0:
+                            sample_weights[idx] = 0.5
+                        elif pnl_row['profit'] > 0:
+                            sample_weights[idx] = 1.5
+
+            if chunk_idx == 1 and len(X) > 100:
+                best_params_normal = self.optimize_hyperparameters(X, y_normal, sample_weights, n_trials=20)
+                
+            params_n = best_params_normal if best_params_normal else {
+                'n_estimators': 100, 'learning_rate': 0.05, 'max_depth': 4, 'num_leaves': 15,
+                'min_child_samples': 50, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
+            }
+            params_n['verbose'] = -1
+
+            if self.model_normal is None:
+                self.model_normal = lgb.LGBMClassifier(**params_n)
+                self.model_normal.fit(X, y_normal, sample_weight=sample_weights)
+            else:
+                self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=self.model_normal)
+                
+            if progress_callback:
+                progress_callback(chunk_idx, total_chunks)
+                
+            chunk_idx += 1
+            del df, X, y_normal, sample_weights
+            gc.collect()
+            
+        self.save_models()
+        return True
+
+    def train_runner_mode(self, data_generator, total_chunks=1, progress_callback=None):
+        import gc
+        logging.info("Training LightGBM Runner Mode (Trend/H4) with RLHF & PnL Feedback (Optuna Auto-Tuning).")
+        
+        best_params_runner = None
+        approved_ids, rejected_ids, hard_negative_ids, pnl_df = self._fetch_rlhf_pnl_data()
+
+        chunk_idx = 1
+        for df in data_generator:
+            if df.empty:
+                continue
+                
+            df = self.generate_targets(df)
+            reentry_sell_mask = df['high'] >= df[['LWMA_5_High', 'LWMA_10_High']].min(axis=1)
+            reentry_buy_mask = df['low'] <= df[['LWMA_5_Low', 'LWMA_10_Low']].max(axis=1)
+            df = df[reentry_sell_mask | reentry_buy_mask].copy()
+
+            if df.empty or len(df) < 50:
+                continue
+                
+            forbidden_exact = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
+            forbidden_cols = []
+            # Runner mode memuat semua timeframe hingga H4
             for tf in ['', '_m5', '_m15', '_h1', '_h4']:
                 for c in forbidden_exact:
                     forbidden_cols.append(f"{c}{tf}")
@@ -232,133 +319,62 @@ class ResearcherAgent:
 
             self.features = [col for col in df.columns if col not in forbidden_cols and 'Target' not in col]
             
-            # Konversi kolom object (string) ke numerik agar LightGBM tidak crash
             for col in self.features:
                 if df[col].dtype == 'object':
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     
             X = df[self.features]
-            
-            logging.info(f"Chunk {chunk_idx}/{total_chunks}: Extracting {len(self.features)} features for training.")
-            
-            y_normal = df['Target_Normal']
             y_runner = df['Target_Runner']
             
-            # RLHF
             sample_weights = np.ones(len(df), dtype=float)
             if approved_ids or rejected_ids or hard_negative_ids:
-                matched_app = 0
-                matched_rej = 0
-                matched_hn = 0
                 for i in range(len(df)):
                     row_id_str = str(df.index[i])
                     row_time_str = df.index[i].strftime("%Y-%m-%d %H:%M:%S") if hasattr(df.index[i], "strftime") else row_id_str
-                    
                     if row_id_str in hard_negative_ids or row_time_str in hard_negative_ids:
                         sample_weights[i] = 3.0
-                        matched_hn += 1
                     elif row_id_str in approved_ids or row_time_str in approved_ids:
                         sample_weights[i] = 5.0
-                        matched_app += 1
                     elif row_id_str in rejected_ids or row_time_str in rejected_ids:
                         sample_weights[i] = 0.1
-                        matched_rej += 1
-                        
-                if matched_app > 0:
-                    logging.info(f"[RLHF] Ditemukan {matched_app} setup Approve di chunk {chunk_idx}.")
-                if matched_rej > 0:
-                    logging.info(f"[RLHF] Ditemukan {matched_rej} setup Reject di chunk {chunk_idx}.")
-                if matched_hn > 0:
-                    logging.info(f"[Auto-Correction] Mengeksekusi {matched_hn} Hard Negatives di chunk {chunk_idx}.")
 
-            # PnL Feedback Loop (Real Live Trade Loss = Penalty, Profit = Reward)
             if not pnl_df.empty:
                 if 'time' in df.columns:
                     df_time_floor = pd.to_datetime(df['time']).dt.floor('Min')
                 else:
                     df_time_floor = pd.to_datetime(df.index).floor('Min')
-                    
                 pnl_time_floor = pnl_df['time'].dt.floor('Min')
-                
-                matched_pnl = 0
                 for pnl_idx, pnl_row in pnl_df.iterrows():
                     match_idx = np.where(df_time_floor == pnl_time_floor[pnl_idx])[0]
                     if len(match_idx) > 0:
                         idx = match_idx[0]
                         if pnl_row['profit'] < 0:
-                            sample_weights[idx] = 0.5 # Penalti ringan (bukan 0.1) agar model tetap memperhitungkan kondisi pasar
+                            sample_weights[idx] = 0.5
                         elif pnl_row['profit'] > 0:
-                            sample_weights[idx] = 1.5 # Reward diseimbangkan menjadi 1.5
-                        matched_pnl += 1
-                if matched_pnl > 0:
-                    logging.info(f"[PnL Feedback] Diterapkan pada {matched_pnl} eksekusi dari riwayat live.")
+                            sample_weights[idx] = 1.5
 
-            # Optuna Auto-Tuning di Chunk Pertama
             if chunk_idx == 1 and len(X) > 100:
-                logging.info(f"Chunk {chunk_idx}: Menjalankan Optuna Auto-Tuning untuk 20 iterasi...")
-                if train_normal:
-                    best_params_normal = self.optimize_hyperparameters(X, y_normal, sample_weights, n_trials=20)
-                if train_runner:
-                    best_params_runner = self.optimize_hyperparameters(X, y_runner, sample_weights, n_trials=20)
+                best_params_runner = self.optimize_hyperparameters(X, y_runner, sample_weights, n_trials=30)
                 
-                if train_normal:
-                    logging.info(f"[Optuna] Parameter Terbaik Normal: {best_params_normal}")
-                if train_runner:
-                    logging.info(f"[Optuna] Parameter Terbaik Runner: {best_params_runner}")
-                
-            params_n = best_params_normal if best_params_normal else {
-                'n_estimators': 100, 'learning_rate': 0.05, 'max_depth': 4, 'num_leaves': 15,
-                'min_child_samples': 50, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
+            params_r = best_params_runner if best_params_runner else {
+                'n_estimators': 150, 'learning_rate': 0.03, 'max_depth': 5, 'num_leaves': 20,
+                'min_child_samples': 40, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
             }
-            params_r = best_params_runner if best_params_runner else params_n
-            
-            # Tambahkan verbose = -1 agar tidak berisik
-            params_n['verbose'] = -1
             params_r['verbose'] = -1
 
-            # Train Normal Model
-            if train_normal:
-                if self.model_normal is None:
-                    self.model_normal = lgb.LGBMClassifier(**params_n)
-                    self.model_normal.fit(X, y_normal, sample_weight=sample_weights)
-                else:
-                    self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=self.model_normal)
-                    
-            # Train Runner Model
-            if train_runner:
-                if self.model_runner is None:
-                    self.model_runner = lgb.LGBMClassifier(**params_r)
-                    self.model_runner.fit(X, y_runner, sample_weight=sample_weights)
-                else:
-                    self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=self.model_runner)
+            if self.model_runner is None:
+                self.model_runner = lgb.LGBMClassifier(**params_r)
+                self.model_runner.fit(X, y_runner, sample_weight=sample_weights)
+            else:
+                self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=self.model_runner)
                 
-            logging.info(f"Chunk {chunk_idx}/{total_chunks} processed.")
-            
             if progress_callback:
                 progress_callback(chunk_idx, total_chunks)
                 
             chunk_idx += 1
-            
-            # Garbage Collection
-            del df, X, y_normal, y_runner, sample_weights
+            del df, X, y_runner, sample_weights
             gc.collect()
             
-        logging.info("Models trained successfully with RLHF weights (Incremental).")
-        
-        # Log Top 10 Feature Importances
-        if hasattr(self.model_normal, 'feature_importances_') and self.features:
-            try:
-                importances = self.model_normal.feature_importances_
-                top_indices = np.argsort(importances)[-10:][::-1]
-                logging.info("=== TOP 10 FEATURE IMPORTANCES ===")
-                for rank, idx in enumerate(top_indices, 1):
-                    feat_name = self.features[idx]
-                    feat_imp = importances[idx]
-                    logging.info(f"{rank}. {feat_name}: {feat_imp}")
-                logging.info("==================================")
-            except Exception as e:
-                logging.debug(f"Failed to log feature importances: {e}")
-                
         self.save_models()
         return True
 

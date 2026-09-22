@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-brand-dark text-foreground antialiased;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-brand-panel/80 backdrop-blur-md border border-white/5 shadow-xl rounded-xl;
+  }
+  
+  .glow-green {
+    box-shadow: 0 0 20px rgba(46, 160, 67, 0.4);
+  }
+  
+  .glow-red {
+    box-shadow: 0 0 20px rgba(218, 54, 51, 0.4);
+  }
+}

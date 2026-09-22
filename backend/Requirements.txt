@@ -12,3 +12,7 @@ transitions
 plotly>=5.18.0
 joblib
 optuna
+fastapi
+uvicorn
+websockets
+python-dotenv
