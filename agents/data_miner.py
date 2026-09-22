@@ -139,8 +139,10 @@ class DataMinerAgent:
         df_m1 = get_rates(self.symbol, mt5.TIMEFRAME_M1, n_candles)
         df_m5 = get_rates(self.symbol, mt5.TIMEFRAME_M5, int(n_candles/5) + 50)
         df_m15 = get_rates(self.symbol, mt5.TIMEFRAME_M15, int(n_candles/15) + 50)
+        df_h1 = get_rates(self.symbol, mt5.TIMEFRAME_H1, int(n_candles/60) + 50)
+        df_h4 = get_rates(self.symbol, mt5.TIMEFRAME_H4, int(n_candles/240) + 50)
         
-        if df_m1 is None or df_m5 is None or df_m15 is None:
+        if df_m1 is None or df_m5 is None or df_m15 is None or df_h1 is None or df_h4 is None:
             logging.error("Failed to fetch data.")
             return None
 
@@ -148,6 +150,8 @@ class DataMinerAgent:
         df_m1.set_index('time', inplace=True)
         df_m5.set_index('time', inplace=True)
         df_m15.set_index('time', inplace=True)
+        df_h1.set_index('time', inplace=True)
+        df_h4.set_index('time', inplace=True)
 
         # Feature engineering BBMA per timeframe
         from utils.indicators import calculate_atr
@@ -155,14 +159,20 @@ class DataMinerAgent:
         df_m1['ATR_14'] = calculate_atr(df_m1, 14)
         df_m5 = calculate_bbma(df_m5)
         df_m15 = calculate_bbma(df_m15)
+        df_h1 = calculate_bbma(df_h1)
+        df_h4 = calculate_bbma(df_h4)
         
         # Anti-Leakage MTF Merging: shift(1) for higher timeframes before merging to avoid lookahead bias
         df_m5_shifted = df_m5.shift(1).add_suffix('_m5')
         df_m15_shifted = df_m15.shift(1).add_suffix('_m15')
+        df_h1_shifted = df_h1.shift(1).add_suffix('_h1')
+        df_h4_shifted = df_h4.shift(1).add_suffix('_h4')
         
         # Merge to M1
         df_merged = df_m1.join(df_m5_shifted, how='left')
         df_merged = df_merged.join(df_m15_shifted, how='left')
+        df_merged = df_merged.join(df_h1_shifted, how='left')
+        df_merged = df_merged.join(df_h4_shifted, how='left')
         
         # Forward fill AFTER joining
         df_merged.ffill(inplace=True)
@@ -179,9 +189,18 @@ class DataMinerAgent:
         logging.info(f"Data merged successfully. Shape: {df_merged.shape}")
         return df_merged
 
-    def backfill_data(self, total_candles=20000, progress_callback=None):
-        logging.info(f"Starting Historical Backfill / Incremental Download...")
+    def backfill_data(self, total_candles=20000, progress_callback=None, force_rebuild=False):
+        logging.info(f"Starting Historical Backfill / Incremental Download (Force={force_rebuild})...")
         sample_df = None
+        
+        if force_rebuild:
+            try:
+                with sync_engine.begin() as conn:
+                    conn.execute(text("DROP TABLE IF EXISTS market_data_merged"))
+                logging.warning("Table market_data_merged dropped for forced rebuild.")
+            except Exception as e:
+                pass
+                
         try:
             # Check schema first
             query = "SELECT * FROM market_data_merged LIMIT 1"
@@ -195,10 +214,13 @@ class DataMinerAgent:
             logging.info(f"Existing table missing or empty. Detail: {e}")
             last_time = pd.NaT
 
+        if force_rebuild:
+            last_time = pd.NaT
+
         if pd.isna(last_time):
-            logging.info(f"No existing data found. Downloading {total_candles} candles.")
+            logging.info(f"No existing data found (or forced rebuild). Downloading {total_candles} candles.")
             candles_to_fetch = total_candles
-            if_exists = 'append'
+            if_exists = 'replace' if force_rebuild else 'append'
         else:
             # Make last_time timezone aware if it isn't
             if last_time.tzinfo is None:
@@ -324,7 +346,12 @@ class DataMinerAgent:
                     df.index = pd.to_datetime(df.index)
                     yield df
                     
-            return total_chunks, chunk_generator()
+                hn_df = self.load_hard_negatives_and_rlhf()
+                if not hn_df.empty:
+                    logging.info(f"Menginjeksi {len(hn_df)} baris Hard Negatives & OOS RLHF sebagai chunk tambahan!")
+                    yield hn_df
+                    
+            return total_chunks + 1, chunk_generator()
         except Exception as e:
             logging.error(f"Gagal memuat train chunks: {e}")
             return 0, None
@@ -346,3 +373,28 @@ class DataMinerAgent:
         except Exception as e:
             logging.error(f"Gagal memuat test data: {e}")
             return None
+
+    def load_hard_negatives_and_rlhf(self):
+        """Ambil data spesifik (termasuk dari OOS) yang memiliki status Hard Negative atau direview oleh RLHF"""
+        from database import get_hard_negative_ids, get_approved_setup_ids, get_rejected_setup_ids
+        try:
+            hn_ids = list(get_hard_negative_ids())
+            app_ids = list(get_approved_setup_ids())
+            rej_ids = list(get_rejected_setup_ids())
+            
+            all_ids = list(set(hn_ids + app_ids + rej_ids))
+            if not all_ids:
+                import pandas as pd
+                return pd.DataFrame()
+                
+            id_list_str = "','".join(all_ids)
+            query = f"SELECT * FROM market_data_merged WHERE time IN ('{id_list_str}') ORDER BY time ASC"
+            import pandas as pd
+            df = pd.read_sql(query, con=sync_engine, index_col='time')
+            if not df.empty:
+                df.index = pd.to_datetime(df.index)
+            return df
+        except Exception as e:
+            logging.error(f"Gagal memuat Hard Negatives & RLHF: {e}")
+            import pandas as pd
+            return pd.DataFrame()

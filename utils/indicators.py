@@ -67,13 +67,51 @@ def calculate_bbma(df):
     
     # Jarak Topografi
     df['dist_Close_EMA50'] = df['close'] - df['EMA_50']
+    df['dist_Close_SMA20'] = df['close'] - df['SMA_20']
     df['BB_Width'] = df['BB_Upper'] - df['BB_Lower']
     df['dist_LWMA_High_BB_Upper'] = df['LWMA_5_High'] - df['BB_Upper']
+    
+    # Kemiringan / Deteksi Sideways (MHV) - Rate of Change (ROC) selama 3 candle
+    df['SMA_20_Slope'] = df['SMA_20'] - df['SMA_20'].shift(3)
+    df['BB_Width_Slope'] = df['BB_Width'] - df['BB_Width'].shift(3)
+    
+    # Deteksi Momentum (CSM)
+    df['is_CSM_Buy'] = np.where(df['close'] > df['BB_Upper'], 1, 0)
+    df['is_CSM_Sell'] = np.where(df['close'] < df['BB_Lower'], 1, 0)
+    
+    # Arah Tren LWMA (Crossover)
+    df['LWMA_Crossover_High'] = df['LWMA_5_High'] - df['LWMA_10_High']
+    df['LWMA_Crossover_Low'] = df['LWMA_5_Low'] - df['LWMA_10_Low']
     
     # Karakteristik Candlestick (Pola Ekor & Body)
     df['upper_wick'] = df['high'] - np.maximum(df['open'], df['close'])
     df['lower_wick'] = np.minimum(df['open'], df['close']) - df['low']
     df['body_size'] = np.abs(df['close'] - df['open'])
     df['candle_dir'] = np.where(df['close'] >= df['open'], 1, -1)
+    
+    # Deteksi Pola Engulfing
+    df['prev_open'] = df['open'].shift(1)
+    df['prev_close'] = df['close'].shift(1)
+    
+    # Bullish Engulfing: previous is red, current is green, current body engulfs previous
+    df['is_Bullish_Engulfing'] = np.where(
+        (df['prev_close'] < df['prev_open']) & 
+        (df['close'] > df['open']) & 
+        (df['close'] >= df['prev_open']) & 
+        (df['open'] <= df['prev_close']), 
+        1, 0
+    )
+    
+    # Bearish Engulfing: previous is green, current is red, current body engulfs previous
+    df['is_Bearish_Engulfing'] = np.where(
+        (df['prev_close'] > df['prev_open']) & 
+        (df['close'] < df['open']) & 
+        (df['close'] <= df['prev_open']) & 
+        (df['open'] >= df['prev_close']), 
+        1, 0
+    )
+    
+    # Drop temp columns used for engulfing
+    df.drop(columns=['prev_open', 'prev_close'], inplace=True)
     
     return df

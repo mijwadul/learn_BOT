@@ -153,14 +153,14 @@ def start_system():
     else:
         st.error("Gagal terkoneksi ke MT5.")
 
-def backfill_db():
+def backfill_db(force=False):
     if init_mt5(Config.MT5_SERVER, Config.MT5_LOGIN, Config.MT5_PASSWORD, Config.MT5_PATH):
         progress_bar = st.progress(0, text="Memulai penarikan data...")
         def update_progress(batch_idx, total_batches, end_idx, total_rows):
             pct = int((end_idx / total_rows) * 100)
             progress_bar.progress(pct, text=f"Menyimpan data ({end_idx:,}/{total_rows:,} baris)...")
             
-        count = st.session_state.data_miner.backfill_data(5000000, progress_callback=update_progress)
+        count = st.session_state.data_miner.backfill_data(5000000, progress_callback=update_progress, force_rebuild=force)
         progress_bar.empty()
         st.success(f"Backfill berhasil! Menyimpan {count} baris data.")
 
@@ -460,7 +460,7 @@ with tab_cmd:
             
         if st.button("FORCE DATA BACKFILL", width="stretch"):
             with st.spinner("Menarik data historis dari broker... (mungkin butuh waktu beberapa saat)"):
-                backfill_db()
+                backfill_db(force=True)
                 
         st.markdown("---")
         st.write("**Sync MT5 Calendar Bridge**")
@@ -668,29 +668,65 @@ with tab_incubator:
             if btn_force:
                 st.session_state.researcher.model_normal = None
                 st.session_state.researcher.model_runner = None
-            total_chunks, train_gen = st.session_state.data_miner.load_train_chunks(split_ratio=TEMPORAL_SPLIT_RATIO)
-            if total_chunks > 0 and train_gen is not None:
-                with st.spinner("Mempersiapkan data pelatihan Incremental..."):
-                    progress_bar = st.progress(0, text="Memulai pelatihan Incremental Learning...")
-                    def update_progress(chunk_idx, total):
-                        pct = int((chunk_idx / total) * 100)
-                        progress_bar.progress(pct, text=f"Melatih AI (Chunk {chunk_idx}/{total})...")
+            max_attempts = 3
+            train_normal_flag = True
+            train_runner_flag = True
+            
+            for attempt in range(1, max_attempts + 1):
+                total_chunks, train_gen = st.session_state.data_miner.load_train_chunks(split_ratio=TEMPORAL_SPLIT_RATIO)
+                if total_chunks > 0 and train_gen is not None:
+                    status_text = "Mempersiapkan data pelatihan Incremental..." if attempt == 1 else f"Auto-Correction Ronde {attempt}/{max_attempts}: Melatih ulang dengan Hard Negatives..."
+                    with st.spinner(status_text):
+                        progress_bar = st.progress(0, text=f"Melatih AI (Ronde {attempt})...")
+                        def update_progress(chunk_idx, total):
+                            pct = int((chunk_idx / total) * 100)
+                            progress_bar.progress(pct, text=f"Melatih AI Ronde {attempt} (Chunk {chunk_idx}/{total})...")
+                            
+                        st.session_state.researcher.train_models(
+                            train_gen, 
+                            total_chunks=total_chunks, 
+                            progress_callback=update_progress,
+                            train_normal=train_normal_flag,
+                            train_runner=train_runner_flag
+                        )
+                        progress_bar.empty()
                         
-                    st.session_state.researcher.train_models(train_gen, total_chunks=total_chunks, progress_callback=update_progress)
-                    progress_bar.empty()
-                    
-                    test_df = st.session_state.data_miner.load_test_data(split_ratio=TEMPORAL_SPLIT_RATIO)
-                    
-                    valid = False
-                    if test_df is not None and not test_df.empty:
-                        valid = st.session_state.gatekeeper.validate_model(test_df)
-                    st.session_state.supervisor.set_model_validity(valid)
-                    if valid:
-                        st.success("Pelatihan Selesai! Model LULUS uji Walk-Forward.")
-                    else:
-                        st.warning("Pelatihan Selesai, namun model GAGAL uji Out-of-Sample.")
-            else:
-                st.error("Data di database tidak cukup untuk pelatihan (>500 baris dibutuhkan). Lakukan Force Backfill terlebih dahulu.")
+                        test_df = st.session_state.data_miner.load_test_data(split_ratio=TEMPORAL_SPLIT_RATIO)
+                        
+                        valid = False
+                        misclassified = 0
+                        if test_df is not None and not test_df.empty:
+                            result = st.session_state.gatekeeper.validate_model(test_df)
+                            if isinstance(result, tuple) and len(result) == 3:
+                                passed_normal, passed_runner, misclassified = result
+                                valid = passed_normal and passed_runner
+                                train_normal_flag = not passed_normal
+                                train_runner_flag = not passed_runner
+                            elif isinstance(result, tuple):
+                                valid, misclassified = result
+                            else:
+                                valid = result
+                                
+                        st.session_state.supervisor.set_model_validity(valid)
+                        
+                        if valid:
+                            st.success(f"Pelatihan Ronde {attempt} Selesai! Model LULUS uji Walk-Forward.")
+                            break
+                        else:
+                            if attempt < max_attempts:
+                                msg = f"Ronde {attempt} GAGAL (Ditemukan {misclassified} kesalahan OOS). "
+                                if not train_normal_flag:
+                                    msg += "Model Normal Lulus! Memulai Auto-Correction HANYA untuk model Runner..."
+                                elif not train_runner_flag:
+                                    msg += "Model Runner Lulus! Memulai Auto-Correction HANYA untuk model Normal..."
+                                else:
+                                    msg += f"Memulai Auto-Correction ronde {attempt+1}..."
+                                st.warning(msg)
+                            else:
+                                st.error(f"Pelatihan Selesai, namun model tetap GAGAL uji Out-of-Sample setelah {max_attempts} ronde.")
+                else:
+                    st.error("Data di database tidak cukup untuk pelatihan (>500 baris dibutuhkan). Lakukan Force Backfill terlebih dahulu.")
+                    break
 
     # Feature Importance Section
     st.markdown("---")
@@ -745,8 +781,19 @@ with tab_incubator:
                 valid_cols = [c for c in features if c in oos_df.columns]
                 
                 if valid_cols:
-                    probs = st.session_state.researcher.model_normal.predict_proba(oos_df[valid_cols])[:, 1]
+                    probs_all = st.session_state.researcher.model_normal.predict_proba(oos_df[valid_cols])
+                    if probs_all.shape[1] >= 3:
+                        prob_buy = probs_all[:, 1]
+                        prob_sell = probs_all[:, 2]
+                        action_types = np.where(prob_buy > prob_sell, "BUY", "SELL")
+                        probs = np.maximum(prob_buy, prob_sell)
+                    else:
+                        probs = probs_all[:, 1] if probs_all.shape[1] > 1 else np.zeros(len(oos_df))
+                        dists = oos_df.get('dist_Close_EMA50', np.zeros(len(oos_df)))
+                        action_types = np.where(dists >= 0, "BUY", "SELL")
+
                     oos_df['prob'] = probs
+                    oos_df['action_type'] = action_types
                     st.session_state.rlhf_oos_df = oos_df
                     st.session_state.rlhf_df_raw = df_raw # Simpan data utuh untuk render grafik tanpa gap
                     st.session_state.rlhf_page = 0
@@ -788,9 +835,11 @@ with tab_incubator:
                 is_approved = setup_id in approved_ids
                 is_rejected = setup_id in rejected_ids
 
-                action_type = "BUY" if row.get('dist_Close_EMA50', 0) >= 0 else "SELL"
-                sl_dist = abs(row.get('dist_Close_EMA50', 10.0))
-                sl_dist = max(sl_dist, 5.0)
+                action_type = row.get('action_type', "BUY" if row.get('dist_Close_EMA50', 0) >= 0 else "SELL")
+                sl_dist = row.get('ATR_14', 5.0)
+                import math
+                if math.isnan(sl_dist) or sl_dist < 5.0:
+                    sl_dist = 5.0
                 sl_val = row['close'] - sl_dist if action_type == "BUY" else row['close'] + sl_dist
                 tp_val = row['close'] + (sl_dist * 2.0) if action_type == "BUY" else row['close'] - (sl_dist * 2.0)
 

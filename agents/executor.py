@@ -156,21 +156,59 @@ class ExecutorAgent:
                         if df_live is not None and not df_live.empty:
                             last_row = df_live.iloc[[-1]]
                             probs = await asyncio.to_thread(self.researcher.get_live_probabilities, last_row)
-                            prob_normal = probs.get("normal", 0.5)
-                            prob_runner = probs.get("runner", 0.5)
                             
-                            max_prob = max(prob_normal, prob_runner)
+                            p_buy_n = probs.get("normal_buy", 0.0)
+                            p_buy_r = probs.get("runner_buy", 0.0)
+                            p_sell_n = probs.get("normal_sell", 0.0)
+                            p_sell_r = probs.get("runner_sell", 0.0)
                             
-                            if max_prob >= 0.70:
+                            max_buy = max(p_buy_n, p_buy_r)
+                            max_sell = max(p_sell_n, p_sell_r)
+                            best_prob = max(max_buy, max_sell)
+                            
+                            if best_prob >= 0.70:
                                 row_data = last_row.iloc[0]
-                                dist = row_data.get('dist_Close_EMA50', 10.0)
-                                action_type = mt5.ORDER_TYPE_BUY if dist >= 0 else mt5.ORDER_TYPE_SELL
                                 
-                                sl_dist = max(abs(dist), 5.0)
-                                trade_mode = "RUNNER" if prob_runner >= prob_normal else "HIT_RUN"
+                                # Dynamic SL Distance: Menggunakan ATR_14 jika ada, fallback ke 5.0
+                                sl_dist = row_data.get('ATR_14', 5.0)
+                                if pd.isna(sl_dist) or sl_dist < 5.0:
+                                    sl_dist = 5.0
                                 
-                                logging.info(f"[SIGNAL] Valid Entry Detected! Normal: {prob_normal:.2f}, Runner: {prob_runner:.2f}. Mode: {trade_mode}")
-                                self.execute_order(action_type, sl_dist, trade_mode=trade_mode, prob_runner=prob_runner)
+                                if max_buy > max_sell:
+                                    action_type = mt5.ORDER_TYPE_BUY
+                                    trade_mode = "RUNNER" if p_buy_r >= p_buy_n else "HIT_RUN"
+                                    used_prob = p_buy_r if trade_mode == "RUNNER" else p_buy_n
+                                else:
+                                    action_type = mt5.ORDER_TYPE_SELL
+                                    trade_mode = "RUNNER" if p_sell_r >= p_sell_n else "HIT_RUN"
+                                    used_prob = p_sell_r if trade_mode == "RUNNER" else p_sell_n
+                                
+                                action_str = 'BUY' if action_type == mt5.ORDER_TYPE_BUY else 'SELL'
+                                
+                                # --- Aturan Ketat BBMA: RUNNER hanya dieksekusi di zona Re-entry ---
+                                allow_execution = True
+                                if trade_mode == "RUNNER":
+                                    lwma_5_h = row_data.get('LWMA_5_High', 0)
+                                    lwma_10_h = row_data.get('LWMA_10_High', 0)
+                                    lwma_5_l = row_data.get('LWMA_5_Low', 0)
+                                    lwma_10_l = row_data.get('LWMA_10_Low', 0)
+                                    high_price = row_data.get('high', 0)
+                                    low_price = row_data.get('low', 0)
+                                    
+                                    if action_type == mt5.ORDER_TYPE_SELL:
+                                        reentry_zone = min(lwma_5_h, lwma_10_h)
+                                        if high_price < reentry_zone:
+                                            logging.info(f"[FILTER BBMA] Sinyal SELL ditahan (Wait): Harga belum mencapai zona Re-entry LWMA High (High {high_price:.4f} < {reentry_zone:.4f}).")
+                                            allow_execution = False
+                                    elif action_type == mt5.ORDER_TYPE_BUY:
+                                        reentry_zone = max(lwma_5_l, lwma_10_l)
+                                        if low_price > reentry_zone:
+                                            logging.info(f"[FILTER BBMA] Sinyal BUY ditahan (Wait): Harga belum mencapai zona Re-entry LWMA Low (Low {low_price:.4f} > {reentry_zone:.4f}).")
+                                            allow_execution = False
+                                            
+                                if allow_execution:
+                                    logging.info(f"[SIGNAL] Multiclass Entry: {action_str} | Mode: {trade_mode} | Prob: {used_prob:.2f}")
+                                    self.execute_order(action_type, sl_dist, trade_mode=trade_mode, prob_runner=used_prob)
                     except Exception as e:
                         logging.debug(f"[SIGNAL_CHECK] Error fetching/predicting: {e}")
 

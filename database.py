@@ -60,6 +60,16 @@ class RejectedSetup(Base):
     rejected_at = Column(DateTime, default=func.now())
     notes = Column(String, default="Rejected by Trader via RLHF")
 
+class HardNegative(Base):
+    __tablename__ = "hard_negatives"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    setup_id = Column(String, index=True, unique=True)
+    symbol = Column(String, default="XAUUSD")
+    failed_mode = Column(String) # Normal / Runner
+    detected_at = Column(DateTime, default=func.now())
+    notes = Column(String, default="Misclassified during OOS Validation")
+
 class TradeJournal(Base):
     __tablename__ = "trade_journal"
     
@@ -342,3 +352,52 @@ def get_macro_data(start_date: str, end_date: str):
     except Exception as e:
         print(f"Failed to read macro data from DB: {e}")
         return pd.DataFrame()
+
+def add_hard_negative(setup_id: str, failed_mode: str = "Normal"):
+    from sqlalchemy.orm import Session
+    try:
+        with Session(sync_engine) as session:
+            existing = session.query(HardNegative).filter_by(setup_id=setup_id).first()
+            if not existing:
+                new_hn = HardNegative(setup_id=setup_id, failed_mode=failed_mode)
+                session.add(new_hn)
+                session.commit()
+                return True
+    except Exception as e:
+        import logging
+        logging.error(f"Gagal menyimpan Hard Negative: {e}")
+    return False
+
+def bulk_add_hard_negatives(records: list):
+    """records adalah list of dict: [{'setup_id': '...', 'failed_mode': '...'}, ...]"""
+    from sqlalchemy.orm import Session
+    import pandas as pd
+    try:
+        with Session(sync_engine) as session:
+            # Ambil semua existing id untuk mencegah duplikat
+            existing_df = pd.read_sql("SELECT setup_id FROM hard_negatives", con=sync_engine)
+            existing_ids = set(existing_df['setup_id'].tolist()) if not existing_df.empty else set()
+            
+            new_objects = []
+            for r in records:
+                if r['setup_id'] not in existing_ids:
+                    new_objects.append(HardNegative(setup_id=r['setup_id'], failed_mode=r['failed_mode']))
+                    existing_ids.add(r['setup_id']) # Mencegah duplikat di dalam input
+            
+            if new_objects:
+                session.bulk_save_objects(new_objects)
+                session.commit()
+                return len(new_objects)
+            return 0
+    except Exception as e:
+        import logging
+        logging.error(f"Gagal menyimpan Hard Negatives (Bulk): {e}")
+        return 0
+
+def get_hard_negative_ids():
+    try:
+        import pandas as pd
+        df = pd.read_sql("SELECT setup_id FROM hard_negatives", con=sync_engine)
+        return df['setup_id'].tolist()
+    except Exception:
+        return []
