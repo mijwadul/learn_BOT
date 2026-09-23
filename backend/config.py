@@ -25,7 +25,14 @@ class Config:
     MACRO_JSON_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json" # Akan segera ditinggalkan
     SYMBOL = "XAUUSDm" # Contoh symbol default
     MAGIC_NUMBER = 123456
-    MAX_RISK_DOLLARS = 10.0 # Toleransi batas rugi per transaksi ($)
+    RISK_MODE = os.getenv("RISK_MODE", "dollars") # Mode resiko: "dollars" ($ tetap) atau "percent" (% modal)
+    MAX_RISK_DOLLARS = float(os.getenv("MAX_RISK_DOLLARS", "10.0")) # Toleransi batas rugi per transaksi ($)
+    MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "1.0")) # Toleransi batas rugi per transaksi (% modal)
     MAX_DRAWDOWN_PERCENT = 30.0 # Max drawdown reset JIKA menyentuh 30% dari ekuitas
     SPREAD_LIMIT_POINTS = 400 # Blokir eksekusi jika spread > 400 poin
     AI_NORMAL_ENTRY_THRESHOLD = 75.0 # Batas minimal probabilitas AI untuk mengizinkan OP baru (%)
+
+    # AI Intelligence: Online Learning & Market Regime (ADX)
+    ENABLE_ONLINE_LEARNING = os.getenv("ENABLE_ONLINE_LEARNING", "true").lower() == "true"
+    ADX_TREND_THRESHOLD = float(os.getenv("ADX_TREND_THRESHOLD", "25.0")) # Di atas ini: Rezim Trending Kuat (Prioritas Runner)
+    ADX_RANGING_THRESHOLD = float(os.getenv("ADX_RANGING_THRESHOLD", "20.0")) # Di bawah ini: Rezim Choppy/Sideways (Blokir Runner, Utamakan Scalp Hit&Run)

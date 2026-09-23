@@ -8,6 +8,7 @@ from utils.mt5_utils import get_rates
 from utils.indicators import calculate_bbma
 from config import Config
 from database import sync_engine
+from sqlalchemy import text
 
 logging.basicConfig(level=logging.INFO)
 
@@ -133,46 +134,47 @@ class DataMinerAgent:
                     
         return df
 
-    def fetch_and_merge_data(self, n_candles=2000):
-        logging.info(f"Fetching data for {self.symbol}...")
+    def fetch_and_merge_data(self, n_candles=2000, start_pos=0):
+        logging.info(f"Fetching data for {self.symbol} (pos {start_pos}, count {n_candles})...")
         
-        df_m1 = get_rates(self.symbol, mt5.TIMEFRAME_M1, n_candles)
-        df_m5 = get_rates(self.symbol, mt5.TIMEFRAME_M5, int(n_candles/5) + 50)
-        df_m15 = get_rates(self.symbol, mt5.TIMEFRAME_M15, int(n_candles/15) + 50)
-        df_h1 = get_rates(self.symbol, mt5.TIMEFRAME_H1, int(n_candles/60) + 50)
-        df_h4 = get_rates(self.symbol, mt5.TIMEFRAME_H4, int(n_candles/240) + 50)
+        # Buffer warmup agar MA tidak corrupt di perbatasan chunk
+        warmup_m1 = 200
+        df_m1 = get_rates(self.symbol, mt5.TIMEFRAME_M1, n_candles + warmup_m1, start_pos=start_pos)
         
-        if df_m1 is None or df_m5 is None or df_m15 is None or df_h1 is None or df_h4 is None:
-            logging.error("Failed to fetch data.")
+        start_pos_m5 = max(0, int(start_pos / 5) - 5)
+        n_candles_m5 = int(n_candles / 5) + 100
+        df_m5 = get_rates(self.symbol, mt5.TIMEFRAME_M5, n_candles_m5, start_pos=start_pos_m5)
+        
+        start_pos_m15 = max(0, int(start_pos / 15) - 5)
+        n_candles_m15 = int(n_candles / 15) + 100
+        df_m15 = get_rates(self.symbol, mt5.TIMEFRAME_M15, n_candles_m15, start_pos=start_pos_m15)
+        
+        if df_m1 is None or df_m5 is None or df_m15 is None:
+            # Ini normal jika kita meminta data yang lebih tua dari kapasitas maksimal broker
             return None
 
         # Set index
         df_m1.set_index('time', inplace=True)
         df_m5.set_index('time', inplace=True)
         df_m15.set_index('time', inplace=True)
-        df_h1.set_index('time', inplace=True)
-        df_h4.set_index('time', inplace=True)
 
-        # Feature engineering BBMA per timeframe
-        from utils.indicators import calculate_atr
+        # Feature engineering BBMA & ADX per timeframe
+        from utils.indicators import calculate_atr, calculate_adx
         df_m1 = calculate_bbma(df_m1)
         df_m1['ATR_14'] = calculate_atr(df_m1, 14)
+        df_m1['adx'] = calculate_adx(df_m1, 14)
         df_m5 = calculate_bbma(df_m5)
+        df_m5['adx'] = calculate_adx(df_m5, 14)
         df_m15 = calculate_bbma(df_m15)
-        df_h1 = calculate_bbma(df_h1)
-        df_h4 = calculate_bbma(df_h4)
+        df_m15['adx'] = calculate_adx(df_m15, 14)
         
         # Anti-Leakage MTF Merging: shift(1) for higher timeframes before merging to avoid lookahead bias
         df_m5_shifted = df_m5.shift(1).add_suffix('_m5')
         df_m15_shifted = df_m15.shift(1).add_suffix('_m15')
-        df_h1_shifted = df_h1.shift(1).add_suffix('_h1')
-        df_h4_shifted = df_h4.shift(1).add_suffix('_h4')
         
         # Merge to M1
         df_merged = df_m1.join(df_m5_shifted, how='left')
         df_merged = df_merged.join(df_m15_shifted, how='left')
-        df_merged = df_merged.join(df_h1_shifted, how='left')
-        df_merged = df_merged.join(df_h4_shifted, how='left')
         
         # Forward fill AFTER joining
         df_merged.ffill(inplace=True)
@@ -185,6 +187,10 @@ class DataMinerAgent:
         for col in df_merged.columns:
             if str(df_merged[col].dtype).startswith('uint'):
                 df_merged[col] = df_merged[col].astype('int64')
+                
+        # Potong (slice) bagian warmup agar kita hanya mereturn data asli yang diminta
+        if len(df_merged) > n_candles:
+            df_merged = df_merged.iloc[-n_candles:]
         
         logging.info(f"Data merged successfully. Shape: {df_merged.shape}")
         return df_merged
@@ -199,7 +205,7 @@ class DataMinerAgent:
                     conn.execute(text("DROP TABLE IF EXISTS market_data_merged"))
                 logging.warning("Table market_data_merged dropped for forced rebuild.")
             except Exception as e:
-                pass
+                logging.error(f"Failed to drop table market_data_merged: {e}")
                 
         try:
             # Check schema first
@@ -242,76 +248,75 @@ class DataMinerAgent:
         # Ensure we don't fetch more than total_candles if missing is huge
         candles_to_fetch = min(candles_to_fetch, total_candles)
         
-        df = self.fetch_and_merge_data(n_candles=candles_to_fetch)
+        # CHUNKED DOWNLOAD LOGIC
+        chunk_size_mt5 = 100000
+        total_mt5_batches = (candles_to_fetch + chunk_size_mt5 - 1) // chunk_size_mt5
+        logging.info(f"Starting chunked MT5 download for {candles_to_fetch:,} candles in {total_mt5_batches} batches...")
         
-        if df is not None and sample_df is not None:
-            missing_cols = set(df.columns) - set(sample_df.columns)
-            if missing_cols:
-                from sqlalchemy import text
-                try:
-                    print(f"[*] Terdeteksi ada {len(missing_cols)} kolom baru yang belum ada di database: {missing_cols}")
-                    with sync_engine.begin() as conn:
-                        for col in missing_cols:
-                            dtype_str = str(df[col].dtype)
-                            if 'float' in dtype_str:
-                                sql_type = 'FLOAT'
-                            elif 'int' in dtype_str:
-                                sql_type = 'BIGINT'
-                            elif 'bool' in dtype_str:
-                                sql_type = 'BOOLEAN'
-                            else:
-                                sql_type = 'TEXT'
-                            
-                            print(f"[*] Menambahkan kolom baru: ALTER TABLE market_data_merged ADD COLUMN \"{col}\" {sql_type}")
-                            logging.info(f"Adding missing column '{col}' ({sql_type}) to market_data_merged.")
-                            conn.execute(text(f'ALTER TABLE market_data_merged ADD COLUMN "{col}" {sql_type}'))
-                    print("[*] Semua kolom baru berhasil ditambahkan ke database!")
-                except Exception as e:
-                    print(f"[!] GAGAL menambahkan kolom: {e}")
-                    logging.error(f"Failed to add missing columns to database: {e}")
+        total_inserted = 0
         
-        if df is not None and not df.empty:
+        for batch_idx in range(total_mt5_batches):
+            # Calculate start_pos to fetch oldest data first
+            remaining = candles_to_fetch - (batch_idx * chunk_size_mt5)
+            current_chunk_size = min(chunk_size_mt5, remaining)
+            start_pos = remaining - current_chunk_size
+            
+            df = self.fetch_and_merge_data(n_candles=current_chunk_size, start_pos=start_pos)
+            
+            if df is None or df.empty:
+                continue
+                
+            # Handle new column schema alterations only on the first batch if sample_df exists
+            if batch_idx == 0 and sample_df is not None:
+                missing_cols = set(df.columns) - set(sample_df.columns)
+                if missing_cols:
+                    try:
+                        print(f"[*] Terdeteksi ada {len(missing_cols)} kolom baru yang belum ada di database: {missing_cols}")
+                        with sync_engine.begin() as conn:
+                            for col in missing_cols:
+                                dtype_str = str(df[col].dtype)
+                                if 'float' in dtype_str:
+                                    sql_type = 'FLOAT'
+                                elif 'int' in dtype_str:
+                                    sql_type = 'BIGINT'
+                                elif 'bool' in dtype_str:
+                                    sql_type = 'BOOLEAN'
+                                else:
+                                    sql_type = 'TEXT'
+                                print(f"[*] Menambahkan kolom baru: ALTER TABLE market_data_merged ADD COLUMN \"{col}\" {sql_type}")
+                                conn.execute(text(f'ALTER TABLE market_data_merged ADD COLUMN "{col}" {sql_type}'))
+                        print("[*] Semua kolom baru berhasil ditambahkan ke database!")
+                    except Exception as e:
+                        logging.error(f"Failed to add missing columns to database: {e}")
+
+            # Filter incremental data
             if not pd.isna(last_time):
-                # Filter to only insert new rows
-                # Assumes df.index is tz-aware UTC
                 if df.index.tzinfo is None:
                     df.index = df.index.tz_localize('UTC')
                 df = df[df.index > last_time]
                 
             if not df.empty:
-                total_rows = len(df)
-                chunk_size = 50000
-                total_batches = (total_rows + chunk_size - 1) // chunk_size
-                logging.info(f"Saving {total_rows:,} new rows to database in {total_batches} batches (chunksize={chunk_size:,})...")
-
-                for batch_idx, start_idx in enumerate(range(0, total_rows, chunk_size), 1):
-                    end_idx = min(start_idx + chunk_size, total_rows)
-                    chunk_df = df.iloc[start_idx:end_idx]
+                current_if_exists = 'replace' if (force_rebuild and batch_idx == 0) else 'append'
+                
+                df.to_sql(
+                    'market_data_merged',
+                    con=sync_engine,
+                    if_exists=current_if_exists,
+                    index=True,
+                    chunksize=50000,
+                    method='multi'
+                )
+                
+                rows_in_chunk = len(df)
+                total_inserted += rows_in_chunk
+                pct = ((batch_idx + 1) / total_mt5_batches) * 100
+                logging.info(f"[DB Progress] MT5 Batch {batch_idx+1}/{total_mt5_batches} selesai: {rows_in_chunk:,} baris ({pct:.1f}%) tersimpan ke database.")
+                
+                if progress_callback:
+                    progress_callback(batch_idx + 1, total_mt5_batches, batch_idx + 1, total_mt5_batches)
                     
-                    chunk_df.to_sql(
-                        'market_data_merged',
-                        con=sync_engine,
-                        if_exists='append',
-                        index=True,
-                        chunksize=chunk_size,
-                        method='multi'
-                    )
-                    
-                    pct = (end_idx / total_rows) * 100
-                    logging.info(
-                        f"[DB Progress] Batch {batch_idx}/{total_batches} selesai: "
-                        f"{end_idx:,}/{total_rows:,} baris ({pct:.1f}%) tersimpan ke database."
-                    )
-                    
-                    if progress_callback:
-                        progress_callback(batch_idx, total_batches, end_idx, total_rows)
-
-                logging.info("Backfill/Incremental complete.")
-                return len(df)
-            else:
-                logging.info("No new rows to insert after filtering.")
-                return 0
-        return 0
+        logging.info(f"Backfill/Incremental complete. Total inserted: {total_inserted:,}")
+        return total_inserted
 
     def load_from_db(self):
         logging.info("Loading all data from database for training...")
@@ -325,7 +330,7 @@ class DataMinerAgent:
             logging.error(f"Failed to load data from database: {e}")
             return None
 
-    def load_train_chunks(self, chunk_size=100000, split_ratio=0.80):
+    def load_train_chunks(self, chunk_size=100000, split_ratio=0.80, mode="normal"):
         try:
             query_count = "SELECT COUNT(*) FROM market_data_merged"
             total_rows = pd.read_sql(query_count, con=sync_engine).iloc[0, 0]
@@ -336,7 +341,7 @@ class DataMinerAgent:
                 return 0, None
                 
             total_chunks = (train_limit + chunk_size - 1) // chunk_size
-            logging.info(f"Mempersiapkan {total_chunks} chunks untuk training (total {train_limit} baris).")
+            logging.info(f"Mempersiapkan {total_chunks} chunks untuk training [{mode.upper()}] (total {train_limit} baris).")
             
             def chunk_generator():
                 for offset in range(0, train_limit, chunk_size):
@@ -346,17 +351,35 @@ class DataMinerAgent:
                     df.index = pd.to_datetime(df.index)
                     yield df
                     
-                hn_df = self.load_hard_negatives_and_rlhf()
+                hn_df = self.load_hard_negatives_and_rlhf(mode=mode)
                 if not hn_df.empty:
-                    logging.info(f"Menginjeksi {len(hn_df)} baris Hard Negatives & OOS RLHF sebagai chunk tambahan!")
+                    logging.info(f"Menginjeksi {len(hn_df)} baris Hard Negatives & OOS RLHF ({mode.upper()}) sebagai chunk tambahan!")
                     yield hn_df
+
+                live_df = self.load_live_decision_chunk(mode=mode)
+                if not live_df.empty:
+                    logging.info(f"Menginjeksi {len(live_df)} baris Live Closed Decisions ({mode.upper()}) sebagai chunk feedback!")
+                    yield live_df
                     
-            return total_chunks + 1, chunk_generator()
+            return total_chunks + 2, chunk_generator()
         except Exception as e:
             logging.error(f"Gagal memuat train chunks: {e}")
             return 0, None
+
+    def load_live_decision_chunk(self, mode="normal"):
+        """Ambil closed live decisions (WIN & LOSS) yang sudah memiliki feature vector lengkap."""
+        from database import get_live_decision_samples_for_training
+        try:
+            df = get_live_decision_samples_for_training(mode=mode)
+            if not df.empty:
+                logging.info(f"Mengambil {len(df)} live decision closed trades ({mode.upper()}) untuk diinjeksi ke retraining!")
+            return df
+        except Exception as e:
+            logging.error(f"Gagal memuat live decision samples: {e}")
+            import pandas as pd
+            return pd.DataFrame()
             
-    def load_test_data(self, split_ratio=0.80):
+    def load_test_chunks(self, chunk_size=5000, split_ratio=0.80):
         try:
             query_count = "SELECT COUNT(*) FROM market_data_merged"
             total_rows = pd.read_sql(query_count, con=sync_engine).iloc[0, 0]
@@ -364,37 +387,68 @@ class DataMinerAgent:
             test_limit = total_rows - train_limit
             
             if test_limit == 0:
-                return None
+                logging.error("Tidak ada data OOS/Test di database.")
+                return 0, None
                 
-            query = f"SELECT * FROM market_data_merged ORDER BY time ASC LIMIT {test_limit} OFFSET {train_limit}"
-            df = pd.read_sql(query, con=sync_engine, index_col='time')
-            df.index = pd.to_datetime(df.index)
-            return df
-        except Exception as e:
-            logging.error(f"Gagal memuat test data: {e}")
-            return None
-
-    def load_hard_negatives_and_rlhf(self):
-        """Ambil data spesifik (termasuk dari OOS) yang memiliki status Hard Negative atau direview oleh RLHF"""
-        from database import get_hard_negative_ids, get_approved_setup_ids, get_rejected_setup_ids
-        try:
-            hn_ids = list(get_hard_negative_ids())
-            app_ids = list(get_approved_setup_ids())
-            rej_ids = list(get_rejected_setup_ids())
+            total_chunks = (test_limit + chunk_size - 1) // chunk_size
+            logging.info(f"Mempersiapkan {total_chunks} chunks untuk testing/validasi OOS (total {test_limit} baris).")
             
-            all_ids = list(set(hn_ids + app_ids + rej_ids))
-            if not all_ids:
+            def chunk_generator():
+                for offset in range(0, test_limit, chunk_size):
+                    limit = min(chunk_size, test_limit - offset)
+                    db_offset = train_limit + offset
+                    query = f"SELECT * FROM market_data_merged ORDER BY time ASC LIMIT {limit} OFFSET {db_offset}"
+                    df = pd.read_sql(query, con=sync_engine, index_col='time')
+                    df.index = pd.to_datetime(df.index)
+                    yield df
+                    
+            return total_chunks, chunk_generator()
+        except Exception as e:
+            logging.error(f"Gagal memuat test chunks: {e}")
+            return 0, None
+
+    def load_hard_negatives_and_rlhf(self, mode="normal"):
+        """Ambil data spesifik (termasuk dari OOS) yang memiliki status Hard Negative atau direview oleh RLHF
+        spesifik untuk mode yang sedang dilatih (Normal atau Runner).
+        Setup yang di-Ignore oleh trader TIDAK diinjeksi — bobotnya tetap netral di training data base."""
+        from database import get_hard_negative_ids, get_approved_setup_ids, get_rejected_setup_ids, get_ignored_setup_ids
+        try:
+            mode_str = mode.lower() if mode else "normal"
+            hn_ids  = list(get_hard_negative_ids(mode=mode_str))
+            app_ids = list(get_approved_setup_ids(mode=mode_str))
+            rej_ids = list(get_rejected_setup_ids(mode=mode_str))
+            ign_ids = get_ignored_setup_ids(mode=mode_str)  # Diabaikan trader — tidak diinjeksi ke RLHF chunk
+
+            # Hanya inject HN + Approved + Rejected untuk mode ini, BUKAN Ignored
+            inject_ids = list(set(hn_ids + app_ids + rej_ids) - ign_ids)
+
+            if not inject_ids:
                 import pandas as pd
                 return pd.DataFrame()
-                
-            id_list_str = "','".join(all_ids)
+
+            id_list_str = "','".join(inject_ids)
             query = f"SELECT * FROM market_data_merged WHERE time IN ('{id_list_str}') ORDER BY time ASC"
             import pandas as pd
             df = pd.read_sql(query, con=sync_engine, index_col='time')
             if not df.empty:
                 df.index = pd.to_datetime(df.index)
+            logging.info(f"[RLHF Inject ({mode_str.upper()})] {len(df)} baris (HN={len(hn_ids)}, Approve={len(app_ids)}, Reject={len(rej_ids)}, Ignored={len(ign_ids)} dikecualikan)")
             return df
         except Exception as e:
-            logging.error(f"Gagal memuat Hard Negatives & RLHF: {e}")
+            logging.error(f"Gagal memuat Hard Negatives & RLHF ({mode}): {e}")
             import pandas as pd
             return pd.DataFrame()
+
+    def load_recent_micro_chunk(self, n_candles=3000):
+        """Memuat n_candles candle paling baru dari database untuk Online Learning (Micro-Retrain)."""
+        try:
+            query = f"SELECT * FROM (SELECT * FROM market_data_merged ORDER BY time DESC LIMIT {n_candles}) sub ORDER BY time ASC"
+            df = pd.read_sql(query, con=sync_engine, index_col='time')
+            if not df.empty:
+                df.index = pd.to_datetime(df.index)
+            return df
+        except Exception as e:
+            logging.error(f"Gagal memuat recent micro chunk: {e}")
+            import pandas as pd
+            return pd.DataFrame()
+

@@ -28,13 +28,12 @@ def init_mt5(server, login, password, path=""):
     print("MT5 Initialized Successfully.")
     return True
 
-def get_rates(symbol, timeframe_constant, n_candles=1000):
+def get_rates(symbol, timeframe_constant, n_candles=1000, start_pos=0):
     """
     timeframe_constant: e.g. mt5.TIMEFRAME_M1
     """
-    rates = mt5.copy_rates_from_pos(symbol, timeframe_constant, 0, n_candles)
+    rates = mt5.copy_rates_from_pos(symbol, timeframe_constant, start_pos, n_candles)
     if rates is None:
-        print(f"Failed to get rates for {symbol}, error = {mt5.last_error()}")
         return None
     
     df = pd.DataFrame(rates)

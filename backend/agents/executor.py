@@ -20,6 +20,8 @@ class ExecutorAgent:
         self.researcher = researcher_agent
         self.running = False
         self.MAX_PYRAMIDING = 3
+        self.current_market_regime = {"adx": 0.0, "regime": "UNKNOWN", "last_updated": None}
+        self.last_micro_retrain_time = None
         
     async def monitor_market(self):
         self.running = True
@@ -29,13 +31,23 @@ class ExecutorAgent:
         last_hourly_db_sync = datetime.datetime.now()
         last_exhaustion_check = datetime.datetime.now()
         last_signal_check = datetime.datetime.now()
+        last_deals_sync = datetime.datetime.now()
         
         while self.running:
+            now = datetime.datetime.now()
+
+            # Auto-sync closed deals dari MT5 setiap 20 detik untuk pembukuan PnL riil (berjalan terus di background)
+            if (now - last_deals_sync).total_seconds() >= 20:
+                last_deals_sync = now
+                try:
+                    from database import sync_mt5_closed_deals_to_db
+                    sync_mt5_closed_deals_to_db(days_back=90)
+                except Exception as e:
+                    logging.debug(f"[Deals Sync Error] {e}")
+
             if self.supervisor.state != 'live':
                 await asyncio.sleep(1)
                 continue
-                
-            now = datetime.datetime.now()
 
             # Rutinitas Asinkron: Auto-sync candle terbaru ke database setiap 1 jam sekali (Mode Live)
             if self.data_miner is not None and (now - last_hourly_db_sync).total_seconds() >= 3600:
@@ -45,6 +57,10 @@ class ExecutorAgent:
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, self.data_miner.backfill_data, 10000)
                     logging.info("[HOURLY SYNC] Sinkronisasi candle 1 jam ke database berhasil.")
+
+                    # --- Online Learning: Auto Micro-Retrain setelah sinkronisasi data baru ---
+                    if Config.ENABLE_ONLINE_LEARNING:
+                        asyncio.create_task(self.trigger_online_learning())
                 except Exception as e:
                     logging.error(f"[HOURLY SYNC] Gagal sinkronisasi data ke database: {e}")
                 
@@ -173,20 +189,62 @@ class ExecutorAgent:
                                 sl_dist = row_data.get('ATR_14', 5.0)
                                 if pd.isna(sl_dist) or sl_dist < 5.0:
                                     sl_dist = 5.0
+
+                                # --- Regime-Aware Analysis (ADX) ---
+                                adx_val = row_data.get('adx', np.nan)
+                                if pd.isna(adx_val) or adx_val == 0:
+                                    from utils.indicators import calculate_adx
+                                    df_live['adx'] = calculate_adx(df_live, 14)
+                                    adx_val = float(df_live['adx'].iloc[-1]) if not pd.isna(df_live['adx'].iloc[-1]) else 20.0
+
+                                if adx_val >= Config.ADX_TREND_THRESHOLD:
+                                    regime_name = "TRENDING"
+                                elif adx_val < Config.ADX_RANGING_THRESHOLD:
+                                    regime_name = "RANGING/CHOPPY"
+                                else:
+                                    regime_name = "TRANSITION"
+
+                                self.current_market_regime = {
+                                    "adx": round(float(adx_val), 2),
+                                    "regime": regime_name,
+                                    "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                }
                                 
                                 if max_buy > max_sell:
                                     action_type = mt5.ORDER_TYPE_BUY
-                                    trade_mode = "RUNNER" if p_buy_r >= p_buy_n else "HIT_RUN"
-                                    used_prob = p_buy_r if trade_mode == "RUNNER" else p_buy_n
+                                    preferred_mode = "RUNNER" if p_buy_r >= p_buy_n else "HIT_RUN"
+                                    used_prob = p_buy_r if preferred_mode == "RUNNER" else p_buy_n
                                 else:
                                     action_type = mt5.ORDER_TYPE_SELL
-                                    trade_mode = "RUNNER" if p_sell_r >= p_sell_n else "HIT_RUN"
-                                    used_prob = p_sell_r if trade_mode == "RUNNER" else p_sell_n
+                                    preferred_mode = "RUNNER" if p_sell_r >= p_sell_n else "HIT_RUN"
+                                    used_prob = p_sell_r if preferred_mode == "RUNNER" else p_sell_n
+
+                                # --- Regime-Aware Signal Routing Logic ---
+                                trade_mode = preferred_mode
+                                if preferred_mode == "RUNNER" and regime_name == "RANGING/CHOPPY":
+                                    # Di pasar sideways, target 1:5 runner rentan tersapu whipsaw SL. Alihkan ke scalping 1:2
+                                    trade_mode = "HIT_RUN"
+                                    used_prob = p_buy_n if action_type == mt5.ORDER_TYPE_BUY else p_sell_n
+                                    logging.info(f"[REGIME ROUTING] ⚠️ Pasar Sideways terdeteksi (ADX: {adx_val:.1f} < {Config.ADX_RANGING_THRESHOLD}). Sinyal RUNNER dialihkan ke HIT_RUN (Scalp 1:2) | Prob Baru: {used_prob:.2f}")
+                                elif regime_name == "TRENDING" and preferred_mode == "HIT_RUN" and ((action_type == mt5.ORDER_TYPE_BUY and p_buy_r >= 0.65) or (action_type == mt5.ORDER_TYPE_SELL and p_sell_r >= 0.65)):
+                                    # Di pasar trending kuat, prioritaskan RUNNER jika model runner memiliki probabilitas meyakinkan
+                                    trade_mode = "RUNNER"
+                                    used_prob = p_buy_r if action_type == mt5.ORDER_TYPE_BUY else p_sell_r
+                                    logging.info(f"[REGIME ROUTING] 🚀 Pasar Trending Kuat terdeteksi (ADX: {adx_val:.1f} >= {Config.ADX_TREND_THRESHOLD}). Memprioritaskan RUNNER mode | Prob: {used_prob:.2f}")
+                                
+                                allow_execution = True
+                                
+                                # --- Partial Live / Circuit Breaker Check ---
+                                if trade_mode == "RUNNER" and not self.supervisor.is_runner_valid():
+                                    logging.warning(f"[PARTIAL LIVE] Sinyal Runner terdeteksi (Prob: {used_prob:.2f}), tapi Mode Runner sedang dikarantina. Sinyal ditolak.")
+                                    allow_execution = False
+                                elif trade_mode == "HIT_RUN" and not self.supervisor.is_normal_valid():
+                                    logging.warning(f"[PARTIAL LIVE] Sinyal Normal terdeteksi (Prob: {used_prob:.2f}), tapi Mode Normal sedang dikarantina. Sinyal ditolak.")
+                                    allow_execution = False
                                 
                                 action_str = 'BUY' if action_type == mt5.ORDER_TYPE_BUY else 'SELL'
                                 
                                 # --- Aturan Ketat BBMA: RUNNER hanya dieksekusi di zona Re-entry ---
-                                allow_execution = True
                                 if trade_mode == "RUNNER":
                                     lwma_5_h = row_data.get('LWMA_5_High', 0)
                                     lwma_10_h = row_data.get('LWMA_10_High', 0)
@@ -208,7 +266,7 @@ class ExecutorAgent:
                                             
                                 if allow_execution:
                                     logging.info(f"[SIGNAL] Multiclass Entry: {action_str} | Mode: {trade_mode} | Prob: {used_prob:.2f}")
-                                    self.execute_order(action_type, sl_dist, trade_mode=trade_mode, prob_runner=used_prob)
+                                    self.execute_order(action_type, sl_dist, trade_mode=trade_mode, prob_runner=used_prob, row_data=row_data)
                     except Exception as e:
                         logging.debug(f"[SIGNAL_CHECK] Error fetching/predicting: {e}")
 
@@ -275,7 +333,7 @@ class ExecutorAgent:
         self.running = False
         logging.info("Executor Agent stopped.")
         
-    def execute_order(self, action, sl_distance, trade_mode="HIT_RUN", prob_runner=None):
+    def execute_order(self, action, sl_distance, trade_mode="HIT_RUN", prob_runner=None, row_data=None):
         """
         Anti-Latensi: 'Strict Sequencing' Execution.
         Sesaat setelah sinyal live valid, mt5.order_send() HARUS dieksekusi pertama kali.
@@ -359,8 +417,15 @@ class ExecutorAgent:
             risk_modifier = 1.5 # Agresif jika win rate sangat baik
             logging.info(f"[RISK] Win rate super ({win_rate*100:.0f}%), meningkatkan risiko 50%")
             
-        # --- Formula Sizing Berbasis Uang (Risk) ---
-        # Contoh user: Jika risk $10, dan jarak SL adalah 500 poin ($5.00 absolut), maka lot harus 0.02 (di XAUUSD).
+        # --- Formula Sizing Berbasis Uang / Persentase Modal (Risk) ---
+        # Hitung modal/balance saat ini jika menggunakan mode persen
+        base_risk_dollars = Config.MAX_RISK_DOLLARS
+        if getattr(Config, 'RISK_MODE', 'dollars') == 'percent':
+            account_info = mt5.account_info()
+            equity = account_info.equity if account_info and account_info.equity > 0 else (account_info.balance if account_info else 1000.0)
+            base_risk_dollars = max(1.0, equity * (getattr(Config, 'MAX_RISK_PERCENT', 1.0) / 100.0))
+            logging.info(f"[RISK PERCENT] Equity: ${equity:.2f} | Risk: {Config.MAX_RISK_PERCENT}% -> Base Risk: ${base_risk_dollars:.2f}")
+
         tick_value = symbol_info.trade_tick_value
         tick_size = symbol_info.trade_tick_size
         
@@ -373,7 +438,7 @@ class ExecutorAgent:
             loss_for_one_lot = sl_distance * money_per_unit
             
             if loss_for_one_lot > 0:
-                lot = (Config.MAX_RISK_DOLLARS * risk_modifier) / loss_for_one_lot
+                lot = (base_risk_dollars * risk_modifier) / loss_for_one_lot
                 
         lot = max(0.01, round(lot, 2))
         
@@ -446,8 +511,9 @@ class ExecutorAgent:
                     mt5.order_send(req_sl)
             # ------------------------------------------------
             
+            setup_id = f"SETUP_LIVE_{trade_mode}_{result.order}"
             try:
-                from database import log_trade_record
+                from database import log_trade_record, save_live_decision_sample
                 action_str = "BUY" if action == mt5.ORDER_TYPE_BUY else "SELL"
                 log_trade_record(
                     action=action_str,
@@ -456,8 +522,29 @@ class ExecutorAgent:
                     sl=float(sl),
                     tp=float(tp),
                     profit=0.0,
-                    comment=f"Ticket #{result.order} | AI Bot Execute"
+                    comment=f"Ticket #{result.order} | AI Bot Execute",
+                    mode=trade_mode,
+                    ticket=result.order,
+                    setup_id=setup_id
                 )
+
+                # Simpan snapshot feature vector numerik lengkap untuk RLHF Retraining
+                if row_data is not None:
+                    try:
+                        feature_dict = row_data.to_dict() if hasattr(row_data, 'to_dict') else dict(row_data)
+                        save_live_decision_sample(
+                            ticket=result.order,
+                            setup_id=setup_id,
+                            mode=trade_mode,
+                            action=action_str,
+                            probability=float(prob_runner if prob_runner is not None else 0.0),
+                            entry_price=float(price),
+                            sl=float(sl),
+                            tp=float(tp),
+                            feature_vector=feature_dict
+                        )
+                    except Exception as e_f:
+                        logging.error(f"[Post-Execution Live Decision Error] Gagal simpan feature vector: {e_f}")
             except Exception as e:
                 logging.error(f"[Post-Execution DB Error] Gagal menyimpan log trade: {e}")
                 
@@ -541,6 +628,12 @@ class ExecutorAgent:
             except Exception as e:
                 logging.error(f"[Partial Close Journal Error] {e}")
                 
+            try:
+                from database import sync_mt5_closed_deals_to_db
+                sync_mt5_closed_deals_to_db(days_back=1)
+            except Exception:
+                pass
+                
         return result
 
     def execute_full_close(self, ticket, reason="Full Close"):
@@ -590,6 +683,12 @@ class ExecutorAgent:
                 )
             except Exception as e:
                 logging.error(f"[Full Close Journal Error] {e}")
+                
+            try:
+                from database import sync_mt5_closed_deals_to_db
+                sync_mt5_closed_deals_to_db(days_back=1)
+            except Exception:
+                pass
                 
         return result
 
@@ -734,6 +833,47 @@ class ExecutorAgent:
             except Exception as e:
                 logging.debug(f"Gagal mengambil live features untuk XAI: {e}")
         return "Top 3 Fitur: dist_Close_EMA50 (+0.45), BB_Width (+0.32), ATR_14 (+0.21)"
+
+    async def trigger_online_learning(self):
+        """
+        Pemicu Online Learning otomatis (Micro-Retrain) di background.
+        Mengambil recent candles + closed trades feedback dan melakukan incremental fitting
+        tanpa mengganggu thread eksekusi trading utama.
+        """
+        if not self.researcher or not self.data_miner:
+            return
+
+        if self.researcher.is_training_normal or self.researcher.is_training_runner:
+            logging.info("[ONLINE LEARNING] Retraining sedang berlangsung di thread lain. Lewati micro-retrain.")
+            return
+
+        logging.info("[ONLINE LEARNING] 🚀 Memulai siklus auto micro-retrain...")
+        loop = asyncio.get_running_loop()
+
+        def _run_micro():
+            try:
+                df_recent = self.data_miner.load_recent_micro_chunk(n_candles=3000)
+                if df_recent is None or df_recent.empty:
+                    logging.warning("[ONLINE LEARNING] Gagal memuat recent candle chunk.")
+                    return
+
+                # Micro-retrain untuk mode Normal
+                if self.researcher.model_normal is not None:
+                    fb_normal = self.data_miner.load_live_decision_chunk(mode="normal")
+                    self.researcher.micro_retrain("normal", df_recent, fb_normal)
+
+                # Micro-retrain untuk mode Runner
+                if self.researcher.model_runner is not None:
+                    fb_runner = self.data_miner.load_live_decision_chunk(mode="runner")
+                    self.researcher.micro_retrain("runner", df_recent, fb_runner)
+
+                self.last_micro_retrain_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                logging.info(f"[ONLINE LEARNING] ✨ Siklus micro-retrain selesai pada {self.last_micro_retrain_time}.")
+            except Exception as e:
+                logging.error(f"[ONLINE LEARNING] Gagal mengeksekusi micro-retrain: {e}")
+
+        await loop.run_in_executor(None, _run_micro)
+
 
 def capture_m1_snapshot(symbol=Config.SYMBOL, n_candles=50):
     """Merekam 50 candle M1 terakhir ke format JSON (to_json)."""
