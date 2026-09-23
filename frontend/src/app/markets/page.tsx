@@ -2,12 +2,12 @@ import { LineChart } from "lucide-react";
 
 export default function MarketsPage() {
   return (
-    <div className="p-6 h-full flex flex-col">
-      <div className="mb-8">
-        <h1 className="text-3xl font-black text-white tracking-widest flex items-center gap-3">
+    <div className="p-3 sm:p-4 md:p-6 min-h-full flex flex-col">
+      <div className="mb-6 md:mb-8">
+        <h1 className="text-2xl sm:text-3xl font-black text-white tracking-widest flex items-center gap-2 sm:gap-3">
           <LineChart className="text-brand-green" /> MARKETS
         </h1>
-        <p className="text-white/50 mt-2">Market screener and symbol selection</p>
+        <p className="text-white/50 text-xs sm:text-sm mt-1">Market screener and symbol selection</p>
       </div>
 
       <div className="flex-1 glass-panel flex flex-col items-center justify-center text-center p-6">

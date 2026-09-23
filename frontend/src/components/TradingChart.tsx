@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { createChart, ColorType, IChartApi, ISeriesApi } from "lightweight-charts";
+import { getWsBaseUrl } from "@/config";
 
 export default function TradingChart({ isLive }: { isLive: boolean }) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -27,10 +28,21 @@ export default function TradingChart({ isLive }: { isLive: boolean }) {
     chartRef.current = chart;
     seriesRef.current = candleSeries;
     const handleResize = () => {
-      if (chartContainerRef.current) chart.applyOptions({ width: chartContainerRef.current.clientWidth, height: chartContainerRef.current.clientHeight });
+      if (chartContainerRef.current) {
+        chart.applyOptions({
+          width: chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight || 300,
+        });
+      }
     };
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(chartContainerRef.current);
     window.addEventListener("resize", handleResize);
-    return () => { window.removeEventListener("resize", handleResize); chart.remove(); };
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      resizeObserver.disconnect();
+      chart.remove();
+    };
   }, []);
 
   // FIX #4: WebSocket SELALU connect saat mount (tidak bergantung pada isLive)
@@ -40,7 +52,7 @@ export default function TradingChart({ isLive }: { isLive: boolean }) {
     let retryDelay = 2000;
     const connect = () => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
-      const ws = new WebSocket("ws://localhost:8000/ws/market_data");
+      const ws = new WebSocket(`${getWsBaseUrl()}/ws/market_data`);
       wsRef.current = ws;
       ws.onopen = () => { retryDelay = 2000; };
       ws.onmessage = (event) => {
@@ -81,7 +93,7 @@ export default function TradingChart({ isLive }: { isLive: boolean }) {
   }, []);
 
   return (
-    <div className="w-full h-full min-h-[400px] relative">
+    <div className="w-full h-full min-h-[300px] md:min-h-[400px] relative">
       {!isLive && (
         <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/40 backdrop-blur-sm rounded-lg">
           <p className="text-white/50 font-medium">System Offline - Waiting for Tick Data</p>

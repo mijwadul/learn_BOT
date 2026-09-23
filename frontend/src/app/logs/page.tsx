@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { Terminal as TerminalIcon } from "lucide-react";
+import { getWsBaseUrl } from "@/config";
 
 export default function LogsPage() {
   const [logs, setLogs] = useState<string[]>([]);
@@ -15,7 +16,7 @@ export default function LogsPage() {
     const connect = () => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
 
-      const ws = new WebSocket("ws://localhost:8000/ws/logs");
+      const ws = new WebSocket(`${getWsBaseUrl()}/ws/logs`);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -64,15 +65,15 @@ export default function LogsPage() {
   }, [logs]);
 
   return (
-    <div className="p-6 h-full flex flex-col">
-      <div className="mb-8 shrink-0 flex items-start justify-between">
+    <div className="p-3 sm:p-4 md:p-6 min-h-full flex flex-col">
+      <div className="mb-4 md:mb-8 shrink-0 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         <div>
-          <h1 className="text-3xl font-black text-white tracking-widest flex items-center gap-3">
+          <h1 className="text-2xl sm:text-3xl font-black text-white tracking-widest flex items-center gap-2 sm:gap-3">
             <TerminalIcon className="text-brand-green" /> SYSTEM LOGS
           </h1>
-          <p className="text-white/50 mt-2">Real-time terminal output from backend agents (wss://backend/ws/logs)</p>
+          <p className="text-white/50 text-xs sm:text-sm mt-1">Real-time terminal output from backend agents (wss://backend/ws/logs)</p>
         </div>
-        <span className={`text-xs font-bold px-3 py-1 rounded-full flex items-center gap-1.5 mt-2 shrink-0 ${wsConnected ? 'bg-brand-green/20 text-brand-green' : 'bg-brand-red/20 text-brand-red animate-pulse'}`}>
+        <span className={`text-xs font-bold px-3 py-1 rounded-full flex items-center gap-1.5 self-start sm:self-auto shrink-0 ${wsConnected ? 'bg-brand-green/20 text-brand-green' : 'bg-brand-red/20 text-brand-red animate-pulse'}`}>
           <span className="w-2 h-2 rounded-full bg-current" />
           {wsConnected ? 'CONNECTED' : 'RECONNECTING...'}
         </span>
@@ -80,7 +81,7 @@ export default function LogsPage() {
 
       <div 
         ref={scrollRef}
-        className="flex-1 bg-black/80 rounded-xl border border-white/10 p-4 font-mono text-[11px] md:text-xs overflow-y-auto flex flex-col gap-1"
+        className="flex-1 bg-black/80 rounded-xl border border-white/10 p-3 sm:p-4 font-mono text-[10px] sm:text-xs overflow-y-auto flex flex-col gap-1 min-h-[300px]"
       >
         {logs.length === 0 ? (
            <span className="text-white/30 italic">Waiting for connection or python logs...</span>

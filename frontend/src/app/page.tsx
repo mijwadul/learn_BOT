@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { Power, Sliders, DollarSign, Percent, Check } from "lucide-react";
 import dynamic from "next/dynamic";
+import { getApiBaseUrl } from "@/config";
 
 // Dynamically import TradingChart to avoid SSR issues with canvas
 const TradingChart = dynamic(() => import("@/components/TradingChart"), { ssr: false });
@@ -31,7 +32,7 @@ export default function Home() {
 
   useEffect(() => {
     const fetchState = () => {
-      fetch("http://localhost:8000/api/state")
+      fetch(`${getApiBaseUrl()}/api/state`)
         .then(res => res.json())
         .then(data => {
           setIsLive(data.is_live);
@@ -60,7 +61,7 @@ export default function Home() {
   const handleSaveRisk = async () => {
     setIsSavingRisk(true);
     try {
-      const res = await fetch("http://localhost:8000/api/settings/risk", {
+      const res = await fetch(`${getApiBaseUrl()}/api/settings/risk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -83,13 +84,13 @@ export default function Home() {
   const toggleLive = async () => {
     try {
       if (!isLive && selectedMode !== "auto") {
-         await fetch("http://localhost:8000/api/strategies/force_live", {
+         await fetch(`${getApiBaseUrl()}/api/strategies/force_live`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ mode: selectedMode.replace("force_", "") })
          });
       }
-      const res = await fetch("http://localhost:8000/api/state/toggle", { method: "POST" });
+      const res = await fetch(`${getApiBaseUrl()}/api/state/toggle`, { method: "POST" });
       const data = await res.json();
       setIsLive(data.is_live);
     } catch (err) {
@@ -98,17 +99,17 @@ export default function Home() {
   };
 
   return (
-    <div className="p-6 flex flex-col gap-6 h-screen">
+    <div className="p-3 sm:p-4 md:p-6 flex flex-col gap-4 md:gap-6 min-h-full">
       
       {/* Top Row: Left Column (Stats) & Right Column (Chart) */}
-      <div className="flex flex-col lg:flex-row gap-6 flex-1 min-h-0">
+      <div className="flex flex-col lg:flex-row gap-4 md:gap-6 flex-1 min-h-0">
         
-        {/* Left Column: Stats & Controls */}
-        <div className="w-full lg:w-80 flex flex-col gap-6 overflow-y-auto shrink-0">
+        {/* Left Column: Stats & Controls (Order-2 on mobile so Chart is seen first) */}
+        <div className="w-full lg:w-80 flex flex-col gap-4 md:gap-6 lg:overflow-y-auto shrink-0 order-2 lg:order-1">
           
           {/* AI Bot State */}
-          <div className="glass-panel p-6 flex flex-col items-center justify-center relative overflow-hidden shrink-0">
-            <h2 className="text-xs font-semibold uppercase text-white/50 mb-6 tracking-wider w-full text-left">AI Bot State</h2>
+          <div className="glass-panel p-4 md:p-6 flex flex-col items-center justify-center relative overflow-hidden shrink-0">
+            <h2 className="text-xs font-semibold uppercase text-white/50 mb-4 md:mb-6 tracking-wider w-full text-left">AI Bot State</h2>
             
             {!isLive && (
               <select 
@@ -282,8 +283,8 @@ export default function Home() {
           
         </div>
 
-        {/* Right Column: Chart */}
-        <div className="flex-1 glass-panel p-1 flex flex-col min-h-[400px]">
+        {/* Right Column: Chart (Order-1 on mobile for instant visibility) */}
+        <div className="flex-1 glass-panel p-1 flex flex-col h-[360px] sm:h-[450px] lg:h-auto min-h-[320px] order-1 lg:order-2 shrink-0 lg:shrink">
            <TradingChart isLive={isLive} />
         </div>
 

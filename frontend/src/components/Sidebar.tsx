@@ -17,6 +17,7 @@ import {
   Menu,
   X
 } from "lucide-react";
+import { getApiBaseUrl } from "@/config";
 
 export default function Sidebar() {
   const pathname = usePathname();
@@ -39,7 +40,7 @@ export default function Sidebar() {
       </div>
 
       {/* Sidebar Content */}
-      <div className={`fixed md:relative top-0 left-0 h-full z-40 transition-transform duration-300 transform ${isOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 w-64 border-r border-white/10 flex flex-col py-6 px-4 shrink-0 bg-brand-dark/95 md:bg-brand-dark/50 backdrop-blur-md pt-24 md:pt-6`}>
+      <div className={`fixed md:relative top-0 left-0 h-full z-40 transition-transform duration-300 transform ${isOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 w-64 border-r border-white/10 flex flex-col py-6 px-4 shrink-0 bg-brand-dark/95 md:bg-brand-dark/50 backdrop-blur-md pt-20 md:pt-6`}>
         
         <div className="hidden md:flex mb-10 w-full justify-start items-center gap-3">
           <div className="w-10 h-10 shrink-0 flex items-center justify-center">
@@ -65,7 +66,7 @@ export default function Sidebar() {
           <button 
             onClick={async () => {
                if (confirm("Peringatan: Emergency Stop akan menghentikan seluruh eksekusi dan melikuidasi SEMUA posisi aktif! Lanjutkan?")) {
-                 await fetch("http://localhost:8000/api/state/emergency", { method: "POST" });
+                 await fetch(`${getApiBaseUrl()}/api/state/emergency`, { method: "POST" });
                  alert("EMERGENCY STOP TRIGGERED! Cek logs untuk detail eksekusi.");
                }
             }}
@@ -79,7 +80,7 @@ export default function Sidebar() {
       
       {/* Overlay for mobile */}
       {isOpen && (
-        <div className="fixed inset-0 bg-black/50 z-30 md:hidden" onClick={closeSidebar}></div>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 md:hidden transition-opacity" onClick={closeSidebar}></div>
       )}
     </>
   );

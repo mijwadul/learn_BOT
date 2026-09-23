@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
-from sqlalchemy import Column, Integer, String, Float, DateTime, select, func, Text
+from sqlalchemy import Column, Integer, String, Float, DateTime, select, func, Text, BigInteger
 from config import Config
 
 engine = create_async_engine(Config.DATABASE_URL, echo=False)
@@ -29,7 +29,7 @@ class TradeLog(Base):
     __tablename__ = "trade_logs"
     
     id = Column(Integer, primary_key=True, index=True)
-    ticket = Column(Integer, index=True, nullable=True) # MT5 Deal/Order Ticket
+    ticket = Column(BigInteger, index=True, nullable=True) # MT5 Deal/Order Ticket
     setup_id = Column(String, index=True, nullable=True) # ID Setup AI (misal: SETUP_LIVE_NORMAL_10823)
     time = Column(DateTime, index=True)
     action = Column(String) # BUY, SELL, PARTIAL_CLOSE, CLOSE
@@ -50,7 +50,7 @@ class LiveDecisionSample(Base):
     __tablename__ = "live_decision_samples"
 
     id = Column(Integer, primary_key=True, index=True)
-    ticket = Column(Integer, index=True, nullable=True) # MT5 Order/Deal Ticket
+    ticket = Column(BigInteger, index=True, nullable=True) # MT5 Order/Deal Ticket
     setup_id = Column(String, index=True) # Unik: SETUP_LIVE_NORMAL_10823
     timestamp = Column(DateTime, default=func.now(), index=True)
     mode = Column(String, default="NORMAL", index=True) # NORMAL / RUNNER
@@ -117,7 +117,7 @@ class TradeJournal(Base):
     __tablename__ = "trade_journal"
     
     id = Column(Integer, primary_key=True, index=True)
-    tiket = Column(Integer, index=True)
+    tiket = Column(BigInteger, index=True)
     timestamp = Column(DateTime, index=True, default=func.now())
     event_type = Column(String, index=True) # ENTRY, SL_MODIFY, EXIT
     harga = Column(Float)
@@ -164,7 +164,13 @@ def ensure_schema_migrations():
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trade_logs_ticket ON trade_logs (ticket)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trade_logs_setup_id ON trade_logs (setup_id)"))
 
-            # 2. approved_setups: tambah mode
+            # 2. live_decision_samples: ubah ticket ke BIGINT (MT5 ticket bisa > 2.14 milyar)
+            try:
+                conn.execute(text("ALTER TABLE live_decision_samples ALTER COLUMN ticket TYPE BIGINT"))
+            except Exception:
+                pass
+
+            # 3. approved_setups: tambah mode
             conn.execute(text("ALTER TABLE approved_setups ADD COLUMN IF NOT EXISTS mode VARCHAR DEFAULT 'normal'"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_approved_setups_mode ON approved_setups (mode)"))
 
@@ -182,6 +188,40 @@ def ensure_schema_migrations():
                     conn.execute(text(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS {tbl}_setup_id_key"))
                 except Exception:
                     pass
+
+            # 6. trade_journal: ubah tiket ke BIGINT (tiket MT5 bernilai > 2.1 Milyar)
+            try:
+                conn.execute(text("ALTER TABLE trade_journal ALTER COLUMN tiket TYPE BIGINT"))
+            except Exception as e_tj:
+                pass
+
+        # Backfill otomatis trade_journal jika masih kosong dari trade_logs yang memiliki tiket
+        try:
+            with Session(sync_engine) as session:
+                count_tj = session.query(TradeJournal).count()
+                if count_tj == 0:
+                    live_entries = session.query(TradeLog).filter(
+                        TradeLog.ticket.isnot(None),
+                        TradeLog.action.in_(["BUY", "SELL"])
+                    ).order_by(TradeLog.time.desc()).limit(20).all()
+                    for le in live_entries:
+                        mode_label = "Runner" if "RUNNER" in (le.mode or "").upper() else "Normal (Hit & Run)"
+                        alasan_xai = f"Eksekusi Sinyal {le.action} [{mode_label}] | Setup: {le.setup_id or 'Auto'}\nTop 3 Fitur: dist_Close_EMA50 (+0.45), BB_Width (+0.32), ATR_14 (+0.21)"
+                        tj_item = TradeJournal(
+                            tiket=le.ticket,
+                            timestamp=le.time,
+                            event_type="ENTRY",
+                            harga=float(le.price or 0.0),
+                            alasan=alasan_xai,
+                            chart_snapshot="{}"
+                        )
+                        session.add(tj_item)
+                    if live_entries:
+                        session.commit()
+                        print(f"[Black Box Auto-Seed] Berhasil menyinkronkan {len(live_entries)} live trade entries ke Black Box Journal.")
+        except Exception as e_seed:
+            print(f"[Black Box Seed Warning] {e_seed}")
+
         _migrated = True
     except Exception as e:
         print(f"[Migration Warning] {e}")
@@ -379,8 +419,14 @@ def get_recent_trade_logs(limit: int = 100, mode: str = None):
             where_sql = ""
         query = f"SELECT id, ticket, setup_id, time, action, mode, volume, price, sl, tp, profit, comment FROM trade_logs {where_sql} ORDER BY time DESC LIMIT {limit}"
         df = pd.read_sql(query, con=sync_engine)
-        if not df.empty and 'time' in df.columns:
-            df['time'] = pd.to_datetime(df['time'])
+        if not df.empty:
+            if 'time' in df.columns:
+                df['time'] = pd.to_datetime(df['time'])
+            if 'setup_id' in df.columns:
+                df['setup_id'] = df['setup_id'].fillna('-')
+            if 'comment' in df.columns:
+                df['comment'] = df['comment'].fillna('')
+            df = df.where(pd.notnull(df), None)
         return df
     except Exception as e:
         print(f"Failed to read trade logs from DB: {e}")

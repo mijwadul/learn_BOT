@@ -135,14 +135,17 @@ export default function SetupReviewChart({
       if (containerRef.current && chartRef.current) {
         chartRef.current.applyOptions({
           width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
+          height: containerRef.current.clientHeight || 280,
         });
       }
     };
+    const resizeObserver = new ResizeObserver(handleResize);
+    if (containerRef.current) resizeObserver.observe(containerRef.current);
     window.addEventListener("resize", handleResize);
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      resizeObserver.disconnect();
       if (chartRef.current) {
         chartRef.current.remove();
         chartRef.current = null;

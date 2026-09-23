@@ -2,6 +2,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
+import os
 import asyncio
 import random
 from datetime import datetime
@@ -702,13 +703,31 @@ async def get_journal(limit: int = 200, mode: str = None):
         # 2. Ambil posisi yang sedang aktif (floating) langsung dari MT5
         open_positions = get_mt5_open_positions()
 
+        def clean_records(records):
+            import math
+            import pandas as pd
+            cleaned = []
+            for r in records:
+                c_row = {}
+                for k, v in r.items():
+                    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                        c_row[k] = None
+                    elif pd.isna(v):
+                        c_row[k] = None
+                    elif hasattr(v, 'isoformat'):
+                        c_row[k] = v.isoformat()
+                    else:
+                        c_row[k] = v
+                cleaned.append(c_row)
+            return cleaned
+
         # 3. Ambil Black Box XAI
         journal_df = get_trade_journal_entries(limit=limit)
-        journal_data = journal_df.to_dict(orient="records") if not journal_df.empty else []
+        journal_data = clean_records(journal_df.to_dict(orient="records")) if not journal_df.empty else []
         
         # 4. Ambil Riwayat Trading PNL aktual (opsional filter mode)
         trade_logs = get_recent_trade_logs(limit=limit, mode=mode)
-        trade_data = trade_logs.to_dict(orient="records") if not trade_logs.empty else []
+        trade_data = clean_records(trade_logs.to_dict(orient="records")) if not trade_logs.empty else []
         
         # 5. Ringkasan statistik performa per mode
         perf_summary = get_trade_performance_summary()

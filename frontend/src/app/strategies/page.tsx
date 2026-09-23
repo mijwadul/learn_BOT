@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Settings2, ShieldAlert, Zap, BrainCircuit, ThumbsUp, ThumbsDown, Loader2, ChevronLeft, MinusCircle, SkipForward } from "lucide-react";
 import dynamic from "next/dynamic";
+import { getApiBaseUrl } from "@/config";
 
 // Dynamic import agar chart tidak di-SSR (lightweight-charts butuh window)
 const SetupReviewChart = dynamic(() => import("@/components/SetupReviewChart"), { ssr: false });
@@ -37,7 +38,7 @@ export default function StrategiesPage() {
 
   useEffect(() => {
     const fetchStatus = () => {
-      fetch("http://localhost:8000/api/state")
+      fetch(`${getApiBaseUrl()}/api/state`)
         .then(res => res.json())
         .then(data => { if (data.models_status) setModelsStatus(data.models_status); })
         .catch(err => console.error(err));
@@ -51,7 +52,7 @@ export default function StrategiesPage() {
     setLoading(true);
     try {
       const endpoint = action === "force_live" ? "/api/strategies/force_live" : "/api/strategies/quarantine";
-      const res = await fetch(`http://localhost:8000${endpoint}`, {
+      const res = await fetch(`${getApiBaseUrl()}${endpoint}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode })
       });
       const data = await res.json();
@@ -63,7 +64,7 @@ export default function StrategiesPage() {
   const trainMode = async (mode: string, type: "incremental" | "full") => {
     setLoading(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/strategies/train`, {
+      const res = await fetch(`${getApiBaseUrl()}/api/strategies/train`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode, type })
       });
       const data = await res.json();
@@ -84,7 +85,7 @@ export default function StrategiesPage() {
   const fetchSetup = useCallback(async (offset: number, prob: number, mode: "normal" | "runner") => {
     setLoading(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/rlhf/setups?min_prob=${prob}&offset=${offset}&mode=${mode}`);
+      const res = await fetch(`${getApiBaseUrl()}/api/rlhf/setups?min_prob=${prob}&offset=${offset}&mode=${mode}`);
       const data = await res.json();
       if (data.status === "done" || !data.setup) {
         setCurrentSetup(null);
@@ -106,7 +107,7 @@ export default function StrategiesPage() {
     if (!currentSetup || loading) return;
     setLoading(true);
     try {
-      await fetch(`http://localhost:8000/api/rlhf/feedback`, {
+      await fetch(`${getApiBaseUrl()}/api/rlhf/feedback`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           setup_id: currentSetup.setup_id, symbol: currentSetup.symbol,
@@ -150,92 +151,92 @@ export default function StrategiesPage() {
   };
 
   return (
-    <div className="p-6 h-full flex flex-col overflow-y-auto">
-      <div className="mb-8 shrink-0">
-        <h1 className="text-3xl font-black text-white tracking-widest flex items-center gap-3">
+    <div className="p-3 sm:p-4 md:p-6 min-h-full flex flex-col">
+      <div className="mb-6 md:mb-8 shrink-0">
+        <h1 className="text-2xl sm:text-3xl font-black text-white tracking-widest flex items-center gap-2 sm:gap-3">
           <Settings2 className="text-brand-green" /> STRATEGIES &amp; INCUBATOR
         </h1>
-        <p className="text-white/50 mt-2">Manage execution modes, AI Training, and RLHF Feedback (Phase 3)</p>
+        <p className="text-white/50 text-xs sm:text-sm mt-1">Manage execution modes, AI Training, and RLHF Feedback (Phase 3)</p>
       </div>
 
       {lastAction && (
-        <div className="mb-6 p-4 rounded-xl bg-brand-blue/20 border border-brand-blue/50 text-brand-blue font-medium shrink-0">
+        <div className="mb-4 sm:mb-6 p-3 sm:p-4 rounded-xl bg-brand-blue/20 border border-brand-blue/50 text-brand-blue text-xs sm:text-sm font-medium shrink-0">
           {lastAction}
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8 shrink-0">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-6 md:mb-8 shrink-0">
         {/* Normal Mode */}
-        <div className="glass-panel p-6 flex flex-col justify-between">
+        <div className="glass-panel p-4 sm:p-6 flex flex-col justify-between">
           <div>
-            <h2 className="text-xl font-bold text-white mb-2">Normal Mode (Scalping)</h2>
-            <p className="text-sm text-white/50 mb-2">Aggressive intraday trading. Optimized on H1 data.</p>
-            <div className="flex items-center gap-2 mb-6 text-xs font-bold">
-              <span className={`px-2 py-1 rounded-full ${modelsStatus.normal.trained ? 'bg-brand-blue/20 text-brand-blue' : 'bg-white/10 text-white/50'}`}>{modelsStatus.normal.trained ? 'TRAINED' : 'UNTRAINED'}</span>
-              <span className={`px-2 py-1 rounded-full ${modelsStatus.normal.status.includes('LIVE') ? 'bg-brand-green/20 text-brand-green' : 'bg-brand-red/20 text-brand-red'}`}>{modelsStatus.normal.status}</span>
-              {modelsStatus.normal.trained && <span className={`px-2 py-1 rounded-full ${modelsStatus.normal.last_accuracy > 0.5 ? 'bg-brand-green/20 text-brand-green' : 'bg-orange-500/20 text-orange-400'}`}>Acc: {(modelsStatus.normal.last_accuracy * 100).toFixed(1)}%</span>}
+            <h2 className="text-lg sm:text-xl font-bold text-white mb-1 sm:mb-2">Normal Mode (Scalping)</h2>
+            <p className="text-xs sm:text-sm text-white/50 mb-2">Aggressive intraday trading. Optimized on H1 data.</p>
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 mb-4 sm:mb-6 text-[11px] sm:text-xs font-bold">
+              <span className={`px-2 py-0.5 sm:py-1 rounded-full ${modelsStatus.normal.trained ? 'bg-brand-blue/20 text-brand-blue' : 'bg-white/10 text-white/50'}`}>{modelsStatus.normal.trained ? 'TRAINED' : 'UNTRAINED'}</span>
+              <span className={`px-2 py-0.5 sm:py-1 rounded-full ${modelsStatus.normal.status.includes('LIVE') ? 'bg-brand-green/20 text-brand-green' : 'bg-brand-red/20 text-brand-red'}`}>{modelsStatus.normal.status}</span>
+              {modelsStatus.normal.trained && <span className={`px-2 py-0.5 sm:py-1 rounded-full ${modelsStatus.normal.last_accuracy > 0.5 ? 'bg-brand-green/20 text-brand-green' : 'bg-orange-500/20 text-orange-400'}`}>Acc: {(modelsStatus.normal.last_accuracy * 100).toFixed(1)}%</span>}
             </div>
           </div>
-          <div className="flex flex-col gap-4">
-            <div className="flex gap-4">
-              <button disabled={loading || modelsStatus.normal.is_training} onClick={() => trainMode("normal", "incremental")} className="flex-1 bg-brand-blue/20 hover:bg-brand-blue/30 text-brand-blue border border-brand-blue/50 p-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all text-sm disabled:opacity-50">
-                {modelsStatus.normal.is_training ? <><Loader2 className="animate-spin" size={18}/>Training...</> : <><BrainCircuit size={18} /> Incremental Train</>}
+          <div className="flex flex-col gap-2 sm:gap-3">
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
+              <button disabled={loading || modelsStatus.normal.is_training} onClick={() => trainMode("normal", "incremental")} className="flex-1 bg-brand-blue/20 hover:bg-brand-blue/30 text-brand-blue border border-brand-blue/50 p-2.5 sm:p-3.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-all text-xs sm:text-sm disabled:opacity-50">
+                {modelsStatus.normal.is_training ? <><Loader2 className="animate-spin" size={16}/>Training...</> : <><BrainCircuit size={16} /> Incremental Train</>}
               </button>
-              <button disabled={loading || modelsStatus.normal.is_training} onClick={() => trainMode("normal", "full")} className="flex-1 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 border border-purple-500/50 p-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all text-sm disabled:opacity-50">
-                {modelsStatus.normal.is_training ? <><Loader2 className="animate-spin" size={18}/>Training...</> : "Force Full Train"}
+              <button disabled={loading || modelsStatus.normal.is_training} onClick={() => trainMode("normal", "full")} className="flex-1 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 border border-purple-500/50 p-2.5 sm:p-3.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-all text-xs sm:text-sm disabled:opacity-50">
+                {modelsStatus.normal.is_training ? <><Loader2 className="animate-spin" size={16}/>Training...</> : "Force Full Train"}
               </button>
             </div>
-            <div className="flex gap-4">
-              <button disabled={loading} onClick={() => forceMode("normal", "force_live")} className="flex-1 bg-brand-green/20 hover:bg-brand-green/30 text-brand-green border border-brand-green/50 p-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all"><Zap size={20} /> Force LIVE</button>
-              <button disabled={loading} onClick={() => forceMode("normal", "quarantine")} className="flex-1 bg-brand-red/20 hover:bg-brand-red/30 text-brand-red border border-brand-red/50 p-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all"><ShieldAlert size={20} /> Quarantine</button>
+            <div className="flex gap-2 sm:gap-3">
+              <button disabled={loading} onClick={() => forceMode("normal", "force_live")} className="flex-1 bg-brand-green/20 hover:bg-brand-green/30 text-brand-green border border-brand-green/50 p-2.5 sm:p-3.5 rounded-xl font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-all text-xs sm:text-sm"><Zap size={18} /> Force LIVE</button>
+              <button disabled={loading} onClick={() => forceMode("normal", "quarantine")} className="flex-1 bg-brand-red/20 hover:bg-brand-red/30 text-brand-red border border-brand-red/50 p-2.5 sm:p-3.5 rounded-xl font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-all text-xs sm:text-sm"><ShieldAlert size={18} /> Quarantine</button>
             </div>
           </div>
         </div>
 
         {/* Runner Mode */}
-        <div className="glass-panel p-6 flex flex-col justify-between">
+        <div className="glass-panel p-4 sm:p-6 flex flex-col justify-between">
           <div>
-            <h2 className="text-xl font-bold text-white mb-2">Runner Mode (Trend)</h2>
-            <p className="text-sm text-white/50 mb-2">Long term position holding. Optimized on full H4 data.</p>
-            <div className="flex items-center gap-2 mb-6 text-xs font-bold">
-              <span className={`px-2 py-1 rounded-full ${modelsStatus.runner.trained ? 'bg-brand-blue/20 text-brand-blue' : 'bg-white/10 text-white/50'}`}>{modelsStatus.runner.trained ? 'TRAINED' : 'UNTRAINED'}</span>
-              <span className={`px-2 py-1 rounded-full ${modelsStatus.runner.status.includes('LIVE') ? 'bg-brand-green/20 text-brand-green' : 'bg-brand-red/20 text-brand-red'}`}>{modelsStatus.runner.status}</span>
-              {modelsStatus.runner.trained && <span className={`px-2 py-1 rounded-full ${modelsStatus.runner.last_accuracy > 0.5 ? 'bg-brand-green/20 text-brand-green' : 'bg-orange-500/20 text-orange-400'}`}>Acc: {(modelsStatus.runner.last_accuracy * 100).toFixed(1)}%</span>}
+            <h2 className="text-lg sm:text-xl font-bold text-white mb-1 sm:mb-2">Runner Mode (Trend)</h2>
+            <p className="text-xs sm:text-sm text-white/50 mb-2">Long term position holding. Optimized on full H4 data.</p>
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 mb-4 sm:mb-6 text-[11px] sm:text-xs font-bold">
+              <span className={`px-2 py-0.5 sm:py-1 rounded-full ${modelsStatus.runner.trained ? 'bg-brand-blue/20 text-brand-blue' : 'bg-white/10 text-white/50'}`}>{modelsStatus.runner.trained ? 'TRAINED' : 'UNTRAINED'}</span>
+              <span className={`px-2 py-0.5 sm:py-1 rounded-full ${modelsStatus.runner.status.includes('LIVE') ? 'bg-brand-green/20 text-brand-green' : 'bg-brand-red/20 text-brand-red'}`}>{modelsStatus.runner.status}</span>
+              {modelsStatus.runner.trained && <span className={`px-2 py-0.5 sm:py-1 rounded-full ${modelsStatus.runner.last_accuracy > 0.5 ? 'bg-brand-green/20 text-brand-green' : 'bg-orange-500/20 text-orange-400'}`}>Acc: {(modelsStatus.runner.last_accuracy * 100).toFixed(1)}%</span>}
             </div>
           </div>
-          <div className="flex flex-col gap-4">
-            <div className="flex gap-4">
-              <button disabled={loading || modelsStatus.runner.is_training} onClick={() => trainMode("runner", "incremental")} className="flex-1 bg-brand-blue/20 hover:bg-brand-blue/30 text-brand-blue border border-brand-blue/50 p-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all text-sm disabled:opacity-50">
-                {modelsStatus.runner.is_training ? <><Loader2 className="animate-spin" size={18}/>Training...</> : <><BrainCircuit size={18} /> Incremental Train</>}
+          <div className="flex flex-col gap-2 sm:gap-3">
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
+              <button disabled={loading || modelsStatus.runner.is_training} onClick={() => trainMode("runner", "incremental")} className="flex-1 bg-brand-blue/20 hover:bg-brand-blue/30 text-brand-blue border border-brand-blue/50 p-2.5 sm:p-3.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-all text-xs sm:text-sm disabled:opacity-50">
+                {modelsStatus.runner.is_training ? <><Loader2 className="animate-spin" size={16}/>Training...</> : <><BrainCircuit size={16} /> Incremental Train</>}
               </button>
-              <button disabled={loading || modelsStatus.runner.is_training} onClick={() => trainMode("runner", "full")} className="flex-1 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 border border-purple-500/50 p-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all text-sm disabled:opacity-50">
-                {modelsStatus.runner.is_training ? <><Loader2 className="animate-spin" size={18}/>Training...</> : "Force Full Train"}
+              <button disabled={loading || modelsStatus.runner.is_training} onClick={() => trainMode("runner", "full")} className="flex-1 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 border border-purple-500/50 p-2.5 sm:p-3.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-all text-xs sm:text-sm disabled:opacity-50">
+                {modelsStatus.runner.is_training ? <><Loader2 className="animate-spin" size={16}/>Training...</> : "Force Full Train"}
               </button>
             </div>
-            <div className="flex gap-4">
-              <button disabled={loading} onClick={() => forceMode("runner", "force_live")} className="flex-1 bg-brand-green/20 hover:bg-brand-green/30 text-brand-green border border-brand-green/50 p-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all"><Zap size={20} /> Force LIVE</button>
-              <button disabled={loading} onClick={() => forceMode("runner", "quarantine")} className="flex-1 bg-brand-red/20 hover:bg-brand-red/30 text-brand-red border border-brand-red/50 p-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all"><ShieldAlert size={20} /> Quarantine</button>
+            <div className="flex gap-2 sm:gap-3">
+              <button disabled={loading} onClick={() => forceMode("runner", "force_live")} className="flex-1 bg-brand-green/20 hover:bg-brand-green/30 text-brand-green border border-brand-green/50 p-2.5 sm:p-3.5 rounded-xl font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-all text-xs sm:text-sm"><Zap size={18} /> Force LIVE</button>
+              <button disabled={loading} onClick={() => forceMode("runner", "quarantine")} className="flex-1 bg-brand-red/20 hover:bg-brand-red/30 text-brand-red border border-brand-red/50 p-2.5 sm:p-3.5 rounded-xl font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-all text-xs sm:text-sm"><ShieldAlert size={18} /> Quarantine</button>
             </div>
           </div>
         </div>
       </div>
 
       {/* ===== RLHF REVIEW QUEUE ===== */}
-      <div className="glass-panel p-6 shrink-0">
+      <div className="glass-panel p-4 sm:p-6 shrink-0">
         {/* Mode Selector Tabs */}
-        <div className="flex flex-wrap items-center justify-between gap-4 mb-5 pb-4 border-b border-white/10">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-white/10">
           <div>
-            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+            <h2 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2">
               RLHF Review Queue
               {queueLoaded && totalPending > 0 && (
-                <span className="text-sm font-normal text-white/40 ml-2">{Math.min(currentOffset + 1, totalPending)} / {totalPending}</span>
+                <span className="text-xs sm:text-sm font-normal text-white/40 ml-2">{Math.min(currentOffset + 1, totalPending)} / {totalPending}</span>
               )}
             </h2>
-            <p className="text-sm text-white/50 mt-1">Kurasi setup OOS secara terpisah — AI Normal &amp; Runner dilatih tepat sasaran.</p>
+            <p className="text-xs sm:text-sm text-white/50 mt-1">Kurasi setup OOS secara terpisah — AI Normal &amp; Runner dilatih tepat sasaran.</p>
           </div>
 
           {/* Mode Switcher Tabs */}
-          <div className="flex gap-2 p-1 bg-white/5 rounded-xl border border-white/10">
+          <div className="grid grid-cols-2 gap-1 p-1 bg-white/5 rounded-xl border border-white/10 w-full sm:w-auto">
             <button
               onClick={() => {
                 setReviewMode("normal");
@@ -244,13 +245,13 @@ export default function StrategiesPage() {
                 setQueueDone(false);
                 fetchSetup(0, minProb, "normal");
               }}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+              className={`px-3 py-2 rounded-lg text-[11px] sm:text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
                 reviewMode === "normal"
                   ? "bg-brand-blue text-white shadow-lg shadow-brand-blue/30"
                   : "text-white/50 hover:text-white hover:bg-white/5"
               }`}
             >
-              ⚡ Normal Mode (RR 1:2)
+              ⚡ Normal (RR 1:2)
             </button>
             <button
               onClick={() => {
@@ -260,13 +261,13 @@ export default function StrategiesPage() {
                 setQueueDone(false);
                 fetchSetup(0, minProb, "runner");
               }}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+              className={`px-3 py-2 rounded-lg text-[11px] sm:text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
                 reviewMode === "runner"
                   ? "bg-purple-600 text-white shadow-lg shadow-purple-600/30"
                   : "text-white/50 hover:text-white hover:bg-white/5"
               }`}
             >
-              🏹 Runner Mode (RR 1:5)
+              🏹 Runner (RR 1:5)
             </button>
           </div>
         </div>
@@ -345,7 +346,7 @@ export default function StrategiesPage() {
             </div>
 
             {/* Chart */}
-            <div className="w-full rounded-xl overflow-hidden border border-white/10 bg-black/30" style={{ height: "380px" }}>
+            <div className="w-full rounded-xl overflow-hidden border border-white/10 bg-black/30 h-[280px] sm:h-[340px] md:h-[380px]">
               <SetupReviewChart
                 candles={currentSetup.candles}
                 entryPrice={currentSetup.price}
@@ -358,7 +359,7 @@ export default function StrategiesPage() {
             </div>
 
             {/* SL / Entry / TP strip */}
-            <div className="flex gap-4 text-xs px-1">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-4 text-[11px] sm:text-xs px-1">
               <span className="text-brand-red/80">SL <strong>{currentSetup.sl.toFixed(2)}</strong></span>
               <span className="text-white/20">|</span>
               <span className="text-yellow-400/80">Entry <strong>{currentSetup.price.toFixed(2)}</strong></span>
@@ -375,34 +376,34 @@ export default function StrategiesPage() {
               value={rlhfNotes}
               onChange={e => setRlhfNotes(e.target.value)}
               placeholder="Catatan (opsional) — alasan keputusan Anda..."
-              className="w-full bg-black/40 border border-white/10 text-white rounded-xl px-4 py-3 text-sm outline-none focus:border-brand-blue transition-colors placeholder:text-white/20"
+              className="w-full bg-black/40 border border-white/10 text-white rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 text-xs sm:text-sm outline-none focus:border-brand-blue transition-colors placeholder:text-white/20"
             />
 
             {/* Action row */}
-            <div className="flex gap-3 items-center">
+            <div className="flex gap-1.5 sm:gap-3 items-center">
               <button onClick={() => skipTo(-1)} disabled={loading || currentOffset === 0}
-                className="p-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/50 border border-white/10 transition-all disabled:opacity-30" title="Setup sebelumnya (←)">
-                <ChevronLeft size={18} />
+                className="p-2.5 sm:p-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/50 border border-white/10 transition-all disabled:opacity-30 shrink-0" title="Setup sebelumnya (←)">
+                <ChevronLeft size={16} />
               </button>
 
               <button onClick={() => submitDecision("approve")} disabled={loading}
-                className="flex-1 bg-brand-green/20 hover:bg-brand-green/30 text-brand-green border border-brand-green/50 py-3.5 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50">
-                <ThumbsUp size={16} /> Approve <span className="text-[10px] font-normal opacity-40 ml-1">[A]</span>
+                className="flex-1 bg-brand-green/20 hover:bg-brand-green/30 text-brand-green border border-brand-green/50 py-2.5 sm:py-3.5 rounded-xl font-black text-xs sm:text-sm flex items-center justify-center gap-1 sm:gap-2 transition-all disabled:opacity-50">
+                <ThumbsUp size={15} /> Approve <span className="hidden sm:inline text-[10px] font-normal opacity-40 ml-1">[A]</span>
               </button>
 
               <button onClick={() => submitDecision("ignore")} disabled={loading}
-                className="flex-1 bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 py-3.5 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50">
-                <MinusCircle size={16} /> Ignore <span className="text-[10px] font-normal opacity-40 ml-1">[I]</span>
+                className="flex-1 bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 py-2.5 sm:py-3.5 rounded-xl font-black text-xs sm:text-sm flex items-center justify-center gap-1 sm:gap-2 transition-all disabled:opacity-50">
+                <MinusCircle size={15} /> Ignore <span className="hidden sm:inline text-[10px] font-normal opacity-40 ml-1">[I]</span>
               </button>
 
               <button onClick={() => submitDecision("reject")} disabled={loading}
-                className="flex-1 bg-brand-red/20 hover:bg-brand-red/30 text-brand-red border border-brand-red/50 py-3.5 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50">
-                <ThumbsDown size={16} /> Reject <span className="text-[10px] font-normal opacity-40 ml-1">[R]</span>
+                className="flex-1 bg-brand-red/20 hover:bg-brand-red/30 text-brand-red border border-brand-red/50 py-2.5 sm:py-3.5 rounded-xl font-black text-xs sm:text-sm flex items-center justify-center gap-1 sm:gap-2 transition-all disabled:opacity-50">
+                <ThumbsDown size={15} /> Reject <span className="hidden sm:inline text-[10px] font-normal opacity-40 ml-1">[R]</span>
               </button>
 
               <button onClick={() => skipTo(1)} disabled={loading || currentOffset >= totalPending - 1}
-                className="p-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/50 border border-white/10 transition-all disabled:opacity-30" title="Lewati tanpa keputusan (→)">
-                <SkipForward size={18} />
+                className="p-2.5 sm:p-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/50 border border-white/10 transition-all disabled:opacity-30 shrink-0" title="Lewati tanpa keputusan (→)">
+                <SkipForward size={16} />
               </button>
             </div>
 
