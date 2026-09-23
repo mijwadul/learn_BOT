@@ -71,6 +71,16 @@ def calculate_bbma(df):
     df['BB_Width'] = df['BB_Upper'] - df['BB_Lower']
     df['dist_LWMA_High_BB_Upper'] = df['LWMA_5_High'] - df['BB_Upper']
     
+    # Topografi Zona Re-entry LWMA (Low & High)
+    lwma_low_zone = np.maximum(df['LWMA_5_Low'], df['LWMA_10_Low'])
+    lwma_high_zone = np.minimum(df['LWMA_5_High'], df['LWMA_10_High'])
+    df['dist_Close_LWMA_Low'] = df['close'] - lwma_low_zone
+    df['dist_Low_LWMA_Low'] = df['low'] - lwma_low_zone
+    df['dist_Close_LWMA_High'] = df['close'] - lwma_high_zone
+    df['dist_High_LWMA_High'] = df['high'] - lwma_high_zone
+    df['is_LWMA_Low_Touch'] = np.where(df['low'] <= lwma_low_zone, 1, 0)
+    df['is_LWMA_High_Touch'] = np.where(df['high'] >= lwma_high_zone, 1, 0)
+    
     # Kemiringan / Deteksi Sideways (MHV) - Rate of Change (ROC) selama 3 candle
     df['SMA_20_Slope'] = df['SMA_20'] - df['SMA_20'].shift(3)
     df['BB_Width_Slope'] = df['BB_Width'] - df['BB_Width'].shift(3)

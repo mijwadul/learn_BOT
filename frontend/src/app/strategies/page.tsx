@@ -1,7 +1,22 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Settings2, ShieldAlert, Zap, BrainCircuit, ThumbsUp, ThumbsDown, Loader2, ChevronLeft, MinusCircle, SkipForward } from "lucide-react";
+import { 
+  Settings2, 
+  ShieldAlert, 
+  Zap, 
+  BrainCircuit, 
+  ThumbsUp, 
+  ThumbsDown, 
+  Loader2, 
+  ChevronLeft, 
+  MinusCircle, 
+  SkipForward, 
+  Sliders, 
+  DollarSign, 
+  Percent, 
+  Check 
+} from "lucide-react";
 import dynamic from "next/dynamic";
 import { getApiBaseUrl } from "@/config";
 
@@ -36,17 +51,62 @@ export default function StrategiesPage() {
     runner: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0 }
   });
 
+  // Risk Management State
+  const [riskMode, setRiskMode] = useState<"dollars" | "percent">("dollars");
+  const [riskDollars, setRiskDollars] = useState(10.0);
+  const [riskPercent, setRiskPercent] = useState(1.0);
+  const [isSavingRisk, setIsSavingRisk] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [hasLoadedRiskOnce, setHasLoadedRiskOnce] = useState(false);
+  const [portfolioEquity, setPortfolioEquity] = useState(1000);
+
   useEffect(() => {
     const fetchStatus = () => {
       fetch(`${getApiBaseUrl()}/api/state`)
         .then(res => res.json())
-        .then(data => { if (data.models_status) setModelsStatus(data.models_status); })
+        .then(data => { 
+          if (data.models_status) setModelsStatus(data.models_status); 
+          if (data.portfolio?.equity) setPortfolioEquity(data.portfolio.equity);
+          if (data.risk_settings && !hasLoadedRiskOnce) {
+            setRiskMode(data.risk_settings.mode || "dollars");
+            setRiskDollars(data.risk_settings.dollars || 10.0);
+            setRiskPercent(data.risk_settings.percent || 1.0);
+            setHasLoadedRiskOnce(true);
+          }
+        })
         .catch(err => console.error(err));
     };
     fetchStatus();
     const interval = setInterval(fetchStatus, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [hasLoadedRiskOnce]);
+
+  const effectiveRiskDollars = riskMode === "dollars"
+    ? riskDollars
+    : ((portfolioEquity > 0 ? portfolioEquity : 1000) * riskPercent) / 100;
+
+  const handleSaveRisk = async () => {
+    setIsSavingRisk(true);
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/settings/risk`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          risk_mode: riskMode,
+          risk_dollars: riskDollars,
+          risk_percent: riskPercent
+        })
+      });
+      if (res.ok) {
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 2500);
+      }
+    } catch (err) {
+      console.error("Failed to update risk settings", err);
+    } finally {
+      setIsSavingRisk(false);
+    }
+  };
 
   const forceMode = async (mode: string, action: "force_live" | "quarantine") => {
     setLoading(true);
@@ -164,6 +224,116 @@ export default function StrategiesPage() {
           {lastAction}
         </div>
       )}
+
+      {/* Risk Management Setting ($ / %) */}
+      <div className="glass-panel p-4 sm:p-6 mb-6 md:mb-8 shrink-0">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-4 border-b border-white/5 gap-2">
+          <div>
+            <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+              <Sliders size={18} className="text-brand-green" />
+              <span>Risk Management Per Trade</span>
+            </h2>
+            <p className="text-xs text-white/50 mt-0.5">Toleransi batas resiko / Stop Loss per posisi transaksi.</p>
+          </div>
+          {saveSuccess && (
+            <span className="text-xs text-brand-green flex items-center gap-1.5 bg-brand-green/20 px-3 py-1 rounded-lg font-bold border border-brand-green/40 self-start sm:self-auto">
+              <Check size={14} /> Settings Saved
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
+          {/* Toggle Mode: Dollars vs Percent */}
+          <div className="bg-black/40 p-1.5 rounded-xl border border-white/5 flex gap-1">
+            <button
+              type="button"
+              onClick={() => setRiskMode("dollars")}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                riskMode === "dollars"
+                  ? "bg-brand-green/20 text-brand-green border border-brand-green/30"
+                  : "text-white/40 hover:text-white/70"
+              }`}
+            >
+              <DollarSign size={14} />
+              <span>Fixed ($ USD)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setRiskMode("percent")}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                riskMode === "percent"
+                  ? "bg-brand-green/20 text-brand-green border border-brand-green/30"
+                  : "text-white/40 hover:text-white/70"
+              }`}
+            >
+              <Percent size={14} />
+              <span>Percent (% Modal)</span>
+            </button>
+          </div>
+
+          {/* Value Input + Presets */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <input
+                  type="number"
+                  step={riskMode === "dollars" ? "1" : "0.1"}
+                  min="0.1"
+                  max={riskMode === "dollars" ? "5000" : "15"}
+                  value={riskMode === "dollars" ? riskDollars : riskPercent}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value) || 0;
+                    if (riskMode === "dollars") setRiskDollars(val);
+                    else setRiskPercent(val);
+                  }}
+                  className="w-full bg-black/40 border border-white/10 text-white font-mono font-bold text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-brand-green focus:border-brand-green outline-none"
+                />
+                <span className="absolute right-3 top-2 text-xs font-bold text-white/40">
+                  {riskMode === "dollars" ? "USD" : "%"}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleSaveRisk}
+                disabled={isSavingRisk}
+                className="bg-brand-green hover:bg-brand-green/80 text-black font-bold text-xs px-4 py-2 rounded-lg transition-all shrink-0 disabled:opacity-50 cursor-pointer"
+              >
+                {isSavingRisk ? "..." : "Save Risk"}
+              </button>
+            </div>
+
+            {/* Quick Presets */}
+            <div className="flex gap-1.5">
+              {(riskMode === "dollars" ? [5, 10, 20, 50] : [0.5, 1.0, 2.0, 3.0]).map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => {
+                    if (riskMode === "dollars") setRiskDollars(preset);
+                    else setRiskPercent(preset);
+                  }}
+                  className="flex-1 py-1 text-[11px] font-mono bg-white/5 hover:bg-white/10 text-white/60 hover:text-white rounded border border-white/5 transition-all text-center cursor-pointer"
+                >
+                  {riskMode === "dollars" ? `$${preset}` : `${preset}%`}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Effective Risk Realtime Preview */}
+          <div className="bg-black/40 border border-white/5 rounded-xl p-3 flex flex-col justify-center">
+            <span className="text-[11px] text-white/50 mb-1">Estimasi Resiko Efektif per Posisi:</span>
+            <div className="flex items-baseline gap-2">
+              <span className="font-mono font-black text-xl text-brand-green">
+                ${effectiveRiskDollars.toFixed(2)}
+              </span>
+              <span className="text-[10px] text-white/40">
+                (dari ekuitas ${portfolioEquity.toLocaleString()})
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-6 md:mb-8 shrink-0">
         {/* Normal Mode */}

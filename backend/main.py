@@ -1,7 +1,8 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
+from contextlib import asynccontextmanager
 import os
 import asyncio
 import random
@@ -23,16 +24,6 @@ from config import Config
 from utils.mt5_utils import init_mt5
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-app = FastAPI(title="AvantGarde Bot API", description="Backend API for AvantGarde Trading Bot")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 class ConnectionManager:
     def __init__(self):
@@ -58,10 +49,25 @@ manager_logs = ConnectionManager()
 
 main_loop = None
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global main_loop
     main_loop = asyncio.get_running_loop()
+    yield
+
+app = FastAPI(
+    title="AvantGarde Bot API", 
+    description="Backend API for AvantGarde Trading Bot",
+    lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Custom WebSocket Log Handler
 class WebSocketLogHandler(logging.Handler):
@@ -211,6 +217,16 @@ async def get_state():
         except Exception:
             pass
 
+    # Mengambil event kalender ekonomi High Impact terdekat (Countdown Macro Bridge)
+    next_high_impact_news = None
+    try:
+        from database import get_next_high_impact_event
+        if bot.data_miner is not None and bot.mt5_connected:
+            bot.data_miner.get_live_calendar()
+        next_high_impact_news = get_next_high_impact_event()
+    except Exception as e:
+        logging.debug(f"Gagal mengambil next high impact news: {e}")
+
     return {
         "is_live": bot.is_live,
         "active_since": bot.active_since,
@@ -247,6 +263,7 @@ async def get_state():
             "enabled": Config.ENABLE_ONLINE_LEARNING,
             "last_retrain": getattr(bot.executor, 'last_micro_retrain_time', None)
         },
+        "next_high_impact_news": next_high_impact_news,
         "risk_settings": {
             "mode": Config.RISK_MODE,
             "dollars": Config.MAX_RISK_DOLLARS,
@@ -377,13 +394,126 @@ async def quarantine(req: ModeRequest):
     bot.supervisor.isolate_quarantine(req.mode)
     return {"status": "success", "mode": req.mode, "action": "quarantine", "state": bot.supervisor.state}
 
+class SyncDataRequest(BaseModel):
+    force_rebuild: bool = False
+    total_candles: Optional[int] = None
+
+sync_state = {
+    "is_syncing": False,
+    "sync_type": None,  # "incremental" or "backfill"
+    "progress": 0,
+    "message": "Idle",
+    "inserted_rows": 0,
+    "last_synced_at": None,
+    "error": None
+}
+
 @app.post("/api/data/sync")
-async def force_backfill():
+async def sync_data_endpoint():
+    """
+    Sinkronisasi Cepat MT5 (Inkremental):
+    HANYA menarik selisih candle baru sejak record terakhir dan me-append ke market_data_merged.
+    TIDAK PERNAH men-drop database atau men-download 5 juta candle.
+    """
+    global sync_state
+    if sync_state["is_syncing"]:
+        return {"status": "busy", "message": "Proses sinkronisasi data sedang berjalan...", "sync_status": sync_state}
+    
+    if not bot.mt5_connected:
+        bot.connect_mt5()
+        if not bot.mt5_connected:
+            return {"status": "error", "message": "Gagal terhubung ke MT5. Pastikan MetaTrader 5 aktif dan login broker valid."}
+
+    def run_sync():
+        global sync_state
+        sync_state["is_syncing"] = True
+        sync_state["sync_type"] = "incremental"
+        sync_state["progress"] = 0
+        sync_state["message"] = "Mengecek candle terbaru dari MT5..."
+        sync_state["error"] = None
+
+        try:
+            try:
+                bot.data_miner.get_live_calendar()
+            except Exception:
+                pass
+                
+            inserted, msg = bot.data_miner.sync_latest_data()
+            sync_state["inserted_rows"] = inserted
+            sync_state["last_synced_at"] = datetime.now().isoformat()
+            sync_state["message"] = msg
+            sync_state["progress"] = 100
+        except Exception as e:
+            logging.error(f"Error during incremental sync: {e}")
+            sync_state["error"] = str(e)
+            sync_state["message"] = f"Gagal sinkronisasi: {e}"
+        finally:
+            sync_state["is_syncing"] = False
+
+    threading.Thread(target=run_sync, daemon=True).start()
+    return {
+        "status": "success", 
+        "message": "Sinkronisasi candle terbaru dari MT5 dimulai di background.",
+        "sync_status": sync_state
+    }
+
+@app.post("/api/data/backfill")
+async def force_backfill_endpoint():
+    """
+    Force Backfill (Rebuild):
+    Men-drop tabel dan men-download ulang 5.000.000 candle secara penuh.
+    """
+    global sync_state
+    if sync_state["is_syncing"]:
+        return {"status": "busy", "message": "Proses sinkronisasi data sedang berjalan...", "sync_status": sync_state}
+    
+    if not bot.mt5_connected:
+        bot.connect_mt5()
+        if not bot.mt5_connected:
+            return {"status": "error", "message": "Gagal terhubung ke MT5."}
+
     if bot.supervisor.state != 'ingestion':
         bot.supervisor.start_ingestion()
-    import threading
-    threading.Thread(target=bot.data_miner.backfill_data, kwargs={"total_candles": 5000000, "force_rebuild": True}, daemon=True).start()
-    return {"status": "success", "message": "Force Backfill MT5 started in background. Check terminal logs."}
+
+    def run_backfill():
+        global sync_state
+        sync_state["is_syncing"] = True
+        sync_state["sync_type"] = "backfill"
+        sync_state["progress"] = 0
+        sync_state["message"] = "Memulai Force Backfill (Rebuild 5,000,000 candles)..."
+        sync_state["error"] = None
+        
+        def progress_cb(current_b, total_b, cur, tot):
+            sync_state["progress"] = int((current_b / max(1, total_b)) * 100)
+            sync_state["message"] = f"Menyimpan batch {current_b}/{total_b} ({sync_state['progress']}%) ke database..."
+
+        try:
+            inserted = bot.data_miner.backfill_data(
+                total_candles=5000000,
+                progress_callback=progress_cb,
+                force_rebuild=True
+            )
+            sync_state["inserted_rows"] = inserted
+            sync_state["last_synced_at"] = datetime.now().isoformat()
+            sync_state["message"] = f"Sukses Force Backfill: {inserted:,} candle tersimpan ke database."
+            sync_state["progress"] = 100
+        except Exception as e:
+            logging.error(f"Error during backfill: {e}")
+            sync_state["error"] = str(e)
+            sync_state["message"] = f"Gagal backfill: {e}"
+        finally:
+            sync_state["is_syncing"] = False
+
+    threading.Thread(target=run_backfill, daemon=True).start()
+    return {
+        "status": "success", 
+        "message": "Force Backfill MT5 dimulai di background. Cek terminal logs.",
+        "sync_status": sync_state
+    }
+
+@app.get("/api/data/sync/status")
+async def get_sync_status():
+    return sync_state
 
 @app.get("/api/database/health")
 async def get_database_health():
@@ -391,14 +521,62 @@ async def get_database_health():
         from database import get_db_size, get_db_date_range
         row_count = get_db_size()
         min_date, max_date = get_db_date_range()
+
+        mt5_latest_time = None
+        if bot.mt5_connected:
+            try:
+                rates_last = mt5.copy_rates_from_pos(Config.SYMBOL, mt5.TIMEFRAME_M1, 0, 1)
+                if rates_last is not None and len(rates_last) > 0:
+                    mt5_latest_time = pd.to_datetime(rates_last[0]['time'], unit='s').isoformat()
+            except Exception:
+                pass
+
         return {
             "status": "success",
             "row_count": row_count,
             "min_date": min_date.isoformat() if min_date else None,
-            "max_date": max_date.isoformat() if max_date else None
+            "max_date": max_date.isoformat() if max_date else None,
+            "mt5_connected": bot.mt5_connected,
+            "mt5_latest_time": mt5_latest_time,
+            "sync_status": sync_state
         }
     except Exception as e:
         logging.error(f"Failed to fetch database health: {e}")
+        return {"status": "error", "message": str(e), "sync_status": sync_state}
+
+@app.get("/api/macro/next-event")
+async def get_next_macro_event():
+    """Mengambil 1 berita High Impact terdekat untuk countdown di UI."""
+    try:
+        from database import get_next_high_impact_event
+        if bot.data_miner is not None and bot.mt5_connected:
+            bot.data_miner.get_live_calendar()
+        ev = get_next_high_impact_event()
+        return {"status": "success", "event": ev}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/macro/events")
+async def get_upcoming_macro_events():
+    """Mengambil daftar berita ekonomi mendatang dari database cache."""
+    try:
+        from database import get_upcoming_economic_events
+        if bot.data_miner is not None and bot.mt5_connected:
+            bot.data_miner.get_live_calendar()
+        events = get_upcoming_economic_events(limit=15)
+        return {"status": "success", "events": events}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/macro/sync")
+async def sync_macro_events():
+    """Memicu sinkronisasi paksa file CSV MacroBridge EA ke database."""
+    try:
+        if bot.data_miner is not None:
+            df = bot.data_miner.sync_mt5_calendar_to_db()
+            return {"status": "success", "synced_count": len(df)}
+        return {"status": "error", "message": "DataMiner agent is unavailable"}
+    except Exception as e:
         return {"status": "error", "message": str(e)}
 
 @app.post("/api/strategies/train")
@@ -747,14 +925,81 @@ async def get_journal(limit: int = 200, mode: str = None):
         logging.error(f"Failed to fetch trade journal: {e}")
         return {"status": "error", "open_positions": [], "journal": [], "trade_logs": [], "performance": {}, "live_feedback": {}}
 
+TIMEFRAME_MAP = {
+    "M1": mt5.TIMEFRAME_M1,
+    "M5": mt5.TIMEFRAME_M5,
+    "M15": mt5.TIMEFRAME_M15,
+    "M30": mt5.TIMEFRAME_M30,
+    "H1": mt5.TIMEFRAME_H1,
+    "H4": mt5.TIMEFRAME_H4,
+    "D1": mt5.TIMEFRAME_D1,
+}
+
+TF_SECONDS = {
+    "M1": 60,
+    "M5": 300,
+    "M15": 900,
+    "M30": 1800,
+    "H1": 3600,
+    "H4": 14400,
+    "D1": 86400,
+}
+
+@app.get("/api/market/candles")
+async def get_market_candles(timeframe: str = "M1", count: int = 200):
+    tf_upper = timeframe.upper()
+    tf_const = TIMEFRAME_MAP.get(tf_upper, mt5.TIMEFRAME_M1)
+    
+    if bot.mt5_connected:
+        try:
+            rates = mt5.copy_rates_from_pos(Config.SYMBOL, tf_const, 0, count)
+            if rates is not None and len(rates) > 0:
+                candles = [
+                    {
+                        "time": int(c['time']),
+                        "open": float(c['open']),
+                        "high": float(c['high']),
+                        "low": float(c['low']),
+                        "close": float(c['close'])
+                    }
+                    for c in rates
+                ]
+                return {"status": "success", "timeframe": tf_upper, "candles": candles}
+        except Exception as e:
+            logging.warning(f"Failed to fetch MT5 rates for tf {tf_upper}: {e}")
+
+    # Fallback / mock data
+    sec = TF_SECONDS.get(tf_upper, 60)
+    mock_candles = []
+    base_time = int(datetime.now().timestamp()) - (count * sec)
+    base_price = 4028.75
+    for i in range(count):
+        chg = random.uniform(-1.5, 1.5)
+        o = base_price
+        c = base_price + chg
+        h = max(o, c) + random.uniform(0, 0.5)
+        lo = min(o, c) - random.uniform(0, 0.5)
+        mock_candles.append({
+            "time": base_time + i * sec,
+            "open": round(o, 2),
+            "high": round(h, 2),
+            "low": round(lo, 2),
+            "close": round(c, 2)
+        })
+        base_price = c
+    return {"status": "success", "timeframe": tf_upper, "candles": mock_candles}
+
 @app.websocket("/ws/market_data")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, timeframe: str = "M1"):
     await manager_market.connect(websocket)
+    tf_upper = timeframe.upper()
+    tf_const = TIMEFRAME_MAP.get(tf_upper, mt5.TIMEFRAME_M1)
+    sec = TF_SECONDS.get(tf_upper, 60)
     try:
-        # FIX #5: Kirim 200 candle historis saat client baru connect agar chart langsung terisi
+        # Kirim 200 candle historis saat client baru connect
         if bot.mt5_connected:
             try:
-                rates_hist = mt5.copy_rates_from_pos(Config.SYMBOL, mt5.TIMEFRAME_M1, 0, 200)
+                rates_hist = mt5.copy_rates_from_pos(Config.SYMBOL, tf_const, 0, 200)
                 if rates_hist is not None and len(rates_hist) > 0:
                     historical_candles = [
                         {
@@ -766,14 +1011,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         }
                         for c in rates_hist
                     ]
-                    await websocket.send_text(json.dumps({"type": "history", "data": historical_candles}))
-                    logging.info(f"[WS] Mengirim {len(historical_candles)} candle historis ke client baru.")
+                    await websocket.send_text(json.dumps({"type": "history", "timeframe": tf_upper, "data": historical_candles}))
+                    logging.info(f"[WS] Mengirim {len(historical_candles)} candle historis ({tf_upper}) ke client.")
             except Exception as e:
                 logging.warning(f"[WS] Gagal kirim historical candles: {e}")
         else:
-            # Mock historical data saat offline
             mock_candles = []
-            base_time = int(datetime.now().timestamp()) - (200 * 60)
+            base_time = int(datetime.now().timestamp()) - (200 * sec)
             base_price = 4028.75
             for i in range(200):
                 chg = random.uniform(-1.5, 1.5)
@@ -781,11 +1025,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 c = base_price + chg
                 h = max(o, c) + random.uniform(0, 0.5)
                 lo = min(o, c) - random.uniform(0, 0.5)
-                mock_candles.append({"time": base_time + i * 60, "open": round(o, 2), "high": round(h, 2), "low": round(lo, 2), "close": round(c, 2)})
+                mock_candles.append({"time": base_time + i * sec, "open": round(o, 2), "high": round(h, 2), "low": round(lo, 2), "close": round(c, 2)})
                 base_price = c
-            await websocket.send_text(json.dumps({"type": "history", "data": mock_candles}))
+            await websocket.send_text(json.dumps({"type": "history", "timeframe": tf_upper, "data": mock_candles}))
 
-        # State untuk streaming live candle
         current_close = 4028.75
         current_time = int(datetime.now().timestamp())
 
@@ -793,7 +1036,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if bot.is_live:
                 if bot.mt5_connected:
                     try:
-                        rates = mt5.copy_rates_from_pos(Config.SYMBOL, mt5.TIMEFRAME_M1, 0, 1)
+                        rates = mt5.copy_rates_from_pos(Config.SYMBOL, tf_const, 0, 1)
                         if rates is not None and len(rates) > 0:
                             candle = rates[0]
                             tick_data = {
@@ -803,14 +1046,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "low": float(candle['low']),
                                 "close": float(candle['close'])
                             }
-                            await manager_market.broadcast(json.dumps({"type": "candle", "data": tick_data}))
+                            await websocket.send_text(json.dumps({"type": "candle", "timeframe": tf_upper, "data": tick_data}))
                     except Exception:
                         pass
                 else:
-                    # Mock OHLC tick saat offline
                     price_change = random.uniform(-2.0, 2.0)
                     current_close += price_change
-                    current_time += 60
+                    current_time += sec
                     tick_data = {
                         "time": current_time,
                         "open": round(current_close - price_change, 2),
@@ -818,7 +1060,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "low": round(min(current_close, current_close - price_change) - random.uniform(0, 1), 2),
                         "close": round(current_close, 2)
                     }
-                    await manager_market.broadcast(json.dumps({"type": "candle", "data": tick_data}))
+                    await websocket.send_text(json.dumps({"type": "candle", "timeframe": tf_upper, "data": tick_data}))
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         manager_market.disconnect(websocket)

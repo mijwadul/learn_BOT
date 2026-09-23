@@ -103,6 +103,7 @@ class DataMinerAgent:
         from database import get_macro_data
         events_df = get_macro_data(start_date, end_date)
         
+        df = df.copy()
         df['minutes_to_high_impact_news'] = 9999.0
         df['actual_vs_estimate_surprise'] = 0.0
         
@@ -195,6 +196,104 @@ class DataMinerAgent:
         logging.info(f"Data merged successfully. Shape: {df_merged.shape}")
         return df_merged
 
+    def sync_latest_data(self):
+        """
+        Sinkronisasi Cepat (Incremental Sync):
+        HANYA mengunduh candle baru sejak record terakhir di database hingga saat ini dari MT5.
+        TIDAK AKAN me-rebuild atau men-drop tabel market_data_merged.
+        """
+        logging.info("[SYNC] Memeriksa data terbaru dari MT5...")
+        
+        # 1. Cek timestamp terakhir di tabel market_data_merged
+        last_time = None
+        try:
+            with sync_engine.connect() as conn:
+                result = conn.execute(text('SELECT MAX("time") FROM market_data_merged'))
+                row = result.fetchone()
+                if row and row[0] is not None:
+                    last_time = pd.to_datetime(row[0])
+                    if last_time.tzinfo is not None:
+                        last_time = last_time.tz_localize(None)
+        except Exception as e:
+            logging.warning(f"[SYNC] Tidak dapat membaca MAX(time) dari market_data_merged: {e}")
+            last_time = None
+
+        # 2. Cek candle terakhir dari MT5
+        rates_latest = None
+        try:
+            rates_latest = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, 1)
+        except Exception as e:
+            logging.error(f"[SYNC] Error saat copy_rates_from_pos MT5: {e}")
+
+        if rates_latest is None or len(rates_latest) == 0:
+            msg = "Gagal mengambil data dari MT5. Pastikan MT5 terbuka dan terhubung ke broker."
+            logging.warning(f"[SYNC] {msg}")
+            return 0, msg
+
+        mt5_latest_time = pd.to_datetime(rates_latest[0]['time'], unit='s')
+        if mt5_latest_time.tzinfo is not None:
+            mt5_latest_time = mt5_latest_time.tz_localize(None)
+
+        # 3. Hitung selisih
+        if last_time is not None:
+            diff_seconds = (mt5_latest_time - last_time).total_seconds()
+            missing_candles = int(diff_seconds // 60)
+            logging.info(f"[SYNC] DB Max Time: {last_time} | MT5 Current Time: {mt5_latest_time} | Gap: {missing_candles} candles")
+
+            if missing_candles <= 0:
+                msg = f"Database sudah up-to-date (Record: {last_time}). Tidak ada candle baru di MT5."
+                logging.info(f"[SYNC] {msg}")
+                return 0, msg
+                
+            # Batasi candle yang ditarik (maksimal 50.000 candle untuk satu kali quick sync)
+            candles_to_fetch = min(missing_candles, 50000)
+        else:
+            # Jika database belum ada data sama sekali, ambil 5.000 candle terakhir
+            logging.info("[SYNC] Database belum memiliki data. Mengambil 5.000 candle terakhir.")
+            candles_to_fetch = 5000
+
+        # 4. Ambil data dari MT5 mulai dari bar 0 (paling baru)
+        logging.info(f"[SYNC] Mengambil {candles_to_fetch} candle terbaru dari MT5...")
+        df = self.fetch_and_merge_data(n_candles=candles_to_fetch, start_pos=0)
+
+        if df is None or df.empty:
+            msg = "Gagal memproses candle dari MT5."
+            logging.warning(f"[SYNC] {msg}")
+            return 0, msg
+
+        # 5. Filter ketat hanya data yang lebih baru dari last_time
+        if df.index.tzinfo is not None:
+            df.index = df.index.tz_localize(None)
+
+        if last_time is not None:
+            df_new = df[df.index > last_time]
+        else:
+            df_new = df
+
+        if df_new.empty:
+            msg = "Tidak ada candle baru yang valid untuk disimpan."
+            logging.info(f"[SYNC] {msg}")
+            return 0, msg
+
+        # 6. Simpan (APPEND) ke PostgreSQL tanpa drop
+        try:
+            df_new.to_sql(
+                'market_data_merged',
+                con=sync_engine,
+                if_exists='append',
+                index=True,
+                chunksize=10000,
+                method='multi'
+            )
+            inserted = len(df_new)
+            msg = f"Sukses menyambungkan {inserted:,} candle baru ke database!"
+            logging.info(f"[SYNC SUCCESS] {msg}")
+            return inserted, msg
+        except Exception as e:
+            err_msg = f"Gagal menyimpan data baru ke database: {e}"
+            logging.error(f"[SYNC ERROR] {err_msg}")
+            return 0, err_msg
+
     def backfill_data(self, total_candles=20000, progress_callback=None, force_rebuild=False):
         logging.info(f"Starting Historical Backfill / Incremental Download (Force={force_rebuild})...")
         sample_df = None
@@ -228,20 +327,30 @@ class DataMinerAgent:
             candles_to_fetch = total_candles
             if_exists = 'replace' if force_rebuild else 'append'
         else:
-            # Make last_time timezone aware if it isn't
-            if last_time.tzinfo is None:
-                last_time = last_time.tz_localize('UTC')
-            now_utc = datetime.now(timezone.utc)
-            # Estimate missing M1 candles (diff in minutes)
-            missing_minutes = int((now_utc - last_time).total_seconds() / 60)
-            
-            # Tambahkan buffer
-            candles_to_fetch = missing_minutes + 100
-            
-            if candles_to_fetch < 100:
-                logging.info("Database is already up to date.")
+            # Check latest candle directly from MT5 if available
+            rates_last = None
+            try:
+                rates_last = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, 1)
+            except Exception as e:
+                logging.warning(f"Failed to query latest MT5 candle: {e}")
+                
+            last_time_naive = last_time.tz_localize(None) if (hasattr(last_time, 'tzinfo') and last_time.tzinfo is not None) else last_time
+
+            if rates_last is not None and len(rates_last) > 0:
+                latest_mt5_time = pd.to_datetime(rates_last[0]['time'], unit='s')
+                missing_seconds = (latest_mt5_time - last_time_naive).total_seconds()
+                missing_minutes = int(missing_seconds / 60)
+                logging.info(f"Latest MT5 time: {latest_mt5_time}, DB max time: {last_time_naive}. Missing minutes: {missing_minutes}")
+            else:
+                now_utc = datetime.now(timezone.utc)
+                last_time_utc = last_time.tz_localize('UTC') if last_time.tzinfo is None else last_time
+                missing_minutes = int((now_utc - last_time_utc).total_seconds() / 60)
+
+            if missing_minutes <= 0:
+                logging.info(f"Database is already up to date with MT5. Last record: {last_time}")
                 return 0
                 
+            candles_to_fetch = missing_minutes + 100
             logging.info(f"Found existing data up to {last_time}. Fetching ~{candles_to_fetch} new candles.")
             if_exists = 'append'
 
@@ -291,9 +400,11 @@ class DataMinerAgent:
 
             # Filter incremental data
             if not pd.isna(last_time):
-                if df.index.tzinfo is None:
-                    df.index = df.index.tz_localize('UTC')
-                df = df[df.index > last_time]
+                last_time_cmp = last_time.tz_localize(None) if (hasattr(last_time, 'tzinfo') and last_time.tzinfo is not None) else last_time
+                df_index_cmp = df.index.tz_localize(None) if (hasattr(df.index, 'tzinfo') and df.index.tzinfo is not None) else df.index
+                df = df[df_index_cmp > last_time_cmp]
+                if hasattr(df.index, 'tzinfo') and df.index.tzinfo is not None:
+                    df.index = df.index.tz_localize(None)
                 
             if not df.empty:
                 current_if_exists = 'replace' if (force_rebuild and batch_idx == 0) else 'append'

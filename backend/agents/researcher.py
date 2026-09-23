@@ -25,6 +25,7 @@ class ResearcherAgent:
         self.last_accuracy_runner = 0.0
         self.last_trained_normal = None
         self.last_trained_runner = None
+        self.max_runner_rr = 5.0 # Maximum RR dinamis yang didapat dari proses belajar Runner
         
     def save_metadata(self):
         """Menyimpan akurasi dan metadata pelatihan ke file JSON agar persisten melintasi restart."""
@@ -39,12 +40,13 @@ class ResearcherAgent:
                 "runner": {
                     "last_accuracy": float(self.last_accuracy_runner),
                     "last_trained_at": self.last_trained_runner,
-                    "trained": self.model_runner is not None
+                    "trained": self.model_runner is not None,
+                    "max_runner_rr": float(self.max_runner_rr)
                 }
             }
             with open("models/models_metadata.json", "w") as f:
                 json.dump(meta, f, indent=2)
-            logging.info(f"[RESEARCHER] Metadata akurasi tersimpan ke models_metadata.json (Normal: {self.last_accuracy_normal*100:.1f}%, Runner: {self.last_accuracy_runner*100:.1f}%)")
+            logging.info(f"[RESEARCHER] Metadata akurasi tersimpan ke models_metadata.json (Normal: {self.last_accuracy_normal*100:.1f}%, Runner: {self.last_accuracy_runner*100:.1f}%, Max RR: {self.max_runner_rr:.1f}R)")
         except Exception as e:
             logging.error(f"Failed to save models metadata: {e}")
 
@@ -86,7 +88,8 @@ class ResearcherAgent:
                         self.last_trained_normal = meta.get("normal", {}).get("last_trained_at")
                         self.last_accuracy_runner = float(meta.get("runner", {}).get("last_accuracy", 0.0))
                         self.last_trained_runner = meta.get("runner", {}).get("last_trained_at")
-                        logging.info(f"[RESEARCHER] Metadata loaded: Normal Acc={self.last_accuracy_normal*100:.1f}%, Runner Acc={self.last_accuracy_runner*100:.1f}%")
+                        self.max_runner_rr = float(meta.get("runner", {}).get("max_runner_rr", 5.0))
+                        logging.info(f"[RESEARCHER] Metadata loaded: Normal Acc={self.last_accuracy_normal*100:.1f}%, Runner Acc={self.last_accuracy_runner*100:.1f}%, Max Runner RR={self.max_runner_rr:.1f}R")
                     except Exception as em:
                         logging.warning(f"Gagal membaca models_metadata.json: {em}")
 
@@ -97,102 +100,126 @@ class ResearcherAgent:
         return False
         
     def generate_targets(self, df):
-        logging.info("Generating dynamic ATR-based targets...")
+        logging.info("Generating dynamic ATR-based targets (BBMA LWMA Topography: Buy at LWMA Low, Sell at LWMA High)...")
         from utils.indicators import calculate_atr
         df['ATR_14'] = calculate_atr(df, 14)
         
         # Menambahkan EMA_50 untuk mendeteksi tren/posisi trading
-        from utils.indicators import calculate_ema
+        from utils.indicators import calculate_ema, calculate_lwma
         if 'EMA_50' not in df.columns:
             df['EMA_50'] = calculate_ema(df['close'], 50)
             
         if 'dist_Close_EMA50' not in df.columns:
             df['dist_Close_EMA50'] = df['close'] - df['EMA_50']
             
+        # Pastikan kolom LWMA tersedia untuk kalkulasi zona topografi
+        if 'LWMA_5_Low' not in df.columns:
+            df['LWMA_5_Low'] = calculate_lwma(df['low'], 5)
+        if 'LWMA_10_Low' not in df.columns:
+            df['LWMA_10_Low'] = calculate_lwma(df['low'], 10)
+        if 'LWMA_5_High' not in df.columns:
+            df['LWMA_5_High'] = calculate_lwma(df['high'], 5)
+        if 'LWMA_10_High' not in df.columns:
+            df['LWMA_10_High'] = calculate_lwma(df['high'], 10)
+
         closes = df['close'].values
+        opens = df['open'].values
         highs = df['high'].values
         lows = df['low'].values
         atrs = df['ATR_14'].values
+        ema_50_vals = df['EMA_50'].values if 'EMA_50' in df.columns else closes
+        
+        lwma_low_zone = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values)
+        lwma_high_zone = np.minimum(df['LWMA_5_High'].values, df['LWMA_10_High'].values)
         
         n = len(df)
         labels_normal = np.zeros(n)
         labels_runner = np.zeros(n)
         
-        # Dynamic ATR-based Target Generation
+        # Dynamic ATR-based Target Generation dengan aturan topografi BBMA & Resolusi EMA 50
         for i in range(n):
-            if np.isnan(atrs[i]):
+            if np.isnan(atrs[i]) or np.isnan(lwma_low_zone[i]) or np.isnan(lwma_high_zone[i]):
                 continue
                 
+            is_lwma_low = lows[i] <= lwma_low_zone[i]
+            is_lwma_high = highs[i] >= lwma_high_zone[i]
+            
+            # Jika harga tidak menyentuh zona LWMA Low maupun High, setup tidak valid (No Trade / 0)
+            if not is_lwma_low and not is_lwma_high:
+                continue
+
+            # Resolusi Sinyal Bentrok saat lilin menyentuh kedua zona:
+            # Mengikuti Major Trend berpedoman pada EMA 50
+            if is_lwma_low and is_lwma_high:
+                if closes[i] >= ema_50_vals[i]:
+                    eval_buy = True
+                    eval_sell = False
+                else:
+                    eval_buy = False
+                    eval_sell = True
+            else:
+                eval_buy = is_lwma_low
+                eval_sell = is_lwma_high
+
             entry_price = closes[i]
             sl_dist = atrs[i]
             
-            # Target_Normal: RR 1:2 (Hit & Run), lookahead hingga 100 candle
+            # Target Normal: RR minimal 1:2 (Hit & Run), lookahead hingga 100 candle
             tp_buy_normal = entry_price + (sl_dist * 2.0)
             sl_buy_normal = entry_price - sl_dist
             tp_sell_normal = entry_price - (sl_dist * 2.0)
             sl_sell_normal = entry_price + sl_dist
             
-            buy_success = False
-            buy_failed = False
-            sell_success = False
-            sell_failed = False
-            
-            for j in range(i + 1, min(i + 101, n)):
-                if not buy_failed and not buy_success:
-                    if lows[j] <= sl_buy_normal:
-                        buy_failed = True
-                    elif highs[j] >= tp_buy_normal:
-                        buy_success = True
-                        
-                if not sell_failed and not sell_success:
-                    if highs[j] >= sl_sell_normal:
-                        sell_failed = True
-                    elif lows[j] <= tp_sell_normal:
-                        sell_success = True
-                        
-                if (buy_success or buy_failed) and (sell_success or sell_failed):
-                    break
-                    
-            if buy_success and not sell_success:
-                labels_normal[i] = 1
-            elif sell_success and not buy_success:
-                labels_normal[i] = 2
-            else:
-                labels_normal[i] = 0
-
-            # Target_Runner: Dinamis menggunakan ATR_14 (TP = 5x jarak SL, lookahead pemindaian hingga 300 candle)
-            tp_buy_runner = entry_price + (sl_dist * 5.0)
+            # Target Runner: RR dinamis (berdasarkan self.max_runner_rr), lookahead hingga 300 candle
+            runner_rr = getattr(self, 'max_runner_rr', 5.0)
+            tp_buy_runner = entry_price + (sl_dist * runner_rr)
             sl_buy_runner = entry_price - sl_dist
-            tp_sell_runner = entry_price - (sl_dist * 5.0)
+            tp_sell_runner = entry_price - (sl_dist * runner_rr)
             sl_sell_runner = entry_price + sl_dist
-            
-            buy_success_runner = False
-            buy_failed_runner = False
-            sell_success_runner = False
-            sell_failed_runner = False
-            
-            for j in range(i + 1, min(i + 301, n)):
-                if not buy_failed_runner and not buy_success_runner:
+
+            # 1. Evaluasi Setup BUY (HANYA jika menguji zona LWMA Low)
+            if eval_buy:
+                buy_success_n = False
+                for j in range(i + 1, min(i + 101, n)):
+                    if lows[j] <= sl_buy_normal:
+                        break
+                    elif highs[j] >= tp_buy_normal:
+                        buy_success_n = True
+                        break
+                if buy_success_n:
+                    labels_normal[i] = 1
+
+                buy_success_r = False
+                for j in range(i + 1, min(i + 301, n)):
                     if lows[j] <= sl_buy_runner:
-                        buy_failed_runner = True
+                        break
                     elif highs[j] >= tp_buy_runner:
-                        buy_success_runner = True
-                        
-                if not sell_failed_runner and not sell_success_runner:
+                        buy_success_r = True
+                        break
+                if buy_success_r:
+                    labels_runner[i] = 1
+
+            # 2. Evaluasi Setup SELL (HANYA jika menguji zona LWMA High)
+            if eval_sell:
+                sell_success_n = False
+                for j in range(i + 1, min(i + 101, n)):
+                    if highs[j] >= sl_sell_normal:
+                        break
+                    elif lows[j] <= tp_sell_normal:
+                        sell_success_n = True
+                        break
+                if sell_success_n:
+                    labels_normal[i] = 2
+
+                sell_success_r = False
+                for j in range(i + 1, min(i + 301, n)):
                     if highs[j] >= sl_sell_runner:
-                        sell_failed_runner = True
+                        break
                     elif lows[j] <= tp_sell_runner:
-                        sell_success_runner = True
-                        
-                if (buy_success_runner or buy_failed_runner) and (sell_success_runner or sell_failed_runner):
-                    break
-                    
-            if buy_success_runner and not sell_success_runner:
-                labels_runner[i] = 1
-            elif sell_success_runner and not buy_success_runner:
-                labels_runner[i] = 2
-            else:
-                labels_runner[i] = 0
+                        sell_success_r = True
+                        break
+                if sell_success_r:
+                    labels_runner[i] = 2
                         
         df['Target_Normal'] = labels_normal
         df['Target_Runner'] = labels_runner

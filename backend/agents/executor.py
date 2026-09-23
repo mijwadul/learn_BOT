@@ -22,6 +22,8 @@ class ExecutorAgent:
         self.MAX_PYRAMIDING = 3
         self.current_market_regime = {"adx": 0.0, "regime": "UNKNOWN", "last_updated": None}
         self.last_micro_retrain_time = None
+        self.latest_df_live = None
+        self.latest_probs = {}
         
     async def monitor_market(self):
         self.running = True
@@ -172,6 +174,8 @@ class ExecutorAgent:
                         if df_live is not None and not df_live.empty:
                             last_row = df_live.iloc[[-1]]
                             probs = await asyncio.to_thread(self.researcher.get_live_probabilities, last_row)
+                            self.latest_df_live = df_live
+                            self.latest_probs = probs
                             
                             p_buy_n = probs.get("normal_buy", 0.0)
                             p_buy_r = probs.get("runner_buy", 0.0)
@@ -210,14 +214,34 @@ class ExecutorAgent:
                                     "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 }
                                 
-                                if max_buy > max_sell:
+                                # --- ATURAN 4: Evaluasi Sinyal Berlawanan & Resolusi Major Trend EMA 50 ---
+                                ema_50_val = row_data.get('EMA_50', 0.0)
+                                close_val = row_data.get('close', 0.0)
+
+                                if abs(max_buy - max_sell) < 1e-4:
+                                    # Probabilitas BUY & SELL sama persis: Ikuti Major Trend berpedoman pada EMA 50
+                                    if close_val >= ema_50_val:
+                                        action_type = mt5.ORDER_TYPE_BUY
+                                        preferred_mode = "RUNNER" if p_buy_r >= p_buy_n else "HIT_RUN"
+                                        used_prob = p_buy_r if preferred_mode == "RUNNER" else p_buy_n
+                                        logging.info(f"[SIGNAL RESOLUTION] Sinyal BUY & SELL bernilai sama ({max_buy:.2f}). Mengikuti Major Trend EMA 50 (Close {close_val:.2f} >= EMA 50 {ema_50_val:.2f}) -> Eksekusi: BUY")
+                                    else:
+                                        action_type = mt5.ORDER_TYPE_SELL
+                                        preferred_mode = "RUNNER" if p_sell_r >= p_sell_n else "HIT_RUN"
+                                        used_prob = p_sell_r if preferred_mode == "RUNNER" else p_sell_n
+                                        logging.info(f"[SIGNAL RESOLUTION] Sinyal BUY & SELL bernilai sama ({max_sell:.2f}). Mengikuti Major Trend EMA 50 (Close {close_val:.2f} < EMA 50 {ema_50_val:.2f}) -> Eksekusi: SELL")
+                                elif max_buy > max_sell:
                                     action_type = mt5.ORDER_TYPE_BUY
                                     preferred_mode = "RUNNER" if p_buy_r >= p_buy_n else "HIT_RUN"
                                     used_prob = p_buy_r if preferred_mode == "RUNNER" else p_buy_n
+                                    if max_sell >= 0.70:
+                                        logging.info(f"[SIGNAL RESOLUTION] Dua sinyal berlawanan muncul (BUY: {max_buy:.2f} vs SELL: {max_sell:.2f}). Probabilitas tertinggi yang dipakai -> BUY ({max_buy:.2f})")
                                 else:
                                     action_type = mt5.ORDER_TYPE_SELL
                                     preferred_mode = "RUNNER" if p_sell_r >= p_sell_n else "HIT_RUN"
                                     used_prob = p_sell_r if preferred_mode == "RUNNER" else p_sell_n
+                                    if max_buy >= 0.70:
+                                        logging.info(f"[SIGNAL RESOLUTION] Dua sinyal berlawanan muncul (SELL: {max_sell:.2f} vs BUY: {max_buy:.2f}). Probabilitas tertinggi yang dipakai -> SELL ({max_sell:.2f})")
 
                                 # --- Regime-Aware Signal Routing Logic ---
                                 trade_mode = preferred_mode
@@ -234,6 +258,15 @@ class ExecutorAgent:
                                 
                                 allow_execution = True
                                 
+                                # --- ATURAN 1: Mode Hit & Run Hanya 1x Open Posisi Aktif ---
+                                if trade_mode == "HIT_RUN":
+                                    curr_positions = mt5.positions_get(symbol=Config.SYMBOL)
+                                    if curr_positions:
+                                        hr_active = [p for p in curr_positions if "HIT_RUN" in p.comment.upper()]
+                                        if len(hr_active) >= 1:
+                                            logging.info(f"[HIT_RUN LIMIT] Sinyal Hit & Run ditahan: Hanya diizinkan 1x posisi aktif (Tiket aktif: {hr_active[0].ticket}).")
+                                            allow_execution = False
+
                                 # --- Partial Live / Circuit Breaker Check ---
                                 if trade_mode == "RUNNER" and not self.supervisor.is_runner_valid():
                                     logging.warning(f"[PARTIAL LIVE] Sinyal Runner terdeteksi (Prob: {used_prob:.2f}), tapi Mode Runner sedang dikarantina. Sinyal ditolak.")
@@ -244,25 +277,24 @@ class ExecutorAgent:
                                 
                                 action_str = 'BUY' if action_type == mt5.ORDER_TYPE_BUY else 'SELL'
                                 
-                                # --- Aturan Ketat BBMA: RUNNER hanya dieksekusi di zona Re-entry ---
-                                if trade_mode == "RUNNER":
-                                    lwma_5_h = row_data.get('LWMA_5_High', 0)
-                                    lwma_10_h = row_data.get('LWMA_10_High', 0)
-                                    lwma_5_l = row_data.get('LWMA_5_Low', 0)
-                                    lwma_10_l = row_data.get('LWMA_10_Low', 0)
-                                    high_price = row_data.get('high', 0)
-                                    low_price = row_data.get('low', 0)
-                                    
-                                    if action_type == mt5.ORDER_TYPE_SELL:
-                                        reentry_zone = min(lwma_5_h, lwma_10_h)
-                                        if high_price < reentry_zone:
-                                            logging.info(f"[FILTER BBMA] Sinyal SELL ditahan (Wait): Harga belum mencapai zona Re-entry LWMA High (High {high_price:.4f} < {reentry_zone:.4f}).")
-                                            allow_execution = False
-                                    elif action_type == mt5.ORDER_TYPE_BUY:
-                                        reentry_zone = max(lwma_5_l, lwma_10_l)
-                                        if low_price > reentry_zone:
-                                            logging.info(f"[FILTER BBMA] Sinyal BUY ditahan (Wait): Harga belum mencapai zona Re-entry LWMA Low (Low {low_price:.4f} > {reentry_zone:.4f}).")
-                                            allow_execution = False
+                                # --- Aturan Ketat BBMA: BUY HANYA di LWMA Low & SELL HANYA di LWMA High (Universal: RUNNER & HIT_RUN) ---
+                                lwma_5_h = row_data.get('LWMA_5_High', 0)
+                                lwma_10_h = row_data.get('LWMA_10_High', 0)
+                                lwma_5_l = row_data.get('LWMA_5_Low', 0)
+                                lwma_10_l = row_data.get('LWMA_10_Low', 0)
+                                high_price = row_data.get('high', 0)
+                                low_price = row_data.get('low', 0)
+                                
+                                if action_type == mt5.ORDER_TYPE_SELL:
+                                    reentry_zone = min(lwma_5_h, lwma_10_h)
+                                    if high_price < reentry_zone:
+                                        logging.info(f"[FILTER BBMA] Sinyal SELL ({trade_mode}) ditahan (Wait): Harga belum mencapai zona Re-entry LWMA High (High {high_price:.4f} < {reentry_zone:.4f}).")
+                                        allow_execution = False
+                                elif action_type == mt5.ORDER_TYPE_BUY:
+                                    reentry_zone = max(lwma_5_l, lwma_10_l)
+                                    if low_price > reentry_zone:
+                                        logging.info(f"[FILTER BBMA] Sinyal BUY ({trade_mode}) ditahan (Wait): Harga belum mencapai zona Re-entry LWMA Low (Low {low_price:.4f} > {reentry_zone:.4f}).")
+                                        allow_execution = False
                                             
                                 if allow_execution:
                                     logging.info(f"[SIGNAL] Multiclass Entry: {action_str} | Mode: {trade_mode} | Prob: {used_prob:.2f}")
@@ -289,7 +321,7 @@ class ExecutorAgent:
                             
                         is_runner = "RUNNER" in pos.comment.upper()
                         
-                        # --- Dynamic TP Multiplier berdasarkan Tren (ADX) ---
+                        # --- ATURAN 1: Dynamic TP Multiplier (Hit & Run Minimal RR 1:2) ---
                         tp_multiplier = 2.0
                         rates_tp = mt5.copy_rates_from_pos(Config.SYMBOL, mt5.TIMEFRAME_M1, 0, 30)
                         if rates_tp is not None and len(rates_tp) >= 30:
@@ -297,32 +329,74 @@ class ExecutorAgent:
                             from utils.indicators import calculate_adx
                             df_tp['adx'] = calculate_adx(df_tp, 14)
                             adx_val = df_tp['adx'].iloc[-1]
-                            if not np.isnan(adx_val):
-                                if adx_val > 40: tp_multiplier = 3.0
-                                elif adx_val < 20: tp_multiplier = 1.5
+                            if not np.isnan(adx_val) and adx_val > 40:
+                                tp_multiplier = 3.0
+                        # Mode Hit & Run selalu minimal RR 1:2
+                        tp_multiplier = max(2.0, tp_multiplier)
 
                         if not is_runner:
-                            # --- Logika HIT_RUN ---
+                            # --- ATURAN 1: Logika HIT_RUN (Maksimal 1 Posisi, Minimal RR 1:2) ---
                             if initial_risk > 0:
                                 # BE saat RR 1:1 secepatnya
                                 if current_gain >= (1.0 * initial_risk) and abs(pos.sl - pos.price_open) > 0.05:
                                     logging.info(f"[HIT_RUN] Target RR 1:1 tercapai untuk tiket {ticket}. Geser SL ke BE.")
                                     self.modify_sl_to_break_even(ticket)
-                                # Full Close saat RR dinamis tercapai
+                                # Full Close saat RR dinamis tercapai (minimal RR 1:2)
                                 if current_gain >= (tp_multiplier * initial_risk):
-                                    logging.info(f"[HIT_RUN] Target RR 1:{tp_multiplier} tercapai untuk tiket {ticket}. Menjalankan Full Close.")
-                                    self.execute_full_close(ticket, reason=f"Hit & Run: Target RR 1:{tp_multiplier} Tercapai (Full Close)")
+                                    logging.info(f"[HIT_RUN] Target RR 1:{tp_multiplier:.1f} tercapai untuk tiket {ticket}. Menjalankan Full Close.")
+                                    self.execute_full_close(ticket, reason=f"Hit & Run: Target RR 1:{tp_multiplier:.1f} Tercapai (Full Close)")
                         else:
-                            # --- Logika RUNNER ---
-                            if initial_risk > 0 and current_gain >= (tp_multiplier * initial_risk):
+                            # --- ATURAN 2: Logika RUNNER (Exit Reversal Analisa atau Maximum RR Hasil Belajar) ---
+                            # Step A: Partial Close 50% & SL ke BE saat mencapai milestone RR 1:2
+                            if initial_risk > 0 and current_gain >= (2.0 * initial_risk):
                                 if abs(pos.sl - pos.price_open) > 0.05:
-                                    logging.info(f"[RUNNER] Target RR 1:{tp_multiplier} tercapai untuk tiket {ticket}. Partial Close 50% & SL ke BE.")
+                                    logging.info(f"[RUNNER] Milestone RR 1:2 tercapai untuk tiket {ticket}. Partial Close 50% & SL ke BE.")
                                     self.execute_partial_close_50(ticket)
                                     self.modify_sl_to_break_even(ticket)
                                     
-                            # Trailing stop seketika kini ditangani oleh AI Probability Loop di atas
-                            # self.topographical_trailing_stop(ticket) # Dinonaktifkan, pindah ke AI Driven
-                            pass
+                            # Step B: Exit jika "Maximum RR" yang didapat dari proses "belajar" tercapai
+                            max_runner_rr = getattr(self.researcher, 'max_runner_rr', 5.0)
+                            if initial_risk > 0 and current_gain >= (max_runner_rr * initial_risk):
+                                logging.info(f"[RUNNER EXIT] 🎯 Maximum RR hasil belajar (1:{max_runner_rr:.1f}) tercapai untuk tiket {ticket} (Gain: {current_gain:.2f} >= {max_runner_rr * initial_risk:.2f}). Menjalankan Full Close.")
+                                self.execute_full_close(ticket, reason=f"Runner Exit: Maximum RR ({max_runner_rr:.1f}R) Hasil Belajar Tercapai")
+                                continue
+
+                            # Step C: Exit jika "Analisa" mengatakan harga akan berbalik (Reversal Analysis)
+                            reversal_detected = False
+                            reversal_reason = ""
+                            latest_p = getattr(self, 'latest_probs', {})
+                            latest_df = getattr(self, 'latest_df_live', None)
+                            
+                            p_sell_rev = max(latest_p.get("runner_sell", 0.0), latest_p.get("normal_sell", 0.0))
+                            p_buy_rev = max(latest_p.get("runner_buy", 0.0), latest_p.get("normal_buy", 0.0))
+
+                            if pos.type == mt5.ORDER_TYPE_BUY:
+                                if p_sell_rev >= 0.65:
+                                    reversal_detected = True
+                                    reversal_reason = f"AI mendeteksi lonjakan probabilitas SELL ({p_sell_rev:.2f})"
+                                elif latest_df is not None and not latest_df.empty and 'EMA_50' in latest_df.columns and 'LWMA_10_Low' in latest_df.columns:
+                                    c_close = latest_df['close'].iloc[-1]
+                                    c_ema = latest_df['EMA_50'].iloc[-1]
+                                    c_lwma = latest_df['LWMA_10_Low'].iloc[-1]
+                                    if c_close < c_ema and c_close < c_lwma:
+                                        reversal_detected = True
+                                        reversal_reason = f"Topografi Reversal Breakdown (Close {c_close:.2f} < EMA 50 & LWMA 10 Low)"
+                            elif pos.type == mt5.ORDER_TYPE_SELL:
+                                if p_buy_rev >= 0.65:
+                                    reversal_detected = True
+                                    reversal_reason = f"AI mendeteksi lonjakan probabilitas BUY ({p_buy_rev:.2f})"
+                                elif latest_df is not None and not latest_df.empty and 'EMA_50' in latest_df.columns and 'LWMA_10_High' in latest_df.columns:
+                                    c_close = latest_df['close'].iloc[-1]
+                                    c_ema = latest_df['EMA_50'].iloc[-1]
+                                    c_lwma = latest_df['LWMA_10_High'].iloc[-1]
+                                    if c_close > c_ema and c_close > c_lwma:
+                                        reversal_detected = True
+                                        reversal_reason = f"Topografi Reversal Breakout (Close {c_close:.2f} > EMA 50 & LWMA 10 High)"
+
+                            if reversal_detected:
+                                logging.warning(f"[RUNNER EXIT] 🔄 Analisa mendeteksi Pembalikan Arah ({reversal_reason}) untuk tiket {ticket}. Menjalankan Full Close.")
+                                self.execute_full_close(ticket, reason=f"Runner Exit: Analisa Reversal ({reversal_reason})")
+                                continue
             except Exception as e:
                 logging.debug(f"Position management loop error: {e}")
 
@@ -368,6 +442,16 @@ class ExecutorAgent:
                 logging.warning(f"[SEKRING] Volatility Anomaly! Range {last_candle_range:.5f} > 3x ATR ({3*atr_14:.5f}). Order rejected.")
                 return None
 
+        # --- ATURAN 1: Mode Hit & Run Hanya 1x Open Posisi Aktif ---
+        if trade_mode == "HIT_RUN":
+            active_positions = mt5.positions_get(symbol=Config.SYMBOL)
+            if active_positions:
+                hr_positions = [p for p in active_positions if "HIT_RUN" in p.comment.upper()]
+                if len(hr_positions) >= 1:
+                    logging.warning(f"[HIT_RUN LIMIT] Order ditolak: Sudah ada 1 posisi Hit & Run aktif (Tiket {hr_positions[0].ticket}).")
+                    return None
+
+        # --- ATURAN 2: Mode RUNNER bisa open berkali-kali searah di LWMA jika sudah running profit ---
         positions = mt5.positions_get(symbol=Config.SYMBOL)
         same_dir_positions = []
         if positions:
@@ -375,16 +459,16 @@ class ExecutorAgent:
                 if p.type == action:
                     same_dir_positions.append(p)
                     
-        # Tidak dibatasi jumlahnya (unlimited pyramid) JIKA probabilitas runner >= 70%
-        is_high_prob = prob_runner is not None and prob_runner >= 0.70
-        
-        if not is_high_prob and len(same_dir_positions) >= getattr(self, 'MAX_PYRAMIDING', 3):
-            logging.warning(f"[PYRAMIDING] Limit dinamis {getattr(self, 'MAX_PYRAMIDING', 3)} (ADX: {current_adx:.1f}) tercapai. Order ditolak.")
-            return None
-            
-        for p in same_dir_positions:
-            if p.profit <= 0:
-                logging.warning(f"[PYRAMIDING] Posisi sebelumnya (Tiket {p.ticket}) belum profit. Scale-In ditolak.")
+        if trade_mode == "RUNNER" and len(same_dir_positions) > 0:
+            for p in same_dir_positions:
+                if p.profit <= 0:
+                    logging.warning(f"[RUNNER PYRAMIDING] Posisi Runner sebelumnya (Tiket {p.ticket}) belum running profit (Profit: ${p.profit:.2f}). Scale-In ditolak.")
+                    return None
+            logging.info(f"[RUNNER PYRAMIDING] ✅ Semua ({len(same_dir_positions)}) posisi Runner sebelumnya sudah running profit. Mengizinkan Scale-In baru.")
+        elif trade_mode != "RUNNER":
+            is_high_prob = prob_runner is not None and prob_runner >= 0.70
+            if not is_high_prob and len(same_dir_positions) >= getattr(self, 'MAX_PYRAMIDING', 3):
+                logging.warning(f"[PYRAMIDING] Limit dinamis {getattr(self, 'MAX_PYRAMIDING', 3)} tercapai. Order ditolak.")
                 return None
         # ------------------------
 
@@ -398,49 +482,40 @@ class ExecutorAgent:
                 logging.error(f"symbol_select({Config.SYMBOL}) failed, exit")
                 return None
                 
-        # Kalkulasi Parameter Orde Langsung (Kelly-Lite Dynamic Risk)
-        win_rate = 0.5
-        try:
-            from database import get_recent_trade_logs
-            logs_df = get_recent_trade_logs(50)
-            if not logs_df.empty:
-                wins = len(logs_df[logs_df['profit'] > 0])
-                win_rate = wins / len(logs_df)
-        except Exception:
-            pass
-            
-        risk_modifier = 1.0
-        if win_rate < 0.40:
-            risk_modifier = 0.5 # Defensif (potong risiko separuh) jika win rate buruk
-            logging.info(f"[RISK] Win rate buruk ({win_rate*100:.0f}%), memotong risiko 50%")
-        elif win_rate > 0.65:
-            risk_modifier = 1.5 # Agresif jika win rate sangat baik
-            logging.info(f"[RISK] Win rate super ({win_rate*100:.0f}%), meningkatkan risiko 50%")
-            
-        # --- Formula Sizing Berbasis Uang / Persentase Modal (Risk) ---
-        # Hitung modal/balance saat ini jika menggunakan mode persen
+        # --- ATURAN 3: Kalkulasi Lot Berdasarkan Maximum Risk yang Disetting Lewat UI ---
         base_risk_dollars = Config.MAX_RISK_DOLLARS
         if getattr(Config, 'RISK_MODE', 'dollars') == 'percent':
             account_info = mt5.account_info()
             equity = account_info.equity if account_info and account_info.equity > 0 else (account_info.balance if account_info else 1000.0)
             base_risk_dollars = max(1.0, equity * (getattr(Config, 'MAX_RISK_PERCENT', 1.0) / 100.0))
-            logging.info(f"[RISK PERCENT] Equity: ${equity:.2f} | Risk: {Config.MAX_RISK_PERCENT}% -> Base Risk: ${base_risk_dollars:.2f}")
+            logging.info(f"[RISK UI PERCENT] Equity: ${equity:.2f} | Risk: {Config.MAX_RISK_PERCENT}% -> Max Risk UI: ${base_risk_dollars:.2f}")
+        else:
+            logging.info(f"[RISK UI DOLLARS] Max Risk UI: ${base_risk_dollars:.2f}")
 
         tick_value = symbol_info.trade_tick_value
         tick_size = symbol_info.trade_tick_size
         
         lot = 0.01
         if tick_size > 0 and tick_value > 0:
-            # Nilai uang riil untuk setiap 1 poin (absolut) per 1 lot standar
+            # Nilai uang riil untuk setiap 1 unit harga per 1 lot standar
             money_per_unit = tick_value / tick_size
             
             # Total kerugian jika kita open 1 lot penuh untuk jarak SL ini
             loss_for_one_lot = sl_distance * money_per_unit
             
             if loss_for_one_lot > 0:
-                lot = (base_risk_dollars * risk_modifier) / loss_for_one_lot
+                raw_lot = base_risk_dollars / loss_for_one_lot
                 
-        lot = max(0.01, round(lot, 2))
+                # Sesuaikan dengan volume step broker (floor rounding agar risiko <= max risk UI)
+                step = symbol_info.volume_step if symbol_info.volume_step > 0 else 0.01
+                min_lot = symbol_info.volume_min if symbol_info.volume_min > 0 else 0.01
+                max_lot = symbol_info.volume_max if symbol_info.volume_max > 0 else 100.0
+                
+                import math
+                calc_lot = math.floor(raw_lot / step) * step
+                lot = max(min_lot, min(max_lot, round(calc_lot, 2)))
+                est_loss = lot * loss_for_one_lot
+                logging.info(f"[LOT SIZING] Max Risk UI: ${base_risk_dollars:.2f} | Jarak SL: {sl_distance:.2f} | Lot Terhitung: {lot} (Est. Rugi SL: ${est_loss:.2f})")
         
         tick = mt5.symbol_info_tick(Config.SYMBOL)
         if tick is None:
@@ -452,6 +527,27 @@ class ExecutorAgent:
         # Jadi kita tidak perlu mengalikannya dengan symbol_info.point
         sl_abs = float(sl_distance)
         tp_abs = float(sl_distance * 10)  # Sekring TP darurat 1:10
+        
+        # --- LWMA ZONE GUARD (DEFENSE IN DEPTH) ---
+        # Memastikan tidak ada order yang lolos jika tidak berada di zona LWMA yang tepat
+        if row_data is not None:
+            lwma_5_h = row_data.get('LWMA_5_High', 0)
+            lwma_10_h = row_data.get('LWMA_10_High', 0)
+            lwma_5_l = row_data.get('LWMA_5_Low', 0)
+            lwma_10_l = row_data.get('LWMA_10_Low', 0)
+            high_price = row_data.get('high', 0)
+            low_price = row_data.get('low', 0)
+
+            if action == mt5.ORDER_TYPE_BUY and (lwma_5_l > 0 or lwma_10_l > 0):
+                reentry_buy_zone = max(lwma_5_l, lwma_10_l)
+                if low_price > reentry_buy_zone and price > reentry_buy_zone:
+                    logging.warning(f"[LWMA GUARD] Order BUY dibatalkan: Harga saat ini ({price:.4f}) / Low ({low_price:.4f}) di atas zona LWMA Low ({reentry_buy_zone:.4f}).")
+                    return None
+            elif action == mt5.ORDER_TYPE_SELL and (lwma_5_h > 0 or lwma_10_h > 0):
+                reentry_sell_zone = min(lwma_5_h, lwma_10_h)
+                if high_price < reentry_sell_zone and price < reentry_sell_zone:
+                    logging.warning(f"[LWMA GUARD] Order SELL dibatalkan: Harga saat ini ({price:.4f}) / High ({high_price:.4f}) di bawah zona LWMA High ({reentry_sell_zone:.4f}).")
+                    return None
         
         if action == mt5.ORDER_TYPE_BUY:
             sl = price - sl_abs

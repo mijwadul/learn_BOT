@@ -901,6 +901,95 @@ def get_macro_data(start_date: str, end_date: str):
         print(f"Failed to read macro data from DB: {e}")
         return pd.DataFrame()
 
+def get_next_high_impact_event():
+    """
+    Mengambil 1 economic event 'High Impact' terdekat yang akan datang (atau baru saja rilis < 15 menit).
+    Digunakan untuk countdown dan proteksi volatilitas di antarmuka UI.
+    """
+    from datetime import datetime, timezone, timedelta
+    try:
+        Base.metadata.create_all(sync_engine)
+        now_utc = datetime.now(timezone.utc)
+        # Toleransi 15 menit ke belakang untuk menampilkan berita yang baru saja rilis
+        lookback_limit = (now_utc - timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
+        lookforward_limit = (now_utc + timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+        
+        with Session(sync_engine) as session:
+            events = session.query(EconomicEvent).filter(
+                EconomicEvent.date >= lookback_limit,
+                EconomicEvent.date <= lookforward_limit
+            ).order_by(EconomicEvent.date.asc()).all()
+            
+            for ev in events:
+                imp = str(ev.impact).lower() if ev.impact else ""
+                # High impact filter: 'high', '3', 'red'
+                if 'high' in imp or imp == '3' or 'red' in imp:
+                    ev_date = ev.date
+                    if ev_date.tzinfo is None:
+                        ev_date = ev_date.replace(tzinfo=timezone.utc)
+                    diff_seconds = (ev_date - now_utc).total_seconds()
+                    
+                    return {
+                        "id": ev.id,
+                        "event_id": ev.event_id,
+                        "event_name": ev.event_name,
+                        "country": ev.country,
+                        "currency": ev.currency,
+                        "impact": ev.impact,
+                        "date": ev_date.isoformat(),
+                        "estimate": ev.estimate,
+                        "previous": ev.previous,
+                        "actual": ev.actual,
+                        "seconds_remaining": int(diff_seconds),
+                        "minutes_remaining": round(diff_seconds / 60.0, 1),
+                        "is_imminent": 0 <= diff_seconds <= 1800 # <= 30 menit
+                    }
+        return None
+    except Exception as e:
+        import logging
+        logging.debug(f"Gagal mengambil next high impact event: {e}")
+        return None
+
+def get_upcoming_economic_events(limit: int = 10):
+    """Mengambil daftar event ekonomi mendatang hingga limit tertentu."""
+    from datetime import datetime, timezone, timedelta
+    try:
+        Base.metadata.create_all(sync_engine)
+        now_utc = datetime.now(timezone.utc)
+        lookback_limit = (now_utc - timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S')
+        lookforward_limit = (now_utc + timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+        
+        with Session(sync_engine) as session:
+            events = session.query(EconomicEvent).filter(
+                EconomicEvent.date >= lookback_limit,
+                EconomicEvent.date <= lookforward_limit
+            ).order_by(EconomicEvent.date.asc()).limit(limit).all()
+            
+            result = []
+            for ev in events:
+                ev_date = ev.date
+                if ev_date.tzinfo is None:
+                    ev_date = ev_date.replace(tzinfo=timezone.utc)
+                diff_seconds = (ev_date - now_utc).total_seconds()
+                result.append({
+                    "id": ev.id,
+                    "event_name": ev.event_name,
+                    "country": ev.country,
+                    "currency": ev.currency,
+                    "impact": ev.impact,
+                    "date": ev_date.isoformat(),
+                    "estimate": ev.estimate,
+                    "previous": ev.previous,
+                    "actual": ev.actual,
+                    "seconds_remaining": int(diff_seconds),
+                    "minutes_remaining": round(diff_seconds / 60.0, 1)
+                })
+            return result
+    except Exception as e:
+        import logging
+        logging.debug(f"Gagal mengambil upcoming economic events: {e}")
+        return []
+
 def add_hard_negative(setup_id: str, failed_mode: str = "Normal"):
     from sqlalchemy.orm import Session
     try:
