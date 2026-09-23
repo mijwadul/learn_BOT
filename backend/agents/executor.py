@@ -4,7 +4,7 @@ import datetime
 import pandas as pd
 import numpy as np
 from config import Config
-from utils.mt5_utils import check_spread
+from utils.mt5_utils import check_spread, get_symbol_filling_mode, is_cent_account
 import MetaTrader5 as mt5
 
 logging.basicConfig(level=logging.INFO)
@@ -484,13 +484,19 @@ class ExecutorAgent:
                 
         # --- ATURAN 3: Kalkulasi Lot Berdasarkan Maximum Risk yang Disetting Lewat UI ---
         base_risk_dollars = Config.MAX_RISK_DOLLARS
+        account_info = mt5.account_info()
+        is_cent = is_cent_account(Config.SYMBOL)
         if getattr(Config, 'RISK_MODE', 'dollars') == 'percent':
-            account_info = mt5.account_info()
             equity = account_info.equity if account_info and account_info.equity > 0 else (account_info.balance if account_info else 1000.0)
             base_risk_dollars = max(1.0, equity * (getattr(Config, 'MAX_RISK_PERCENT', 1.0) / 100.0))
-            logging.info(f"[RISK UI PERCENT] Equity: ${equity:.2f} | Risk: {Config.MAX_RISK_PERCENT}% -> Max Risk UI: ${base_risk_dollars:.2f}")
+            logging.info(f"[RISK UI PERCENT] Equity: {equity:.2f} {'USC' if is_cent else '$'} | Risk: {Config.MAX_RISK_PERCENT}% -> Max Risk UI: {base_risk_dollars:.2f} {'USC' if is_cent else '$'}")
         else:
-            logging.info(f"[RISK UI DOLLARS] Max Risk UI: ${base_risk_dollars:.2f}")
+            if is_cent:
+                # Akun cent menggunakan USC (1 USD = 100 USC). Konversi risk dollar ke USC agar sinkron dengan tick_value
+                base_risk_dollars = base_risk_dollars * 100.0
+                logging.info(f"[RISK UI DOLLARS - CENT ACCOUNT] Max Risk: ${Config.MAX_RISK_DOLLARS:.2f} -> {base_risk_dollars:.2f} USC")
+            else:
+                logging.info(f"[RISK UI DOLLARS] Max Risk UI: ${base_risk_dollars:.2f}")
 
         tick_value = symbol_info.trade_tick_value
         tick_size = symbol_info.trade_tick_size
@@ -569,7 +575,7 @@ class ExecutorAgent:
             "magic": 234000,
             "comment": f"AI {trade_mode}",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": get_symbol_filling_mode(Config.SYMBOL),
         }
         
         # =========================================================================
@@ -701,7 +707,7 @@ class ExecutorAgent:
             "magic": 234000,
             "comment": "Partial Close 50%",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": get_symbol_filling_mode(pos.symbol),
         }
 
         result = mt5.order_send(request)
@@ -758,7 +764,7 @@ class ExecutorAgent:
             "magic": 234000,
             "comment": "Full Close",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": get_symbol_filling_mode(pos.symbol),
         }
 
         result = mt5.order_send(request)
@@ -900,7 +906,7 @@ class ExecutorAgent:
                 "magic": 234000,
                 "comment": "Topographical Close",
                 "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
+                "type_filling": get_symbol_filling_mode(Config.SYMBOL),
             }
             res = mt5.order_send(request)
             if res and res.retcode == mt5.TRADE_RETCODE_DONE:

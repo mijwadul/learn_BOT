@@ -48,3 +48,82 @@ def check_spread(symbol):
 
 def shutdown_mt5():
     mt5.shutdown()
+
+def detect_gold_symbol(preferred_symbol="AUTO"):
+    """
+    Cerdas mendeteksi symbol Gold yang aktif/tersedia di broker MT5.
+    Mendukung XAUUSD, XAUUSDm, XAUUSDc, GOLD, XAUUSD.a, dsb.
+    """
+    # 1. Jika user menetapkan symbol spesifik selain "AUTO"
+    if preferred_symbol and str(preferred_symbol).upper() != "AUTO":
+        info = mt5.symbol_info(preferred_symbol)
+        if info is not None:
+            mt5.symbol_select(preferred_symbol, True)
+            return preferred_symbol
+
+    # 2. Prioritas pengecekan kandidat umum di berbagai broker (Exness, IC Markets, XM, dsb)
+    candidates = [
+        "XAUUSD", "XAUUSDm", "XAUUSDc", "XAUUSD.a", "XAUUSD+", "XAUUSD.pro", 
+        "GOLD", "GOLDm", "GOLDc", "XAUUSDmicro"
+    ]
+    for sym in candidates:
+        info = mt5.symbol_info(sym)
+        if info is not None:
+            mt5.symbol_select(sym, True)
+            return sym
+
+    # 3. Cari dari seluruh katalog simbol di MT5 yang mengandung kata XAUUSD atau GOLD
+    try:
+        all_symbols = mt5.symbols_get()
+        if all_symbols:
+            for s in all_symbols:
+                name_upper = s.name.upper()
+                if "XAUUSD" in name_upper:
+                    mt5.symbol_select(s.name, True)
+                    return s.name
+            for s in all_symbols:
+                name_upper = s.name.upper()
+                if "GOLD" in name_upper and not any(m in name_upper for m in ["MAR", "JUN", "SEP", "DEC"]):
+                    mt5.symbol_select(s.name, True)
+                    return s.name
+    except Exception as e:
+        print(f"[detect_gold_symbol] Gagal memindai katalog MT5: {e}")
+
+    # Fallback aman
+    return "XAUUSD"
+
+def get_symbol_filling_mode(symbol):
+    """
+    Deteksi cerdas Filling Mode order MT5 (IOC, FOK, RETURN)
+    berdasarkan kapabilitas instrumen broker (mencegah error 10030: Unsupported filling mode).
+    """
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        return mt5.ORDER_FILLING_IOC
+        
+    filling = getattr(info, 'filling_mode', 0)
+    # SYMBOL_FILLING_IOC = 2
+    if filling & 2:
+        return mt5.ORDER_FILLING_IOC
+    # SYMBOL_FILLING_FOK = 1
+    elif filling & 1:
+        return mt5.ORDER_FILLING_FOK
+    else:
+        # Fallback standar pasar / return
+        return getattr(mt5, 'ORDER_FILLING_RETURN', 2)
+
+def is_cent_account(symbol=None):
+    """
+    Mendeteksi apakah akun atau instrumen merupakan akun Cent (USC / XAUUSDc).
+    """
+    if symbol and str(symbol).lower().endswith("c"):
+        return True
+    try:
+        acc = mt5.account_info()
+        if acc and acc.currency:
+            curr = str(acc.currency).lower()
+            if "c" in curr or "cent" in curr:
+                return True
+    except Exception:
+        pass
+    return False

@@ -487,7 +487,6 @@ class DataMinerAgent:
             return df
         except Exception as e:
             logging.error(f"Gagal memuat live decision samples: {e}")
-            import pandas as pd
             return pd.DataFrame()
             
     def load_test_chunks(self, chunk_size=5000, split_ratio=0.80):
@@ -534,12 +533,10 @@ class DataMinerAgent:
             inject_ids = list(set(hn_ids + app_ids + rej_ids) - ign_ids)
 
             if not inject_ids:
-                import pandas as pd
                 return pd.DataFrame()
 
             id_list_str = "','".join(inject_ids)
             query = f"SELECT * FROM market_data_merged WHERE time IN ('{id_list_str}') ORDER BY time ASC"
-            import pandas as pd
             df = pd.read_sql(query, con=sync_engine, index_col='time')
             if not df.empty:
                 df.index = pd.to_datetime(df.index)
@@ -547,7 +544,6 @@ class DataMinerAgent:
             return df
         except Exception as e:
             logging.error(f"Gagal memuat Hard Negatives & RLHF ({mode}): {e}")
-            import pandas as pd
             return pd.DataFrame()
 
     def load_recent_micro_chunk(self, n_candles=3000):
@@ -560,6 +556,5 @@ class DataMinerAgent:
             return df
         except Exception as e:
             logging.error(f"Gagal memuat recent micro chunk: {e}")
-            import pandas as pd
             return pd.DataFrame()
 

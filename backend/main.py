@@ -151,14 +151,31 @@ class BotState:
             if init_mt5(Config.MT5_SERVER, Config.MT5_LOGIN, Config.MT5_PASSWORD, Config.MT5_PATH):
                 logging.info("Successfully connected to MT5.")
                 self.mt5_connected = True
+
+                # --- SMART SYMBOL AUTO-DETECTION ---
+                from utils.mt5_utils import detect_gold_symbol
+                resolved_symbol = detect_gold_symbol(Config.SYMBOL)
+                Config.SYMBOL = resolved_symbol
+                if hasattr(self, 'data_miner') and self.data_miner is not None:
+                    self.data_miner.symbol = resolved_symbol
+                logging.info(f"🎯 [SMART SYMBOL] Instrumen Gold aktif terdeteksi: {Config.SYMBOL}")
+
                 self.executor.data_miner = self.data_miner
                 self.executor.researcher = self.researcher
             else:
                 logging.warning("Failed to connect to MT5. Running in mock/offline mode.")
                 self.mt5_connected = False
+                if Config.SYMBOL == "AUTO":
+                    Config.SYMBOL = "XAUUSDm"
+                    if hasattr(self, 'data_miner') and self.data_miner is not None:
+                        self.data_miner.symbol = Config.SYMBOL
         except Exception as e:
             logging.error(f"MT5 initialization error: {e}")
             self.mt5_connected = False
+            if Config.SYMBOL == "AUTO":
+                Config.SYMBOL = "XAUUSDm"
+                if hasattr(self, 'data_miner') and self.data_miner is not None:
+                    self.data_miner.symbol = Config.SYMBOL
 
 bot = BotState()
 
@@ -231,6 +248,7 @@ async def get_state():
         "is_live": bot.is_live,
         "active_since": bot.active_since,
         "mt5_connected": bot.mt5_connected,
+        "active_symbol": Config.SYMBOL,
         "supervisor_state": bot.supervisor.state,
         "performance": {
             "win_rate": win_rate,
@@ -336,6 +354,23 @@ async def update_risk_settings(req: RiskSettingRequest):
             "effective_dollars": round(effective, 2)
         }
     }
+
+class ResetTradeRequest(BaseModel):
+    targets: Optional[List[str]] = None
+
+@app.post("/api/trades/reset")
+async def reset_trades_endpoint(req: Optional[ResetTradeRequest] = None):
+    try:
+        from database import reset_ai_trade_history
+        targets = req.targets if req and req.targets else None
+        result = reset_ai_trade_history(targets)
+        return {
+            "status": "success",
+            "message": "Data trading AI yang dipilih berhasil dibersihkan untuk Fresh Start.",
+            "details": result
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.post("/api/state/toggle")
 async def toggle_state():

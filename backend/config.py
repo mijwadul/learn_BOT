@@ -23,7 +23,7 @@ class Config:
     
     # Trading Configurations
     MACRO_JSON_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json" # Akan segera ditinggalkan
-    SYMBOL = "XAUUSDm" # Contoh symbol default
+    SYMBOL = os.getenv("SYMBOL", "AUTO") # "AUTO" untuk deteksi cerdas (XAUUSD, XAUUSDm, XAUUSDc), atau nama spesifik
     MAGIC_NUMBER = 123456
     RISK_MODE = os.getenv("RISK_MODE", "dollars") # Mode resiko: "dollars" ($ tetap) atau "percent" (% modal)
     MAX_RISK_DOLLARS = float(os.getenv("MAX_RISK_DOLLARS", "10.0")) # Toleransi batas rugi per transaksi ($)

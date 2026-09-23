@@ -7,7 +7,7 @@ import { getWsBaseUrl, getApiBaseUrl } from "@/config";
 
 const TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"];
 
-export default function TradingChart({ isLive }: { isLive: boolean }) {
+export default function TradingChart({ isLive, symbol = "XAUUSD" }: { isLive: boolean; symbol?: string }) {
   const [timeframe, setTimeframe] = useState("M1");
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -145,7 +145,7 @@ export default function TradingChart({ isLive }: { isLive: boolean }) {
         </div>
 
         <div className="flex items-center gap-2 text-xs">
-          <span className="text-white/70 font-mono font-bold">XAUUSDm</span>
+          <span className="text-white/70 font-mono font-bold">{symbol}</span>
           <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold bg-white/5 text-white/40 border border-white/5">
             {timeframe}
           </span>

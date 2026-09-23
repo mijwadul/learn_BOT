@@ -1065,3 +1065,66 @@ def fetch_historical_data_chunks(chunk_size=10000):
     except Exception as e:
         logging.error(f"Failed to fetch historical data: {e}")
         yield pd.DataFrame()
+
+def reset_ai_trade_history(categories: list = None):
+    """
+    Menghapus catatan hasil trading AI berdasarkan kategori pilihan untuk persiapan fresh start.
+    Kategori yang didukung:
+    - 'trade_logs': Riwayat Transaksi & Catatan PnL (tabel trade_logs)
+    - 'decision_samples': Sampel Keputusan & Feature Vector Live AI (tabel live_decision_samples)
+    - 'journal': Catatan Kronologis Black Box Journal (tabel trade_journal)
+    - 'rlhf_setups': Label & Feedback Trader Manual (tabel approved_setups, rejected_setups, ignored_setups)
+    - 'hard_negatives': Hard Negative Error Samples (tabel hard_negatives)
+    
+    Tabel data pasar (market_data, market_data_merged, economic_events) tetap utuh.
+    """
+    from sqlalchemy import text
+    
+    category_map = {
+        "trade_logs": ["trade_logs"],
+        "decision_samples": ["live_decision_samples"],
+        "journal": ["trade_journal"],
+        "rlhf_setups": ["approved_setups", "rejected_setups", "ignored_setups"],
+        "hard_negatives": ["hard_negatives"],
+    }
+    
+    if not categories or "all" in categories:
+        tables = [
+            "trade_logs",
+            "live_decision_samples",
+            "trade_journal",
+            "approved_setups",
+            "rejected_setups",
+            "ignored_setups",
+            "hard_negatives"
+        ]
+    else:
+        tables = []
+        for cat in categories:
+            if cat in category_map:
+                tables.extend(category_map[cat])
+            elif cat in [
+                "trade_logs", "live_decision_samples", "trade_journal", 
+                "approved_setups", "rejected_setups", "ignored_setups", "hard_negatives"
+            ]:
+                tables.append(cat)
+                
+    # Deduplicate tables preserving order
+    tables = list(dict.fromkeys(tables))
+
+    cleared_counts = {}
+    with sync_engine.begin() as conn:
+        for tbl in tables:
+            try:
+                count_res = conn.execute(text(f"SELECT COUNT(*) FROM {tbl}")).scalar() or 0
+                conn.execute(text(f"TRUNCATE TABLE {tbl} RESTART IDENTITY CASCADE"))
+                cleared_counts[tbl] = count_res
+            except Exception:
+                try:
+                    conn.execute(text(f"DELETE FROM {tbl}"))
+                    cleared_counts[tbl] = "cleared"
+                except Exception as e2:
+                    cleared_counts[tbl] = f"error: {e2}"
+    print(f"✅ [Fresh Start] Tabel yang dibersihkan: {cleared_counts}")
+    return cleared_counts
+

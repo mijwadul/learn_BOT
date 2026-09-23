@@ -15,6 +15,7 @@ export default function Home() {
   const [marketRegime, setMarketRegime] = useState<{ adx: number; regime: string }>({ adx: 0, regime: "DETECTING..." });
   const [onlineLearning, setOnlineLearning] = useState<{ enabled: boolean; last_retrain: string | null }>({ enabled: true, last_retrain: null });
   const [nextNews, setNextNews] = useState<MacroEvent | null>(null);
+  const [activeSymbol, setActiveSymbol] = useState<string>("XAUUSD");
 
   useEffect(() => {
     const fetchState = () => {
@@ -22,6 +23,7 @@ export default function Home() {
         .then(res => res.json())
         .then(data => {
           setIsLive(data.is_live);
+          if (data.active_symbol) setActiveSymbol(data.active_symbol);
           if (data.market_regime) setMarketRegime(data.market_regime);
           if (data.online_learning) setOnlineLearning(data.online_learning);
           if (data.next_high_impact_news !== undefined) setNextNews(data.next_high_impact_news);
@@ -139,7 +141,7 @@ export default function Home() {
 
       {/* Bottom: Full-Width Candlestick Chart */}
       <div className="flex-1 glass-panel p-1.5 sm:p-2 flex flex-col min-h-[460px] md:min-h-[500px]">
-        <TradingChart isLive={isLive} />
+        <TradingChart isLive={isLive} symbol={activeSymbol} />
       </div>
 
     </div>
