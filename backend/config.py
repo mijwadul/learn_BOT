@@ -24,7 +24,17 @@ class Config:
     # Trading Configurations
     MACRO_JSON_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json" # Akan segera ditinggalkan
     SYMBOL = os.getenv("SYMBOL", "AUTO") # "AUTO" untuk deteksi cerdas (XAUUSD, XAUUSDm, XAUUSDc), atau nama spesifik
-    MAGIC_NUMBER = 123456
+    # Magic Number Standardization (Institutional Standards)
+    MAGIC_NUMBER_BASE = int(os.getenv("MAGIC_NUMBER_BASE", "234000"))
+    MAGIC_NUMBER_NORMAL = int(os.getenv("MAGIC_NUMBER_NORMAL", "234001"))
+    MAGIC_NUMBER_RUNNER = int(os.getenv("MAGIC_NUMBER_RUNNER", "234002"))
+    MAGIC_NUMBER = MAGIC_NUMBER_BASE # Backward compatibility
+    
+    # Institutional Risk & Execution Protocols
+    NEWS_BLACKOUT_MINUTES = int(os.getenv("NEWS_BLACKOUT_MINUTES", "15")) # Hard blackout T-15m to T+15m
+    REQUOTE_MAX_RETRIES = int(os.getenv("REQUOTE_MAX_RETRIES", "2")) # Smart requote retry count
+    DYNAMIC_SLIPPAGE_MULTIPLIER = float(os.getenv("DYNAMIC_SLIPPAGE_MULTIPLIER", "1.5")) # Spread multiplier for deviation
+    
     RISK_MODE = os.getenv("RISK_MODE", "dollars") # Mode resiko: "dollars" ($ tetap) atau "percent" (% modal)
     MAX_RISK_DOLLARS = float(os.getenv("MAX_RISK_DOLLARS", "10.0")) # Toleransi batas rugi per transaksi ($)
     MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "1.0")) # Toleransi batas rugi per transaksi (% modal)

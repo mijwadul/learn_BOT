@@ -14,14 +14,18 @@ import {
   Clock 
 } from "lucide-react";
 import { getApiBaseUrl } from "@/config";
+import { useToast } from "@/components/ui/Toast";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
 
 export default function DatabasePage() {
+  const toast = useToast();
   const [health, setHealth] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [actionMessage, setActionMessage] = useState<{ text: string; type: "success" | "info" | "error" } | null>(null);
   const [isSyncingLatest, setIsSyncingLatest] = useState(false);
   const [isBackfilling, setIsBackfilling] = useState(false);
   const [prevRowCount, setPrevRowCount] = useState<number | null>(null);
+  const [isBackfillModalOpen, setIsBackfillModalOpen] = useState(false);
 
   const fetchHealth = async () => {
     try {
@@ -99,10 +103,10 @@ export default function DatabasePage() {
 
   // Handle Full Rebuild Force Backfill
   const handleForceBackfill = async () => {
-    if (!confirm("PERINGATAN: Force Backfill akan me-rebuild ulang 5.000.000 candle historis dari MT5 dari nol. Apakah Anda yakin ingin melanjutkan?")) return;
-
+    setIsBackfillModalOpen(false);
     setIsBackfilling(true);
     setActionMessage({ text: "Memulai Force Backfill (Rebuild 5jt candle)...", type: "info" });
+    toast.info("Memulai Force Backfill (Rebuild 5,000,000 candle)...", "Backfill");
     setPrevRowCount(health?.row_count ?? null);
 
     try {
@@ -110,15 +114,19 @@ export default function DatabasePage() {
       const data = await res.json();
       if (data.status === "success") {
         setActionMessage({ text: data.message, type: "info" });
+        toast.success(data.message, "Backfill Dimulai");
       } else {
         setActionMessage({ text: data.message || "Gagal memicu backfill.", type: "error" });
+        toast.error(data.message || "Gagal memicu backfill.", "Gagal");
         setIsBackfilling(false);
       }
     } catch (err) {
       setActionMessage({ text: "Error: Gagal memicu backfill.", type: "error" });
+      toast.error("Gagal terhubung ke backend server.", "Error");
       setIsBackfilling(false);
     }
   };
+
 
   const isBusy = isSyncingLatest || isBackfilling;
 
@@ -275,7 +283,7 @@ export default function DatabasePage() {
             </div>
             
             <button 
-              onClick={handleForceBackfill}
+              onClick={() => setIsBackfillModalOpen(true)}
               disabled={isBusy}
               className={`w-full py-2.5 px-3 rounded-lg font-medium text-xs flex items-center justify-center gap-2 transition-colors ${
                 isBackfilling 
@@ -293,7 +301,20 @@ export default function DatabasePage() {
         </div>
 
       </div>
+
+      <ConfirmModal
+        isOpen={isBackfillModalOpen}
+        onClose={() => setIsBackfillModalOpen(false)}
+        onConfirm={handleForceBackfill}
+        title="Konfirmasi Force Backfill MT5"
+        description="PERINGATAN: Force Backfill akan membersihkan dan men-download ulang 5.000.000 candle historis dari MT5 secara penuh. Proses ini memakan bandwidth dan waktu. Lanjutkan?"
+        confirmText="Mulai Rebuild"
+        cancelText="Batal"
+        variant="warning"
+        isLoading={isBackfilling}
+      />
     </div>
   );
 }
+
 

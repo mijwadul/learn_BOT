@@ -100,132 +100,9 @@ class ResearcherAgent:
         return False
         
     def generate_targets(self, df):
-        logging.info("Generating dynamic ATR-based targets (BBMA LWMA Topography: Buy at LWMA Low, Sell at LWMA High)...")
-        from utils.indicators import calculate_atr
-        df['ATR_14'] = calculate_atr(df, 14)
-        
-        # Menambahkan EMA_50 untuk mendeteksi tren/posisi trading
-        from utils.indicators import calculate_ema, calculate_lwma
-        if 'EMA_50' not in df.columns:
-            df['EMA_50'] = calculate_ema(df['close'], 50)
-            
-        if 'dist_Close_EMA50' not in df.columns:
-            df['dist_Close_EMA50'] = df['close'] - df['EMA_50']
-            
-        # Pastikan kolom LWMA tersedia untuk kalkulasi zona topografi
-        if 'LWMA_5_Low' not in df.columns:
-            df['LWMA_5_Low'] = calculate_lwma(df['low'], 5)
-        if 'LWMA_10_Low' not in df.columns:
-            df['LWMA_10_Low'] = calculate_lwma(df['low'], 10)
-        if 'LWMA_5_High' not in df.columns:
-            df['LWMA_5_High'] = calculate_lwma(df['high'], 5)
-        if 'LWMA_10_High' not in df.columns:
-            df['LWMA_10_High'] = calculate_lwma(df['high'], 10)
+        from .research.target_labeler import generate_targets
+        return generate_targets(df, max_runner_rr=getattr(self, 'max_runner_rr', 5.0))
 
-        closes = df['close'].values
-        opens = df['open'].values
-        highs = df['high'].values
-        lows = df['low'].values
-        atrs = df['ATR_14'].values
-        ema_50_vals = df['EMA_50'].values if 'EMA_50' in df.columns else closes
-        
-        lwma_low_zone = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values)
-        lwma_high_zone = np.minimum(df['LWMA_5_High'].values, df['LWMA_10_High'].values)
-        
-        n = len(df)
-        labels_normal = np.zeros(n)
-        labels_runner = np.zeros(n)
-        
-        # Dynamic ATR-based Target Generation dengan aturan topografi BBMA & Resolusi EMA 50
-        for i in range(n):
-            if np.isnan(atrs[i]) or np.isnan(lwma_low_zone[i]) or np.isnan(lwma_high_zone[i]):
-                continue
-                
-            is_lwma_low = lows[i] <= lwma_low_zone[i]
-            is_lwma_high = highs[i] >= lwma_high_zone[i]
-            
-            # Jika harga tidak menyentuh zona LWMA Low maupun High, setup tidak valid (No Trade / 0)
-            if not is_lwma_low and not is_lwma_high:
-                continue
-
-            # Resolusi Sinyal Bentrok saat lilin menyentuh kedua zona:
-            # Mengikuti Major Trend berpedoman pada EMA 50
-            if is_lwma_low and is_lwma_high:
-                if closes[i] >= ema_50_vals[i]:
-                    eval_buy = True
-                    eval_sell = False
-                else:
-                    eval_buy = False
-                    eval_sell = True
-            else:
-                eval_buy = is_lwma_low
-                eval_sell = is_lwma_high
-
-            entry_price = closes[i]
-            sl_dist = atrs[i]
-            
-            # Target Normal: RR minimal 1:2 (Hit & Run), lookahead hingga 100 candle
-            tp_buy_normal = entry_price + (sl_dist * 2.0)
-            sl_buy_normal = entry_price - sl_dist
-            tp_sell_normal = entry_price - (sl_dist * 2.0)
-            sl_sell_normal = entry_price + sl_dist
-            
-            # Target Runner: RR dinamis (berdasarkan self.max_runner_rr), lookahead hingga 300 candle
-            runner_rr = getattr(self, 'max_runner_rr', 5.0)
-            tp_buy_runner = entry_price + (sl_dist * runner_rr)
-            sl_buy_runner = entry_price - sl_dist
-            tp_sell_runner = entry_price - (sl_dist * runner_rr)
-            sl_sell_runner = entry_price + sl_dist
-
-            # 1. Evaluasi Setup BUY (HANYA jika menguji zona LWMA Low)
-            if eval_buy:
-                buy_success_n = False
-                for j in range(i + 1, min(i + 101, n)):
-                    if lows[j] <= sl_buy_normal:
-                        break
-                    elif highs[j] >= tp_buy_normal:
-                        buy_success_n = True
-                        break
-                if buy_success_n:
-                    labels_normal[i] = 1
-
-                buy_success_r = False
-                for j in range(i + 1, min(i + 301, n)):
-                    if lows[j] <= sl_buy_runner:
-                        break
-                    elif highs[j] >= tp_buy_runner:
-                        buy_success_r = True
-                        break
-                if buy_success_r:
-                    labels_runner[i] = 1
-
-            # 2. Evaluasi Setup SELL (HANYA jika menguji zona LWMA High)
-            if eval_sell:
-                sell_success_n = False
-                for j in range(i + 1, min(i + 101, n)):
-                    if highs[j] >= sl_sell_normal:
-                        break
-                    elif lows[j] <= tp_sell_normal:
-                        sell_success_n = True
-                        break
-                if sell_success_n:
-                    labels_normal[i] = 2
-
-                sell_success_r = False
-                for j in range(i + 1, min(i + 301, n)):
-                    if highs[j] >= sl_sell_runner:
-                        break
-                    elif lows[j] <= tp_sell_runner:
-                        sell_success_r = True
-                        break
-                if sell_success_r:
-                    labels_runner[i] = 2
-                        
-        df['Target_Normal'] = labels_normal
-        df['Target_Runner'] = labels_runner
-        
-        # Simpan fitur ATR_14 untuk analisis volatilitas di model
-        return df
 
     def optimize_hyperparameters(self, X, y, sample_weights, n_trials=20):
         import optuna
@@ -607,45 +484,9 @@ class ResearcherAgent:
         XAI (Explainable AI):
         Mengekstrak Top 3 Feature Contributions dari model LightGBM untuk keputusan eksekusi.
         """
-        if self.model_normal is None:
-            return "Sinyal Breakout Topografi BBMA & ATR"
+        from .research.explainer import get_top_feature_contributions
+        return get_top_feature_contributions(self.model_normal, self.features, X_row, top_n=top_n)
 
-        try:
-            # Jika X_row adalah Series atau dict, ubah ke DataFrame
-            if isinstance(X_row, pd.Series):
-                X_row = pd.DataFrame([X_row])
-                
-            # Filter kolom fitur yang valid
-            valid_cols = [c for c in self.features if c in X_row.columns]
-            if not valid_cols:
-                return "Sinyal Topografi BBMA & ATR"
-                
-            X_eval = X_row[valid_cols]
-            
-            # Ekstrak SHAP feature contributions langsung dari LightGBM Booster
-            if hasattr(self.model_normal, 'booster_'):
-                contribs = self.model_normal.booster_.predict(X_eval, pred_contrib=True)[0]
-                feat_contribs = list(zip(valid_cols, contribs[:-1]))
-                top_features = sorted(feat_contribs, key=lambda x: abs(x[1]), reverse=True)[:top_n]
-                
-                parts = []
-                for feat, val in top_features:
-                    sign = "+" if val >= 0 else ""
-                    parts.append(f"{feat} ({sign}{val:.2f})")
-                return "Top 3 Fitur: " + ", ".join(parts)
-        except Exception as e:
-            logging.debug(f"Gagal kalkulasi feature contribution SHAP: {e}")
-
-        # Fallback ke feature importances global
-        try:
-            if hasattr(self.model_normal, 'feature_importances_'):
-                top_idx = np.argsort(self.model_normal.feature_importances_)[-top_n:][::-1]
-                top_f = [self.features[i] for i in top_idx]
-                return "Top 3 Fitur Utama: " + ", ".join(top_f)
-        except Exception:
-            pass
-
-        return "BBMA Convergence & Momentum ATR"
 
     def get_live_probabilities(self, X_live):
         """

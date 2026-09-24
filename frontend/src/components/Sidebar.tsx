@@ -20,11 +20,16 @@ import {
   PanelLeftOpen 
 } from "lucide-react";
 import { getApiBaseUrl } from "@/config";
+import { useToast } from "@/components/ui/Toast";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const toast = useToast();
   const [isOpen, setIsOpen] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isEmergencyModalOpen, setIsEmergencyModalOpen] = useState(false);
+  const [isEmergencyLoading, setIsEmergencyLoading] = useState(false);
 
   // Restore collapsed state from localStorage
   useEffect(() => {
@@ -44,6 +49,23 @@ export default function Sidebar() {
 
   const toggleSidebar = () => setIsOpen(!isOpen);
   const closeSidebar = () => setIsOpen(false);
+
+  const handleEmergencyStop = async () => {
+    setIsEmergencyLoading(true);
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/state/emergency`, { method: "POST" });
+      if (res.ok) {
+        toast.error("EMERGENCY STOP DIAKTIFKAN! Seluruh sistem dihentikan dan posisi aktif dilikuidasi.", "Emergency Stop");
+      } else {
+        toast.warning("Gagal memicu emergency stop di server.", "Gagal");
+      }
+    } catch (e) {
+      toast.error("Tidak dapat terhubung ke backend server.", "Koneksi Gagal");
+    } finally {
+      setIsEmergencyLoading(false);
+      setIsEmergencyModalOpen(false);
+    }
+  };
 
   return (
     <>
@@ -80,7 +102,7 @@ export default function Sidebar() {
             )}
           </Link>
 
-          {/* Gemini-style Sidebar Collapse Toggle */}
+          {/* Sidebar Collapse Toggle */}
           <button
             onClick={toggleCollapse}
             className={`p-2 rounded-lg text-white/50 hover:text-white hover:bg-white/10 transition-colors shrink-0 ${isCollapsed ? "mt-2" : ""}`}
@@ -105,12 +127,7 @@ export default function Sidebar() {
         {/* Emergency Stop Button */}
         <div className="mt-auto w-full pt-4 border-t border-white/10 shrink-0">
           <button 
-            onClick={async () => {
-               if (confirm("Peringatan: Emergency Stop akan menghentikan seluruh eksekusi dan melikuidasi SEMUA posisi aktif! Lanjutkan?")) {
-                 await fetch(`${getApiBaseUrl()}/api/state/emergency`, { method: "POST" });
-                 alert("EMERGENCY STOP TRIGGERED! Cek logs untuk detail eksekusi.");
-               }
-            }}
+            onClick={() => setIsEmergencyModalOpen(true)}
             title="Emergency Stop"
             className={`w-full flex items-center ${isCollapsed ? "justify-center p-3" : "justify-center md:justify-start gap-2.5 p-3"} rounded-xl bg-brand-red/20 text-brand-red hover:bg-brand-red/40 transition-colors font-bold overflow-hidden`}
           >
@@ -124,6 +141,19 @@ export default function Sidebar() {
       {isOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 md:hidden transition-opacity" onClick={closeSidebar}></div>
       )}
+
+      {/* Emergency Stop Confirmation Modal (P1-4) */}
+      <ConfirmModal
+        isOpen={isEmergencyModalOpen}
+        onClose={() => setIsEmergencyModalOpen(false)}
+        onConfirm={handleEmergencyStop}
+        title="Peringatan: Emergency Stop"
+        description="Emergency Stop akan memutus siklus live trading, menghentikan bot secara instan, dan melikuidasi SELURUH posisi aktif di akun broker MT5. Tindakan ini tidak dapat dibatalkan."
+        confirmText="Hentikan & Likuidasi"
+        cancelText="Batal"
+        variant="danger"
+        isLoading={isEmergencyLoading}
+      />
     </>
   );
 }
@@ -165,7 +195,6 @@ function NavItem({
         </span>
       )}
 
-      {/* Floating tooltip when collapsed */}
       {isCollapsed && (
         <div className="hidden md:group-hover:block absolute left-full ml-3 px-2.5 py-1 bg-black/90 border border-white/10 rounded-md text-xs font-semibold text-white whitespace-nowrap z-50 pointer-events-none shadow-xl">
           {label}
@@ -174,4 +203,3 @@ function NavItem({
     </Link>
   );
 }
-
