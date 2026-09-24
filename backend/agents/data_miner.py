@@ -527,7 +527,11 @@ class DataMinerAgent:
             hn_ids  = list(get_hard_negative_ids(mode=mode_str))
             app_ids = list(get_approved_setup_ids(mode=mode_str))
             rej_ids = list(get_rejected_setup_ids(mode=mode_str))
-            ign_ids = get_ignored_setup_ids(mode=mode_str)  # Diabaikan trader — tidak diinjeksi ke RLHF chunk
+            ign_ids = set(get_ignored_setup_ids(mode=mode_str))  # Diabaikan trader — tidak diinjeksi ke RLHF chunk
+            # Batasi Hard Negatives maksimal 500 sampel terbaru agar tidak membanjiri memori & dataset
+            MAX_HN = 500
+            if len(hn_ids) > MAX_HN:
+                hn_ids = hn_ids[-MAX_HN:]
 
             # Hanya inject HN + Approved + Rejected untuk mode ini, BUKAN Ignored
             inject_ids = list(set(hn_ids + app_ids + rej_ids) - ign_ids)

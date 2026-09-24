@@ -35,7 +35,6 @@ class GatekeeperAgent:
             
         all_y_true = []
         all_y_pred = []
-        hn_records = []
         test_chunk_idx = 1
         
         for df_test in test_generator:
@@ -67,29 +66,30 @@ class GatekeeperAgent:
             X_test = df_test[self.researcher.features]
             y_test = df_test[target_col]
             
-            preds = model.predict(X_test)
+            # Evaluasi probabilitas menggunakan batas threshold AI (konsisten dengan Executor)
+            from config import Config
+            entry_thresh = getattr(Config, 'AI_NORMAL_ENTRY_THRESHOLD', 75.0) / 100.0
+            
+            if hasattr(model, 'predict_proba'):
+                probs = model.predict_proba(X_test)
+                preds = np.zeros(len(df_test), dtype=int)
+                for i in range(len(df_test)):
+                    p_row = probs[i]
+                    p_buy = float(p_row[1]) if len(p_row) > 1 else 0.0
+                    p_sell = float(p_row[2]) if len(p_row) > 2 else 0.0
+                    if p_buy >= entry_thresh and p_buy > p_sell:
+                        preds[i] = 1
+                    elif p_sell >= entry_thresh and p_sell > p_buy:
+                        preds[i] = 2
+                    else:
+                        preds[i] = 0
+            else:
+                preds = model.predict(X_test)
             
             all_y_true.extend(y_test.tolist())
             all_y_pred.extend(preds.tolist())
-            
-            # Ekstrak kesalahan prediksi (Hard Negatives) untuk active learning
-            for i in range(len(df_test)):
-                if preds[i] != y_test.iloc[i]:
-                    idx_time = df_test.index[i]
-                    row_time_str = idx_time.strftime("%Y-%m-%d %H:%M:%S") if hasattr(idx_time, "strftime") else str(idx_time)
-                    hn_records.append({'setup_id': row_time_str, 'failed_mode': mode.capitalize()})
-                    
             test_chunk_idx += 1
             
-        # Simpan Hard Negatives secara massal
-        if hn_records:
-            try:
-                from database import bulk_add_hard_negatives
-                inserted = bulk_add_hard_negatives(hn_records)
-                logging.info(f"Berhasil menyimpan {inserted} baris Hard Negatives baru ke database.")
-            except Exception as e:
-                logging.warning(f"Gagal mencatat hard negatives: {e}")
-                
         if not all_y_true:
             logging.warning(f"Tidak ada data validasi OOS untuk mode {mode}.")
             return 0.0

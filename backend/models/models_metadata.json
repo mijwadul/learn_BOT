@@ -1,12 +1,12 @@
 {
   "normal": {
-    "last_accuracy": 0.18184974572427798,
-    "last_trained_at": "2026-09-25 00:24:17",
-    "trained": true
+    "last_accuracy": 0.0,
+    "last_trained_at": "Never",
+    "trained": false
   },
   "runner": {
     "last_accuracy": 0.0,
-    "last_trained_at": null,
+    "last_trained_at": "Never",
     "trained": false,
     "max_runner_rr": 5.0
   }

@@ -248,10 +248,17 @@ class ResearcherAgent:
             params_n['class_weight'] = 'balanced'
 
             if self.model_normal is None:
+                base_est = params_n.get('n_estimators', 80)
+                params_n['n_estimators'] = min(base_est, 100)
                 self.model_normal = lgb.LGBMClassifier(**params_n)
                 self.model_normal.fit(X, y_normal, sample_weight=sample_weights)
             else:
-                self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=self.model_normal)
+                curr_trees = getattr(self.model_normal, 'n_estimators', 80) or 80
+                max_trees_cap = 300
+                if curr_trees < max_trees_cap:
+                    new_trees = min(curr_trees + 10, max_trees_cap)
+                    self.model_normal.set_params(n_estimators=new_trees, verbose=-1, class_weight='balanced')
+                    self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=self.model_normal)
                 
             if progress_callback:
                 progress_callback(chunk_idx, total_chunks)
@@ -362,10 +369,17 @@ class ResearcherAgent:
             params_r['class_weight'] = 'balanced'
 
             if self.model_runner is None:
+                base_est = params_r.get('n_estimators', 100)
+                params_r['n_estimators'] = min(base_est, 120)
                 self.model_runner = lgb.LGBMClassifier(**params_r)
                 self.model_runner.fit(X, y_runner, sample_weight=sample_weights)
             else:
-                self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=self.model_runner)
+                curr_trees = getattr(self.model_runner, 'n_estimators', 100) or 100
+                max_trees_cap = 350
+                if curr_trees < max_trees_cap:
+                    new_trees = min(curr_trees + 10, max_trees_cap)
+                    self.model_runner.set_params(n_estimators=new_trees, verbose=-1, class_weight='balanced')
+                    self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=self.model_runner)
                 
             if progress_callback:
                 progress_callback(chunk_idx, total_chunks)
