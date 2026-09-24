@@ -62,7 +62,7 @@ class ExecutorAgent:
     async def monitor_market(self):
         self.running = True
         logging.info("Executor Agent started monitoring market...")
-        logging.info(f"Circuit Breakers Active [SpreadLimit: Dynamic (Base {Config.SPREAD_LIMIT_POINTS}), MaxDD: {Config.MAX_DRAWDOWN_PERCENT}%, FridayLiquidator: ON, NewsBlackout: +/- {Config.NEWS_BLACKOUT_MINUTES}m]")
+        logging.info(f"Circuit Breakers Active [SpreadLimit: Dynamic (Base {Config.SPREAD_LIMIT_POINTS}), MaxDD: {Config.MAX_DRAWDOWN_PERCENT}%, FridayLiquidator: Sabtu 00:00 WIB, NewsBlackout: +/- {Config.NEWS_BLACKOUT_MINUTES}m]")
         
         # P2-3: Startup Position Reconciliation (Orphan Trade Guard)
         self.position_tracker.reconcile_positions_on_startup(Config.SYMBOL)
@@ -178,8 +178,8 @@ class ExecutorAgent:
                             max_buy = max(p_buy_n, p_buy_r)
                             max_sell = max(p_sell_n, p_sell_r)
                             best_prob = max(max_buy, max_sell)
-                            
-                            if best_prob >= 0.70:
+                            entry_threshold = getattr(Config, 'AI_NORMAL_ENTRY_THRESHOLD', 75.0) / 100.0
+                            if best_prob >= entry_threshold:
                                 row_data = last_row.iloc[0]
                                 sl_dist = row_data.get('ATR_14', 5.0)
                                 if pd.isna(sl_dist) or sl_dist < 5.0:

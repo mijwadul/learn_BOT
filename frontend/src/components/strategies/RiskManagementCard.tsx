@@ -58,16 +58,29 @@ export function RiskManagementCard({ portfolioEquity = 1000 }: RiskManagementCar
   const handleSaveRisk = async () => {
     setIsSavingRisk(true);
     try {
+      const payload: {
+        risk_mode: string;
+        max_lot_cap: number;
+        fixed_lot_size?: number;
+        max_risk_dollars?: number;
+        max_risk_percent?: number;
+      } = {
+        risk_mode: riskMode,
+        max_lot_cap: maxLotCap,
+      };
+
+      if (riskMode === "fixed") {
+        payload.fixed_lot_size = fixedLotSize;
+      } else if (riskMode === "dollars") {
+        payload.max_risk_dollars = riskDollars;
+      } else if (riskMode === "percent") {
+        payload.max_risk_percent = riskPercent;
+      }
+
       const res = await fetch(`${getApiBaseUrl()}/api/settings/risk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          risk_mode: riskMode,
-          fixed_lot_size: fixedLotSize,
-          max_risk_dollars: riskDollars,
-          max_risk_percent: riskPercent,
-          max_lot_cap: maxLotCap,
-        }),
+        body: JSON.stringify(payload),
       });
       if (res.ok) {
         setSaveSuccess(true);

@@ -55,7 +55,8 @@ def get_all_approved_setups(mode: str = None):
         ensure_schema_migrations()
         where_sql = f"WHERE mode = '{mode.lower()}'" if mode else ""
         query = f"SELECT id, setup_id, mode, symbol, action, probability, approved_at, notes FROM approved_setups {where_sql} ORDER BY approved_at DESC"
-        return pd.read_sql(query, con=sync_engine)
+        with sync_engine.connect() as conn:
+            return pd.read_sql(text(query), con=conn)
     except Exception as e:
         logging.error(f"Failed to query approved setups: {e}")
         return pd.DataFrame()
@@ -161,7 +162,8 @@ def bulk_add_hard_negatives(records: list):
     """records adalah list of dict: [{'setup_id': '...', 'failed_mode': '...'}, ...]"""
     try:
         with Session(sync_engine) as session:
-            existing_df = pd.read_sql("SELECT setup_id FROM hard_negatives", con=sync_engine)
+            with sync_engine.connect() as conn:
+                existing_df = pd.read_sql(text("SELECT setup_id FROM hard_negatives"), con=conn)
             existing_ids = set(existing_df['setup_id'].tolist()) if not existing_df.empty else set()
             
             new_objects = []
@@ -186,9 +188,11 @@ def get_hard_negative_ids(mode: str = None):
             query = f"SELECT setup_id FROM hard_negatives WHERE LOWER(failed_mode) = '{mode.lower()}'"
         else:
             query = "SELECT setup_id FROM hard_negatives"
-        df = pd.read_sql(query, con=sync_engine)
+        with sync_engine.connect() as conn:
+            df = pd.read_sql(text(query), con=conn)
         return df['setup_id'].tolist() if not df.empty else []
-    except Exception:
+    except Exception as e:
+        logging.error(f"Failed to fetch hard negative ids: {e}")
         return []
 
 def reset_ai_trade_history(categories: list = None):

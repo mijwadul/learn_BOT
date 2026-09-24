@@ -109,16 +109,17 @@ class RiskService:
 
     def check_friday_liquidator(self, symbol: str) -> bool:
         """
-        Cek apakah hari Jumat setelah jam 03:00 WIB (menjelang penutupan pasar akhir pekan).
-        Jika ya, likuidasi semua posisi aktif.
+        Cek apakah hari Sabtu mulai jam 00:00 WIB (setelah candle penutupan Jumat).
+        Jika ya, likuidasi semua posisi aktif untuk mencegah risiko gap akhir pekan.
         """
         tick_data = mt5.symbol_info_tick(symbol)
         if tick_data is not None:
             wib_tz = datetime.timezone(datetime.timedelta(hours=7))
             now_wib = datetime.datetime.fromtimestamp(tick_data.time, tz=wib_tz)
             
-            if now_wib.weekday() == 4 and now_wib.hour >= 3:
-                logging.warning("[SEKRING] Friday Liquidator Active! Closing all positions.")
+            # Hari Sabtu (weekday == 5) jam 00:00 WIB ke atas atau hari Minggu (weekday == 6)
+            if (now_wib.weekday() == 5 and now_wib.hour >= 0) or now_wib.weekday() == 6:
+                logging.warning(f"[SEKRING] Friday Liquidator Active (Sabtu {now_wib.strftime('%H:%M')} WIB)! Closing all positions.")
                 self.supervisor.trigger_friday_liquidator()
                 return True
         return False
@@ -191,7 +192,8 @@ class RiskService:
                     return False
             logging.info(f"[RUNNER PYRAMIDING] ✅ Semua ({len(same_dir_positions)}) Runner profit. Scale-In diizinkan.")
         elif trade_mode != "RUNNER":
-            is_high_prob = prob_runner is not None and prob_runner >= 0.70
+            entry_thresh = getattr(Config, 'AI_NORMAL_ENTRY_THRESHOLD', 75.0) / 100.0
+            is_high_prob = prob_runner is not None and prob_runner >= entry_thresh
             if not is_high_prob and len(same_dir_positions) >= self.max_pyramiding:
                 logging.warning(f"[PYRAMIDING] Limit dinamis {self.max_pyramiding} tercapai. Order ditolak.")
                 return False

@@ -5,6 +5,7 @@ import { Settings2, RotateCcw } from "lucide-react";
 import { getApiBaseUrl } from "@/config";
 import { useToast } from "@/components/ui/Toast";
 import { RiskManagementCard } from "@/components/strategies/RiskManagementCard";
+import { AiEntryThresholdCard } from "@/components/strategies/AiEntryThresholdCard";
 import { ModelStatusGrid } from "@/components/strategies/ModelStatusGrid";
 import { RlhfReviewQueue } from "@/components/strategies/RlhfReviewQueue";
 
@@ -116,7 +117,10 @@ export default function StrategiesPage() {
       {/* 1. Risk Management Card Component */}
       <RiskManagementCard portfolioEquity={portfolioEquity} />
 
-      {/* 2. Model Status & Control Grid Component */}
+      {/* 2. AI Signal Entry Threshold Card Component */}
+      <AiEntryThresholdCard />
+
+      {/* 3. Model Status & Control Grid Component */}
       <ModelStatusGrid
         modelsStatus={modelsStatus}
         loading={loading}

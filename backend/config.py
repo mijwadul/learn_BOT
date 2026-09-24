@@ -42,7 +42,7 @@ class Config:
     MAX_LOT_CAP = float(os.getenv("MAX_LOT_CAP", "0.10")) # Batas lot maksimal pengaman (fat-finger protection)
     MAX_DRAWDOWN_PERCENT = 30.0 # Max drawdown reset JIKA menyentuh 30% dari ekuitas
     SPREAD_LIMIT_POINTS = 400 # Blokir eksekusi jika spread > 400 poin
-    AI_NORMAL_ENTRY_THRESHOLD = 75.0 # Batas minimal probabilitas AI untuk mengizinkan OP baru (%)
+    AI_NORMAL_ENTRY_THRESHOLD = float(os.getenv("AI_NORMAL_ENTRY_THRESHOLD", "75.0")) # Batas minimal probabilitas AI untuk mengizinkan OP baru (%)
 
     # AI Intelligence: Online Learning & Market Regime (ADX)
     ENABLE_ONLINE_LEARNING = os.getenv("ENABLE_ONLINE_LEARNING", "true").lower() == "true"

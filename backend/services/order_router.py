@@ -99,7 +99,7 @@ class OrderRouter:
 
     def modify_sl_to_break_even(self, ticket: int, symbol: str = None) -> bool:
         """
-        Geser Stop Loss ke harga Entry (Break-Even) + 0.10 buffer spread.
+        Geser Stop Loss ke harga Entry (Break-Even) dengan buffer adaptif spread (min 0.30 untuk Gold / 2x spread).
         """
         positions = mt5.positions_get(ticket=ticket)
         if not positions:
@@ -109,8 +109,16 @@ class OrderRouter:
         pos = positions[0]
         sym = symbol or pos.symbol
         entry_price = pos.price_open
-        buffer_pts = 0.10 if pos.type == mt5.ORDER_TYPE_BUY else -0.10
-        new_sl = round(entry_price + buffer_pts, 2)
+        
+        sym_info = mt5.symbol_info(sym)
+        digits = sym_info.digits if sym_info and sym_info.digits else 2
+        point = sym_info.point if sym_info and sym_info.point else 0.01
+        spread = sym_info.spread if sym_info and sym_info.spread else 20
+        
+        spread_dist = spread * point
+        buffer_raw = max(0.30, round(spread_dist * 2.0, digits))
+        buffer_pts = buffer_raw if pos.type == mt5.ORDER_TYPE_BUY else -buffer_raw
+        new_sl = round(entry_price + buffer_pts, digits)
         
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
@@ -122,7 +130,7 @@ class OrderRouter:
         
         res = mt5.order_send(request)
         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-            logging.info(f"[OrderRouter] Tiket {ticket} berhasil digeser ke Break-Even (SL: {new_sl}).")
+            logging.info(f"[OrderRouter] Tiket {ticket} berhasil digeser ke Break-Even (Entry: {entry_price}, Buffer: {buffer_pts:+.2f}, New SL: {new_sl}).")
             return True
         else:
             code = res.retcode if res else "None"

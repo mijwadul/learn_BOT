@@ -4,7 +4,7 @@ import re
 import logging
 import pandas as pd
 import numpy as np
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from ..connection import sync_engine, Base
 from ..models.trade import TradeLog, LiveDecisionSample, TradeJournal
@@ -176,7 +176,8 @@ def get_recent_trade_logs(limit: int = 100, mode: str = None, only_closed: bool 
                 where_clauses.append("(UPPER(mode) NOT LIKE '%RUNNER%' OR mode IS NULL)")
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         query = f"SELECT id, ticket, setup_id, time, action, mode, volume, price, sl, tp, profit, comment FROM trade_logs {where_sql} ORDER BY time DESC LIMIT {limit}"
-        df = pd.read_sql(query, con=sync_engine)
+        with sync_engine.connect() as conn:
+            df = pd.read_sql(text(query), con=conn)
         if not df.empty:
             if 'time' in df.columns:
                 df['time'] = pd.to_datetime(df['time'])
@@ -229,7 +230,8 @@ def get_historical_pnl_feedback(mode: str = None):
         else:
             where_mode = ""
         query = f"SELECT time, profit, action, mode FROM trade_logs WHERE action IN ('BUY', 'SELL', 'CLOSE', 'PARTIAL_CLOSE') AND profit != 0.0 {where_mode} ORDER BY time DESC LIMIT 10000"
-        df = pd.read_sql(query, con=sync_engine)
+        with sync_engine.connect() as conn:
+            df = pd.read_sql(text(query), con=conn)
         if not df.empty and 'time' in df.columns:
             df['time'] = pd.to_datetime(df['time'])
         return df
@@ -245,7 +247,8 @@ def get_trade_performance_summary():
     try:
         ensure_schema_migrations()
         query = "SELECT mode, profit FROM trade_logs WHERE action IN ('CLOSE', 'PARTIAL_CLOSE', 'BUY', 'SELL') AND profit != 0.0"
-        df = pd.read_sql(query, con=sync_engine)
+        with sync_engine.connect() as conn:
+            df = pd.read_sql(text(query), con=conn)
         
         def calc_stats(sub_df):
             if sub_df.empty:
@@ -457,7 +460,8 @@ def get_trade_journal_entries(limit: int = 100):
     try:
         Base.metadata.create_all(sync_engine)
         query = f"SELECT id, tiket, timestamp, event_type, harga, alasan, chart_snapshot FROM trade_journal ORDER BY timestamp DESC LIMIT {limit}"
-        df = pd.read_sql(query, con=sync_engine)
+        with sync_engine.connect() as conn:
+            df = pd.read_sql(text(query), con=conn)
         if not df.empty and 'timestamp' in df.columns:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
         return df

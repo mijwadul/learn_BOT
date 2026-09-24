@@ -1,4 +1,6 @@
 import logging
+import numpy as np
+import pandas as pd
 import MetaTrader5 as mt5
 from config import Config
 from .order_router import OrderRouter
@@ -177,35 +179,42 @@ class PositionTracker:
                     self.order_router.execute_full_close(ticket, reason=f"Runner Exit: Maximum RR ({max_runner_rr:.1f}R) Tercapai", symbol=symbol)
                     continue
 
-                # 3. Reversal Exit Analysis
+                # 3. Reversal Exit Analysis (dengan ADX confirmation filter)
                 reversal_detected = False
                 reversal_reason = ""
                 probs = latest_probs or {}
                 p_sell_rev = max(probs.get("runner_sell", 0.0), probs.get("normal_sell", 0.0))
                 p_buy_rev = max(probs.get("runner_buy", 0.0), probs.get("normal_buy", 0.0))
 
+                adx_current = 25.0
+                if latest_df is not None and not latest_df.empty:
+                    if 'adx' in latest_df.columns:
+                        val = latest_df['adx'].iloc[-1]
+                        if not np.isnan(val):
+                            adx_current = float(val)
+
                 if pos.type == mt5.ORDER_TYPE_BUY:
-                    if p_sell_rev >= 0.65:
+                    if p_sell_rev >= 0.65 and adx_current < 25.0:
                         reversal_detected = True
-                        reversal_reason = f"AI mendeteksi lonjakan probabilitas SELL ({p_sell_rev:.2f})"
+                        reversal_reason = f"AI mendeteksi lonjakan probabilitas SELL ({p_sell_rev:.2f}) + ADX lemah ({adx_current:.1f} < 25)"
                     elif latest_df is not None and not latest_df.empty and 'EMA_50' in latest_df.columns and 'LWMA_10_Low' in latest_df.columns:
                         c_close = latest_df['close'].iloc[-1]
                         c_ema = latest_df['EMA_50'].iloc[-1]
                         c_lwma = latest_df['LWMA_10_Low'].iloc[-1]
-                        if c_close < c_ema and c_close < c_lwma:
+                        if c_close < c_ema and c_close < c_lwma and adx_current < 30.0:
                             reversal_detected = True
-                            reversal_reason = f"Reversal Teknis: Close ({c_close:.2f}) menembus bawah EMA 50 ({c_ema:.2f}) & LWMA 10 Low ({c_lwma:.2f})"
+                            reversal_reason = f"Reversal Teknis: Close ({c_close:.2f}) menembus bawah EMA 50 ({c_ema:.2f}) & LWMA 10 Low ({c_lwma:.2f}) [ADX: {adx_current:.1f} < 30]"
                 elif pos.type == mt5.ORDER_TYPE_SELL:
-                    if p_buy_rev >= 0.65:
+                    if p_buy_rev >= 0.65 and adx_current < 25.0:
                         reversal_detected = True
-                        reversal_reason = f"AI mendeteksi lonjakan probabilitas BUY ({p_buy_rev:.2f})"
+                        reversal_reason = f"AI mendeteksi lonjakan probabilitas BUY ({p_buy_rev:.2f}) + ADX lemah ({adx_current:.1f} < 25)"
                     elif latest_df is not None and not latest_df.empty and 'EMA_50' in latest_df.columns and 'LWMA_10_High' in latest_df.columns:
                         c_close = latest_df['close'].iloc[-1]
                         c_ema = latest_df['EMA_50'].iloc[-1]
                         c_lwma = latest_df['LWMA_10_High'].iloc[-1]
-                        if c_close > c_ema and c_close > c_lwma:
+                        if c_close > c_ema and c_close > c_lwma and adx_current < 30.0:
                             reversal_detected = True
-                            reversal_reason = f"Reversal Teknis: Close ({c_close:.2f}) menembus atas EMA 50 ({c_ema:.2f}) & LWMA 10 High ({c_lwma:.2f})"
+                            reversal_reason = f"Reversal Teknis: Close ({c_close:.2f}) menembus atas EMA 50 ({c_ema:.2f}) & LWMA 10 High ({c_lwma:.2f}) [ADX: {adx_current:.1f} < 30]"
 
                 if reversal_detected:
                     logging.warning(f"[RUNNER REVERSAL EXIT] ⚠️ Sinyal Reversal terdeteksi untuk tiket {ticket}: {reversal_reason}. Menjalankan Full Close.")
