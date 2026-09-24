@@ -1,17 +1,19 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Settings2, RotateCcw } from "lucide-react";
+import { Settings2, RotateCcw, Loader2 } from "lucide-react";
 import { getApiBaseUrl } from "@/config";
 import { useToast } from "@/components/ui/Toast";
 import { RiskManagementCard } from "@/components/strategies/RiskManagementCard";
 import { AiEntryThresholdCard } from "@/components/strategies/AiEntryThresholdCard";
 import { ModelStatusGrid } from "@/components/strategies/ModelStatusGrid";
 import { RlhfReviewQueue } from "@/components/strategies/RlhfReviewQueue";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
 
 export default function StrategiesPage() {
   const toast = useToast();
   const [loading, setLoading] = useState(false);
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
   const [portfolioEquity, setPortfolioEquity] = useState(1000);
   const [modelsStatus, setModelsStatus] = useState({
     normal: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0 },
@@ -68,21 +70,22 @@ export default function StrategiesPage() {
     }
   };
 
-  const handleResetModels = async () => {
-    if (!window.confirm("Konfirmasi Reset Model: Tindakan ini akan menghapus file model LightGBM (.pkl), membersihkan tabel hard_negatives, dan mengembalikan model ke status baseline baru (Untrained). Lanjutkan?")) {
-      return;
-    }
+  const handleConfirmResetModels = async () => {
     setLoading(true);
     try {
       const res = await fetch(`${getApiBaseUrl()}/api/strategies/reset-models`, {
         method: "POST",
       });
       const data = await res.json();
-      toast.success(data.message, "Model Baseline Reset");
+      toast.success(
+        data.message || "Seluruh model lama, metadata, dan hard_negatives berhasil di-reset.",
+        "Model Baseline Reset"
+      );
       setModelsStatus({
         normal: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0 },
         runner: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0 },
       });
+      setIsResetModalOpen(false);
     } catch {
       toast.error("Gagal mereset model ke baseline baru.", "Error");
     } finally {
@@ -104,13 +107,17 @@ export default function StrategiesPage() {
           </p>
         </div>
         <button
-          onClick={handleResetModels}
+          onClick={() => setIsResetModalOpen(true)}
           disabled={loading}
-          className="self-start sm:self-auto px-4 py-2.5 rounded-xl text-xs font-bold text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-all flex items-center gap-2 disabled:opacity-50"
+          className="self-start sm:self-auto px-4 py-2.5 rounded-xl text-xs font-bold text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
           title="Hapus file .pkl lama, bersihkan hard_negatives, dan reset model ke baseline baru"
         >
-          <RotateCcw className="w-3.5 h-3.5" />
-          Reset Models &amp; Baseline
+          {loading ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <RotateCcw className="w-3.5 h-3.5" />
+          )}
+          {loading ? "Mereset..." : "Reset Models & Baseline"}
         </button>
       </div>
 
@@ -130,6 +137,19 @@ export default function StrategiesPage() {
 
       {/* 3. RLHF Review Queue Component */}
       <RlhfReviewQueue />
+
+      {/* Custom Confirmation Modal */}
+      <ConfirmModal
+        isOpen={isResetModalOpen}
+        onClose={() => !loading && setIsResetModalOpen(false)}
+        onConfirm={handleConfirmResetModels}
+        title="Konfirmasi Reset Model & Baseline"
+        description="Tindakan ini akan menghapus file model LightGBM (.pkl), membersihkan seluruh tabel hard_negatives, dan mengembalikan model ke status baseline baru (Untrained/Clean). Lanjutkan?"
+        confirmText="Reset Baseline"
+        cancelText="Batal"
+        variant="warning"
+        isLoading={loading}
+      />
     </div>
   );
 }
