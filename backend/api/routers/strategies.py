@@ -142,3 +142,60 @@ async def trigger_micro_train(req: MicroTrainRequest = None):
 
     threading.Thread(target=_micro_task, daemon=True).start()
     return {"status": "success", "message": f"Online Micro-Retrain ({target_mode.upper()}) started in background. Cek Logs untuk progress."}
+
+@router.post("/api/strategies/reset-models")
+async def reset_models():
+    """Menghapus seluruh checkpoint model (.pkl), mengosongkan tabel hard_negatives,
+    dan mengembalikan status model ke awal (Fresh Quantitative Baseline)."""
+    import os
+    from pathlib import Path
+    from database import reset_ai_trade_history
+
+    deleted = []
+    # Jalur absolut dan relatif ke direktori models
+    backend_dir = Path(__file__).resolve().parent.parent.parent
+    candidate_paths = [
+        Path("models/model_normal.pkl"),
+        Path("models/model_runner.pkl"),
+        backend_dir / "models" / "model_normal.pkl",
+        backend_dir / "models" / "model_runner.pkl",
+    ]
+    for p in candidate_paths:
+        if p.exists():
+            try:
+                p.unlink()
+                deleted.append(p.name)
+                logging.info(f"🗑️ [API RESET] Berhasil menghapus file model: {p}")
+            except Exception as e:
+                logging.warning(f"Gagal menghapus {p}: {e}")
+
+    # Reset in-memory state Researcher & Supervisor
+    bot.researcher.model_normal = None
+    bot.researcher.model_runner = None
+    bot.researcher.last_accuracy_normal = 0.0
+    bot.researcher.last_accuracy_runner = 0.0
+    bot.researcher.last_trained_normal = "Never"
+    bot.researcher.last_trained_runner = "Never"
+    bot.supervisor.set_model_validity(False, False)
+
+    # Reset metadata file
+    try:
+        bot.researcher.save_metadata()
+    except Exception as e_m:
+        logging.warning(f"Gagal menyimpan metadata model reset: {e_m}")
+
+    # Truncate tabel hard_negatives
+    cleared_hn = 0
+    try:
+        cleared_hn = reset_ai_trade_history(categories=["hard_negatives"])
+        logging.info(f"🗑️ [API RESET] Tabel hard_negatives dibersihkan ({cleared_hn} baris dihapus).")
+    except Exception as e_hn:
+        logging.warning(f"Gagal membersihkan hard_negatives: {e_hn}")
+
+    return {
+        "status": "success",
+        "message": "Fresh Quantitative Baseline aktif: Seluruh model lama (.pkl), metadata, dan hard_negatives berhasil di-reset.",
+        "deleted_files": list(set(deleted)),
+        "cleared_hard_negatives": cleared_hn,
+    }
+

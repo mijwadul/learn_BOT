@@ -42,6 +42,9 @@ class GatekeeperAgent:
             if df_test.empty:
                 continue
             logging.info(f"[{mode.capitalize()} Mode] Validasi OOS Chunk {test_chunk_idx}/{total_test_chunks}...")
+            # Purged Embargo: drop 100 candle perbatasan antara dataset train dan OOS untuk mencegah label leakage
+            if test_chunk_idx == 1 and len(df_test) > 150:
+                df_test = df_test.iloc[100:].copy()
             df_test = self.researcher.generate_targets(df_test)
             
             # Filter spesifik zona Re-entry BBMA LWMA

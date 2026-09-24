@@ -32,7 +32,14 @@ class ExecutorAgent:
         self.current_market_regime = {"adx": 0.0, "regime": "UNKNOWN", "last_updated": None}
         self.last_micro_retrain_time = None
         self.latest_df_live = None
-        self.latest_probs = {}
+        self.latest_probs = {
+            "normal_buy": 0.0,
+            "normal_sell": 0.0,
+            "runner_buy": 0.0,
+            "runner_sell": 0.0,
+            "normal": 0.5,
+            "runner": 0.5
+        }
         self.position_modes = self.position_tracker.position_modes
 
     @property

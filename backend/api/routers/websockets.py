@@ -75,34 +75,33 @@ async def websocket_endpoint(websocket: WebSocket, timeframe: str = "M1"):
         current_time = int(datetime.now().timestamp())
 
         while True:
-            if bot.is_live:
-                if bot.mt5_connected:
-                    try:
-                        rates = await asyncio.to_thread(mt5.copy_rates_from_pos, Config.SYMBOL, tf_const, 0, 1)
-                        if rates is not None and len(rates) > 0:
-                            candle = rates[0]
-                            tick_data = {
-                                "time": int(candle['time']),
-                                "open": float(candle['open']),
-                                "high": float(candle['high']),
-                                "low": float(candle['low']),
-                                "close": float(candle['close'])
-                            }
-                            await websocket.send_text(json.dumps({"type": "candle", "timeframe": tf_upper, "data": tick_data}))
-                    except Exception:
-                        pass
-                else:
-                    price_change = random.uniform(-2.0, 2.0)
-                    current_close += price_change
-                    current_time += sec
-                    tick_data = {
-                        "time": current_time,
-                        "open": round(current_close - price_change, 2),
-                        "high": round(max(current_close, current_close - price_change) + random.uniform(0, 1), 2),
-                        "low": round(min(current_close, current_close - price_change) - random.uniform(0, 1), 2),
-                        "close": round(current_close, 2)
-                    }
-                    await websocket.send_text(json.dumps({"type": "candle", "timeframe": tf_upper, "data": tick_data}))
+            if bot.mt5_connected:
+                try:
+                    rates = await asyncio.to_thread(mt5.copy_rates_from_pos, Config.SYMBOL, tf_const, 0, 1)
+                    if rates is not None and len(rates) > 0:
+                        candle = rates[0]
+                        tick_data = {
+                            "time": int(candle['time']),
+                            "open": float(candle['open']),
+                            "high": float(candle['high']),
+                            "low": float(candle['low']),
+                            "close": float(candle['close'])
+                        }
+                        await websocket.send_text(json.dumps({"type": "candle", "timeframe": tf_upper, "data": tick_data}))
+                except Exception:
+                    pass
+            else:
+                price_change = random.uniform(-2.0, 2.0)
+                current_close += price_change
+                current_time += sec
+                tick_data = {
+                    "time": current_time,
+                    "open": round(current_close - price_change, 2),
+                    "high": round(max(current_close, current_close - price_change) + random.uniform(0, 1), 2),
+                    "low": round(min(current_close, current_close - price_change) - random.uniform(0, 1), 2),
+                    "close": round(current_close, 2)
+                }
+                await websocket.send_text(json.dumps({"type": "candle", "timeframe": tf_upper, "data": tick_data}))
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         manager_market.disconnect(websocket)

@@ -3,6 +3,7 @@ import json
 import logging
 import asyncio
 from datetime import datetime
+from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 import MetaTrader5 as mt5
@@ -13,7 +14,11 @@ from ..dependencies import bot
 router = APIRouter(tags=["Bot State"])
 
 class ToggleStateRequest(BaseModel):
-    live: bool
+    live: Optional[bool] = None
+
+class PositionActionRequest(BaseModel):
+    ticket: int
+    symbol: Optional[str] = None
 
 @router.get("/api/state")
 async def get_state():
@@ -124,12 +129,14 @@ async def get_state():
             }
         },
         "market_regime": getattr(bot.executor, 'current_market_regime', {"adx": 0.0, "regime": "UNKNOWN"}),
+        "latest_probabilities": getattr(bot.executor, 'latest_probs', {}),
         "next_high_impact_news": next_high_impact_news
     }
 
 @router.post("/api/state/toggle")
-async def toggle_state(req: ToggleStateRequest):
-    if req.live and not bot.is_live:
+async def toggle_state(req: Optional[ToggleStateRequest] = None):
+    target_live = not bot.is_live if (req is None or req.live is None) else bool(req.live)
+    if target_live and not bot.is_live:
         bot.is_live = True
         bot.active_since = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         bot.supervisor.state = 'live'
@@ -141,7 +148,7 @@ async def toggle_state(req: ToggleStateRequest):
             bot.executor_task = asyncio.create_task(bot.executor.monitor_market())
             
         logging.info("Trading Bot ACTIVATED (Live Mode)")
-    elif not req.live and bot.is_live:
+    elif not target_live and bot.is_live:
         bot.is_live = False
         bot.active_since = None
         bot.supervisor.state = 'idle'
@@ -151,6 +158,24 @@ async def toggle_state(req: ToggleStateRequest):
         logging.info("Trading Bot DEACTIVATED (Idle Mode)")
         
     return {"status": "success", "is_live": bot.is_live, "active_since": bot.active_since}
+
+@router.post("/api/positions/break-even")
+async def position_break_even(req: PositionActionRequest):
+    sym = req.symbol or Config.SYMBOL
+    success = await asyncio.to_thread(bot.executor.order_router.modify_sl_to_break_even, req.ticket, sym)
+    return {"status": "success" if success else "error", "ticket": req.ticket, "action": "break_even"}
+
+@router.post("/api/positions/partial-close")
+async def position_partial_close(req: PositionActionRequest):
+    sym = req.symbol or Config.SYMBOL
+    success = await asyncio.to_thread(bot.executor.order_router.execute_partial_close_50, req.ticket, sym)
+    return {"status": "success" if success else "error", "ticket": req.ticket, "action": "partial_close_50"}
+
+@router.post("/api/positions/close")
+async def position_close(req: PositionActionRequest):
+    sym = req.symbol or Config.SYMBOL
+    success = await asyncio.to_thread(bot.executor.order_router.execute_full_close, req.ticket, "Manual UI Close", sym)
+    return {"status": "success" if success else "error", "ticket": req.ticket, "action": "full_close"}
 
 @router.post("/api/state/emergency")
 async def emergency_stop():

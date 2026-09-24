@@ -63,7 +63,7 @@ export default function PortfolioPage() {
       />
 
       {/* Open Positions List / Table */}
-      <OpenPositionsTable positions={portfolio.open_positions} />
+      <OpenPositionsTable positions={portfolio.open_positions} onActionSuccess={fetchPortfolio} />
 
       {/* Fresh Start Modal Component */}
       <FreshStartModal

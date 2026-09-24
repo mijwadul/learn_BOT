@@ -65,10 +65,10 @@ class ResearcherAgent:
     def load_models(self):
         try:
             loaded_any = False
-            if os.path.exists("models/model_normal.pkl"):
+            if os.path.exists("models/model_normal.pkl") and os.path.getsize("models/model_normal.pkl") > 100:
                 self.model_normal = joblib.load("models/model_normal.pkl")
                 loaded_any = True
-            if os.path.exists("models/model_runner.pkl"):
+            if os.path.exists("models/model_runner.pkl") and os.path.getsize("models/model_runner.pkl") > 100:
                 self.model_runner = joblib.load("models/model_runner.pkl")
                 loaded_any = True
 
@@ -123,6 +123,7 @@ class ResearcherAgent:
                 'subsample': trial.suggest_float('subsample', 0.6, 1.0),
                 'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
                 'random_state': 42,
+                'class_weight': 'balanced',
                 'verbose': -1
             }
             
@@ -244,6 +245,7 @@ class ResearcherAgent:
                 'min_child_samples': 50, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
             }
             params_n['verbose'] = -1
+            params_n['class_weight'] = 'balanced'
 
             if self.model_normal is None:
                 self.model_normal = lgb.LGBMClassifier(**params_n)
@@ -357,6 +359,7 @@ class ResearcherAgent:
                 'min_child_samples': 40, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
             }
             params_r['verbose'] = -1
+            params_r['class_weight'] = 'balanced'
 
             if self.model_runner is None:
                 self.model_runner = lgb.LGBMClassifier(**params_r)
@@ -460,7 +463,7 @@ class ResearcherAgent:
             # 3. Incremental Warm-Start Fit (Ringan: n_estimators bertambah 15 pohon)
             current_n_est = getattr(current_model, 'n_estimators', 100) or 100
             new_n_est = current_n_est + 15
-            current_model.set_params(n_estimators=new_n_est, verbose=-1)
+            current_model.set_params(n_estimators=new_n_est, class_weight='balanced', verbose=-1)
             current_model.fit(X, y, sample_weight=sample_weights, init_model=current_model)
 
             logging.info(f"[MICRO-RETRAIN] ✅ Berhasil update model {mode_str.upper()} secara inkremental ({len(X)} sampel, total pohon: {new_n_est}).")

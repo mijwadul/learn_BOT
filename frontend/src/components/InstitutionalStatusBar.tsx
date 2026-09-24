@@ -70,7 +70,7 @@ export function InstitutionalStatusBar() {
         <div className="flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${data?.mt5_connected ? "bg-emerald-400 animate-pulse" : "bg-rose-500"}`} />
           <span className="font-bold text-white/90">MT5:</span>
-          <span className={data?.mt5_connected ? "text-emerald-400 font-semibold" : "text-rose-400 font-semibold"}>
+          <span className={data?.mt5_connected ? "text-emerald-400 font-semibold font-mono tabular-nums" : "text-rose-400 font-semibold"}>
             {data?.mt5_connected ? `Connected (${latency}ms)` : "Disconnected"}
           </span>
         </div>
@@ -80,7 +80,7 @@ export function InstitutionalStatusBar() {
         <div className="flex items-center gap-1.5 text-white/80">
           <Radio className="w-3.5 h-3.5 text-cyan-400" />
           <span className="font-semibold text-white/50">Symbol:</span>
-          <span className="font-bold text-cyan-300">{data?.active_symbol || "XAUUSD"}</span>
+          <span className="font-bold text-cyan-300 font-mono">{data?.active_symbol || "XAUUSD"}</span>
         </div>
 
         <div className="h-3 w-px bg-white/10 hidden sm:block" />
@@ -89,7 +89,7 @@ export function InstitutionalStatusBar() {
         <div className="flex items-center gap-1.5">
           <Cpu className="w-3.5 h-3.5 text-indigo-400" />
           <span className="font-semibold text-white/50">Regime:</span>
-          <span className={`font-bold px-1.5 py-0.5 rounded text-[10px] tracking-wider ${
+          <span className={`font-bold px-1.5 py-0.5 rounded text-[10px] tracking-wider font-mono tabular-nums ${
             regimeName === "TRENDING" 
               ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30" 
               : regimeName === "RANGING/CHOPPY"
@@ -107,7 +107,7 @@ export function InstitutionalStatusBar() {
         <div className="flex items-center gap-1.5">
           <ShieldAlert className={`w-3.5 h-3.5 ${isDdWarning ? "text-rose-400 animate-bounce" : "text-emerald-400"}`} />
           <span className="font-semibold text-white/50">DD:</span>
-          <span className={`font-bold ${isDdWarning ? "text-rose-400" : "text-emerald-400"}`}>
+          <span className={`font-bold font-mono tabular-nums ${isDdWarning ? "text-rose-400" : "text-emerald-400"}`}>
             {ddVal.toFixed(1)}% / 30%
           </span>
         </div>
@@ -122,7 +122,7 @@ export function InstitutionalStatusBar() {
               : "bg-white/5 border-white/10 text-white/80"
           }`}>
             <Clock className="w-3 h-3 text-amber-400 shrink-0" />
-            <span className="truncate max-w-[140px] sm:max-w-none text-[11px]">
+            <span className="truncate max-w-[140px] sm:max-w-none text-[11px] font-mono tabular-nums">
               {nextNews.currency}: {nextNews.event_name} ({nextNews.minutes_remaining > 0 ? `${nextNews.minutes_remaining}m` : "LIVE"})
             </span>
           </div>

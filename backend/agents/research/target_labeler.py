@@ -79,49 +79,81 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0) -> pd.DataFra
         tp_sell_runner = entry_price - (sl_dist * runner_rr)
         sl_sell_runner = entry_price + sl_dist
 
-        # 1. Evaluasi Setup BUY
+        # 1. Evaluasi Setup BUY (Triple Barrier Method)
         if eval_buy:
             buy_success_n = False
-            for j in range(i + 1, min(i + 101, n)):
+            hit_sl_n = False
+            horizon_n = min(i + 101, n)
+            for j in range(i + 1, horizon_n):
                 if lows[j] <= sl_buy_normal:
+                    hit_sl_n = True
                     break
                 elif highs[j] >= tp_buy_normal:
                     buy_success_n = True
                     break
             if buy_success_n:
                 labels_normal[i] = 1
+            elif not hit_sl_n and horizon_n > (i + 1):
+                # Triple Barrier Time-Decay: jika waktu habis (100 bar) tanpa SL dan sudah floating profit >= +1.0R
+                final_close_n = closes[horizon_n - 1]
+                if (final_close_n - entry_price) >= (1.0 * sl_dist):
+                    labels_normal[i] = 1
 
             buy_success_r = False
-            for j in range(i + 1, min(i + 301, n)):
+            hit_sl_r = False
+            horizon_r = min(i + 301, n)
+            for j in range(i + 1, horizon_r):
                 if lows[j] <= sl_buy_runner:
+                    hit_sl_r = True
                     break
                 elif highs[j] >= tp_buy_runner:
                     buy_success_r = True
                     break
             if buy_success_r:
                 labels_runner[i] = 1
+            elif not hit_sl_r and horizon_r > (i + 1):
+                # Triple Barrier Time-Decay Runner: jika waktu habis (300 bar) tanpa SL dan sudah floating profit >= +2.0R
+                final_close_r = closes[horizon_r - 1]
+                if (final_close_r - entry_price) >= (2.0 * sl_dist):
+                    labels_runner[i] = 1
 
-        # 2. Evaluasi Setup SELL
+        # 2. Evaluasi Setup SELL (Triple Barrier Method)
         if eval_sell:
             sell_success_n = False
-            for j in range(i + 1, min(i + 101, n)):
+            hit_sl_sell_n = False
+            horizon_n = min(i + 101, n)
+            for j in range(i + 1, horizon_n):
                 if highs[j] >= sl_sell_normal:
+                    hit_sl_sell_n = True
                     break
                 elif lows[j] <= tp_sell_normal:
                     sell_success_n = True
                     break
             if sell_success_n:
                 labels_normal[i] = 2
+            elif not hit_sl_sell_n and horizon_n > (i + 1):
+                # Triple Barrier Time-Decay: jika waktu habis (100 bar) tanpa SL dan sudah floating profit >= +1.0R
+                final_close_n = closes[horizon_n - 1]
+                if (entry_price - final_close_n) >= (1.0 * sl_dist):
+                    labels_normal[i] = 2
 
             sell_success_r = False
-            for j in range(i + 1, min(i + 301, n)):
+            hit_sl_sell_r = False
+            horizon_r = min(i + 301, n)
+            for j in range(i + 1, horizon_r):
                 if highs[j] >= sl_sell_runner:
+                    hit_sl_sell_r = True
                     break
                 elif lows[j] <= tp_sell_runner:
                     sell_success_r = True
                     break
             if sell_success_r:
                 labels_runner[i] = 2
+            elif not hit_sl_sell_r and horizon_r > (i + 1):
+                # Triple Barrier Time-Decay Runner: jika waktu habis (300 bar) tanpa SL dan sudah floating profit >= +2.0R
+                final_close_r = closes[horizon_r - 1]
+                if (entry_price - final_close_r) >= (2.0 * sl_dist):
+                    labels_runner[i] = 2
                     
     df['Target_Normal'] = labels_normal
     df['Target_Runner'] = labels_runner
