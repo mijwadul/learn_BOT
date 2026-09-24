@@ -253,7 +253,7 @@ export default function DatabasePage() {
                 <span className="text-[10px] text-white/40">Safe &bull; No Data Loss</span>
               </div>
               <p className="text-xs text-white/60 mb-4">
-                Mengecek candle baru dari MT5 sejak record terakhir ({health?.max_date ? new Date(health.max_date).toLocaleTimeString() : "DB"}) dan langsung menyambungkannya (append) ke database.
+                Mengecek candle baru dari MT5 sejak record terakhir ({health?.max_date ? new Date(health.max_date).toLocaleTimeString([], { hour12: false }) : "DB"}) dan langsung menyambungkannya (append) ke database.
               </p>
               
               <button 

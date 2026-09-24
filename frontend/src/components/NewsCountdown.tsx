@@ -131,10 +131,10 @@ export default function NewsCountdown({ initialEvent }: NewsCountdownProps) {
           ) : isImminent ? (
             <AlertTriangle size={15} className="text-amber-400 animate-pulse" />
           ) : (
-            <Clock size={15} className="text-brand-green" />
+            <Clock size={15} className="text-amber-400" />
           )}
           <h3 className="text-xs font-bold uppercase tracking-wider text-white/70">
-            High Impact News Countdown
+            Macro Radar
           </h3>
         </div>
 
@@ -149,7 +149,7 @@ export default function NewsCountdown({ initialEvent }: NewsCountdownProps) {
       </div>
 
       {/* Event Name */}
-      <div className="mb-3">
+      <div className="mb-2.5">
         <h4 className="text-sm font-bold text-white tracking-wide truncate" title={event.event_name}>
           {event.event_name}
         </h4>
@@ -162,37 +162,42 @@ export default function NewsCountdown({ initialEvent }: NewsCountdownProps) {
         </div>
       </div>
 
-      {/* Large Live Digital Countdown Box */}
-      <div className="bg-black/50 border border-white/10 rounded-xl p-3 flex items-center justify-between mb-3">
-        <span className="text-[11px] uppercase tracking-wider text-white/50 font-semibold flex items-center gap-1.5">
-          <Zap size={13} className={isImminent || isOngoing ? "text-amber-400 animate-pulse" : "text-brand-green"} />
-          {isOngoing ? "Released (Volatile):" : "Time To Impact:"}
-        </span>
+      {/* Live Digital Countdown Box (Stacked to prevent clipping on narrow sidebars) */}
+      <div className="bg-black/50 border border-white/10 rounded-xl p-2.5 flex flex-col gap-1.5 mb-3">
+        <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-white/50 font-semibold">
+          <span className="flex items-center gap-1.5">
+            <Zap size={12} className={isImminent || isOngoing ? "text-amber-400 animate-pulse" : "text-brand-green"} />
+            {isOngoing ? "Released (Volatile)" : "Time To Impact"}
+          </span>
+          <span className="font-mono text-[10px] text-white/40">
+            {isOngoing ? "Active Event" : "Countdown"}
+          </span>
+        </div>
 
         {/* Digital Clock Display */}
-        <div className="flex items-center gap-1 font-mono font-black text-lg sm:text-xl tracking-wider">
-          <div className="bg-white/5 px-2 py-0.5 rounded border border-white/5 text-white">
-            {pad(timeLeft.hours)}<span className="text-[10px] text-white/40 ml-0.5">h</span>
+        <div className="flex items-center justify-center gap-1.5 font-mono font-black text-lg tracking-wider py-0.5">
+          <div className="bg-white/5 px-2.5 py-0.5 rounded-lg border border-white/10 text-white flex items-baseline gap-0.5">
+            <span>{pad(timeLeft.hours)}</span><span className="text-[10px] text-white/40 font-normal">h</span>
           </div>
-          <span className="text-white/40 animate-pulse">:</span>
-          <div className={`px-2 py-0.5 rounded border ${
+          <span className="text-white/40 animate-pulse font-bold">:</span>
+          <div className={`px-2.5 py-0.5 rounded-lg border flex items-baseline gap-0.5 ${
             isOngoing
               ? "bg-red-500/20 text-red-400 border-red-500/30 animate-pulse"
               : isImminent
               ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
-              : "bg-white/5 text-brand-green border-white/5"
+              : "bg-white/5 text-brand-green border-white/10"
           }`}>
-            {pad(timeLeft.minutes)}<span className="text-[10px] opacity-60 ml-0.5">m</span>
+            <span>{pad(timeLeft.minutes)}</span><span className="text-[10px] opacity-60 font-normal">m</span>
           </div>
-          <span className="text-white/40 animate-pulse">:</span>
-          <div className={`px-2 py-0.5 rounded border ${
+          <span className="text-white/40 animate-pulse font-bold">:</span>
+          <div className={`px-2.5 py-0.5 rounded-lg border flex items-baseline gap-0.5 ${
             isOngoing
               ? "bg-red-500/20 text-red-400 border-red-500/30 animate-pulse"
               : isImminent
               ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
-              : "bg-white/5 text-white border-white/5"
+              : "bg-white/5 text-white border-white/10"
           }`}>
-            {pad(timeLeft.seconds)}<span className="text-[10px] opacity-60 ml-0.5">s</span>
+            <span>{pad(timeLeft.seconds)}</span><span className="text-[10px] opacity-60 font-normal">s</span>
           </div>
         </div>
       </div>

@@ -90,7 +90,7 @@ export default function StrategiesPage() {
   };
 
   return (
-    <div className="p-4 sm:p-6 md:p-8 flex flex-col h-full overflow-y-auto">
+    <div className="p-4 sm:p-6 md:p-8 flex flex-col min-h-full">
       {/* Page Header */}
       <div className="mb-6 shrink-0 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>

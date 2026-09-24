@@ -23,22 +23,40 @@ class RiskService:
 
     def calculate_lot_size(self, symbol: str, sl_distance: float) -> float:
         """
-        Kalkulasi ukuran lot adaptif berbasis risiko modal (Dollars / Percent / Cent).
+        Kalkulasi ukuran lot adaptif berbasis risiko modal (Fixed Lot / Dollars / Percent / Cent Account).
+        Dilengkapi dengan Max Lot Safety Cap (fat-finger protection).
         """
         symbol_info = mt5.symbol_info(symbol)
         if symbol_info is None:
             logging.error(f"{symbol} not found in MT5.")
             return 0.01
 
-        base_risk_dollars = Config.MAX_RISK_DOLLARS
+        step = symbol_info.volume_step if symbol_info.volume_step > 0 else 0.01
+        min_lot = symbol_info.volume_min if symbol_info.volume_min > 0 else 0.01
+        broker_max_lot = symbol_info.volume_max if symbol_info.volume_max > 0 else 100.0
+        max_lot_cap = getattr(Config, 'MAX_LOT_CAP', 0.10)
+        effective_max = min(broker_max_lot, max_lot_cap)
+
+        mode = getattr(Config, 'RISK_MODE', 'fixed').lower()
+
+        # 1. Mode Fixed Lot (Sangat aman & direkomendasikan untuk retail / micro / cent account)
+        if mode == 'fixed':
+            fixed_lot = getattr(Config, 'FIXED_LOT_SIZE', 0.01)
+            calc_lot = math.floor(fixed_lot / step) * step
+            lot = max(min_lot, min(effective_max, round(calc_lot, 2)))
+            logging.info(f"[LOT SIZING - FIXED] Symbol: {symbol} | Lot: {lot} (Config Fixed: {fixed_lot}, Cap: {effective_max})")
+            return lot
+
+        # 2. Mode Dinamis (Dollars atau Percent)
         account_info = mt5.account_info()
         is_cent = is_cent_account(symbol)
-        
-        if getattr(Config, 'RISK_MODE', 'dollars') == 'percent':
+        base_risk_dollars = Config.MAX_RISK_DOLLARS
+
+        if mode == 'percent':
             equity = account_info.equity if account_info and account_info.equity > 0 else (account_info.balance if account_info else 1000.0)
             base_risk_dollars = max(1.0, equity * (getattr(Config, 'MAX_RISK_PERCENT', 1.0) / 100.0))
             logging.info(f"[RISK UI PERCENT] Equity: {equity:.2f} {'USC' if is_cent else '$'} | Risk: {Config.MAX_RISK_PERCENT}% -> Max Risk UI: {base_risk_dollars:.2f}")
-        else:
+        else: # dollars
             if is_cent:
                 base_risk_dollars = base_risk_dollars * 100.0
                 logging.info(f"[RISK UI DOLLARS - CENT ACCOUNT] Max Risk: ${Config.MAX_RISK_DOLLARS:.2f} -> {base_risk_dollars:.2f} USC")
@@ -48,21 +66,17 @@ class RiskService:
         tick_value = symbol_info.trade_tick_value
         tick_size = symbol_info.trade_tick_size
         
-        lot = 0.01
+        lot = min_lot
         if tick_size > 0 and tick_value > 0 and sl_distance > 0:
             money_per_unit = tick_value / tick_size
             loss_for_one_lot = sl_distance * money_per_unit
             
             if loss_for_one_lot > 0:
                 raw_lot = base_risk_dollars / loss_for_one_lot
-                step = symbol_info.volume_step if symbol_info.volume_step > 0 else 0.01
-                min_lot = symbol_info.volume_min if symbol_info.volume_min > 0 else 0.01
-                max_lot = symbol_info.volume_max if symbol_info.volume_max > 0 else 100.0
-                
                 calc_lot = math.floor(raw_lot / step) * step
-                lot = max(min_lot, min(max_lot, round(calc_lot, 2)))
+                lot = max(min_lot, min(effective_max, round(calc_lot, 2)))
                 est_loss = lot * loss_for_one_lot
-                logging.info(f"[LOT SIZING] Max Risk UI: ${base_risk_dollars:.2f} | Jarak SL: {sl_distance:.2f} | Lot: {lot} (Est. Rugi SL: ${est_loss:.2f})")
+                logging.info(f"[LOT SIZING] Risk: {base_risk_dollars:.2f} | Jarak SL: {sl_distance:.2f} | Lot: {lot} (Cap: {effective_max}, Est. Rugi: {est_loss:.2f})")
                 
         return lot
 

@@ -35,9 +35,11 @@ class Config:
     REQUOTE_MAX_RETRIES = int(os.getenv("REQUOTE_MAX_RETRIES", "2")) # Smart requote retry count
     DYNAMIC_SLIPPAGE_MULTIPLIER = float(os.getenv("DYNAMIC_SLIPPAGE_MULTIPLIER", "1.5")) # Spread multiplier for deviation
     
-    RISK_MODE = os.getenv("RISK_MODE", "dollars") # Mode resiko: "dollars" ($ tetap) atau "percent" (% modal)
+    RISK_MODE = os.getenv("RISK_MODE", "fixed") # Mode resiko: "fixed" (lot tetap), "dollars" ($ tetap), atau "percent" (% modal)
+    FIXED_LOT_SIZE = float(os.getenv("FIXED_LOT_SIZE", "0.01")) # Ukuran lot tetap jika mode "fixed"
     MAX_RISK_DOLLARS = float(os.getenv("MAX_RISK_DOLLARS", "10.0")) # Toleransi batas rugi per transaksi ($)
     MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "1.0")) # Toleransi batas rugi per transaksi (% modal)
+    MAX_LOT_CAP = float(os.getenv("MAX_LOT_CAP", "0.10")) # Batas lot maksimal pengaman (fat-finger protection)
     MAX_DRAWDOWN_PERCENT = 30.0 # Max drawdown reset JIKA menyentuh 30% dari ekuitas
     SPREAD_LIMIT_POINTS = 400 # Blokir eksekusi jika spread > 400 poin
     AI_NORMAL_ENTRY_THRESHOLD = 75.0 # Batas minimal probabilitas AI untuk mengizinkan OP baru (%)

@@ -214,52 +214,68 @@ export default function TradingChart({
       color: "rgba(59, 130, 246, 0.7)",
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
-      title: "Top BB",
+      title: "",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     const midBB = chart.addLineSeries({
       color: "rgba(234, 179, 8, 0.9)",
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
-      title: "Mid BB",
+      title: "",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     const lowBB = chart.addLineSeries({
       color: "rgba(59, 130, 246, 0.7)",
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
-      title: "Low BB",
+      title: "",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
 
     const ema50 = chart.addLineSeries({
       color: "#f97316",
       lineWidth: 2,
       lineStyle: LineStyle.Solid,
-      title: "EMA 50",
+      title: "",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
 
     const lwma5High = chart.addLineSeries({
       color: "#f43f5e",
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
-      title: "LWMA 5 High",
+      title: "",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     const lwma10High = chart.addLineSeries({
       color: "#be123c",
       lineWidth: 1,
       lineStyle: LineStyle.Dotted,
-      title: "LWMA 10 High",
+      title: "",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
 
     const lwma5Low = chart.addLineSeries({
       color: "#10b981",
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
-      title: "LWMA 5 Low",
+      title: "",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     const lwma10Low = chart.addLineSeries({
       color: "#047857",
       lineWidth: 1,
       lineStyle: LineStyle.Dotted,
-      title: "LWMA 10 Low",
+      title: "",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
 
     chartRef.current = chart;

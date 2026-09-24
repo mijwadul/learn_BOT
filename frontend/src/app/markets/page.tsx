@@ -52,12 +52,16 @@ export default function MarketsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
 
-  // Update real-time world clocks
+  // Update real-time world clocks (24-hour format)
   useEffect(() => {
+    const pad = (n: number) => String(n).padStart(2, "0");
     const updateTime = () => {
       const now = new Date();
       setCurrentTimeUTC(now.toISOString().substring(11, 19) + " UTC");
-      setCurrentTimeLocal(now.toLocaleTimeString());
+      const localH = pad(now.getHours());
+      const localM = pad(now.getMinutes());
+      const localS = pad(now.getSeconds());
+      setCurrentTimeLocal(`${localH}:${localM}:${localS}`);
     };
     updateTime();
     const interval = setInterval(updateTime, 1000);

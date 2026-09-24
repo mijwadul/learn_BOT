@@ -196,7 +196,7 @@ export default function Home() {
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden border-r border-white/5">
         
         {/* Top Mini Header / Instrument Bar */}
-        <div className="px-4 py-2 border-b border-white/10 bg-black/40 flex items-center justify-between shrink-0">
+        <div className="px-4 py-2 border-b border-white/10 bg-black/40 flex items-center justify-between shrink-0 gap-3">
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
               <span className="font-black text-sm tracking-wider text-white font-mono">{activeSymbol}</span>
@@ -218,6 +218,7 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Header Status Indicator */}
           <div className="flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full ${isLive ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`} />
             <span className="text-xs font-mono font-bold tracking-wider text-white/80">
@@ -227,13 +228,13 @@ export default function Home() {
         </div>
 
         {/* Central Candlestick Chart Viewport */}
-        <div className="flex-1 relative w-full min-h-[320px] bg-black/30">
+        <div className="flex-1 relative w-full min-h-[300px] bg-black/30">
           <TradingChart isLive={isLive} symbol={activeSymbol} positions={openPositions} />
         </div>
 
         {/* BOTTOM: Docked Multi-Tab Blotter */}
         <div className={`border-t border-white/10 bg-[#090e0c] flex flex-col shrink-0 transition-all duration-300 ${
-          isBlotterCollapsed ? "h-10" : "h-56 sm:h-64"
+          isBlotterCollapsed ? "h-10" : "h-44 sm:h-52"
         }`}>
           {/* Blotter Header & Tabs */}
           <div className="px-3 py-1.5 border-b border-white/10 flex items-center justify-between bg-black/40 text-xs shrink-0">
@@ -443,8 +444,8 @@ export default function Home() {
       <div className="w-full lg:w-80 shrink-0 flex flex-col gap-3 p-3 overflow-y-auto custom-scrollbar bg-[#090e0c]/90">
         
         {/* Module 1: AI Execution Master Control */}
-        <div className="glass-panel p-4 flex flex-col justify-between relative overflow-hidden">
-          <div className="flex items-center justify-between mb-3">
+        <div className="glass-panel p-4 flex flex-col shrink-0 gap-3 relative">
+          <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider text-white/50 flex items-center gap-1.5">
               <Zap size={14} className="text-amber-400" /> AI Execution
             </span>
@@ -457,7 +458,7 @@ export default function Home() {
             </span>
           </div>
 
-          <div className="space-y-2 mb-3">
+          <div className="space-y-2">
             {!isLive && (
               <select 
                 value={selectedMode} 
@@ -472,14 +473,14 @@ export default function Home() {
 
             <button 
               onClick={toggleLive}
-              className={`flex items-center justify-center gap-2.5 py-3 px-4 rounded-xl transition-all duration-300 w-full font-black text-base tracking-widest cursor-pointer ${
+              className={`flex items-center justify-center gap-2.5 py-3 px-4 rounded-xl transition-all duration-300 w-full font-black text-sm sm:text-base tracking-widest cursor-pointer shadow-lg ${
                 isLive 
-                  ? 'bg-brand-green/25 text-brand-green border border-brand-green/50 glow-green hover:bg-brand-green/35' 
-                  : 'bg-white/10 text-white hover:bg-brand-green/20 hover:text-brand-green hover:border-brand-green/30 border border-transparent'
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/50 hover:bg-rose-500/30' 
+                  : 'bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold shadow-emerald-500/20'
               }`}
             >
               <Power size={18} className={isLive ? 'animate-pulse' : ''} />
-              <span>{isLive ? 'LIVE' : 'START BOT'}</span>
+              <span>{isLive ? 'STOP BOT' : 'START BOT'}</span>
             </button>
           </div>
 
@@ -489,7 +490,7 @@ export default function Home() {
         </div>
 
         {/* Module 2: AI Probabilities Radar (Dual-Target LightGBM) */}
-        <div className="glass-panel p-4 flex flex-col gap-3 font-mono tabular-nums">
+        <div className="glass-panel p-4 flex flex-col shrink-0 gap-3 font-mono tabular-nums">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider text-white/50 flex items-center gap-1.5 font-sans">
               <Sparkles size={14} className="text-cyan-400" /> AI Confidence
@@ -564,15 +565,7 @@ export default function Home() {
         </div>
 
         {/* Module 3: Macro News Radar */}
-        <div className="glass-panel p-4 flex flex-col gap-2">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs font-bold uppercase tracking-wider text-white/50 flex items-center gap-1.5 font-sans">
-              <Clock size={14} className="text-amber-400" /> Macro Radar
-            </span>
-            <span className="text-[10px] text-white/40">Economic Calendar</span>
-          </div>
-          <NewsCountdown initialEvent={nextNews} />
-        </div>
+        <NewsCountdown initialEvent={nextNews} />
 
       </div>
 
