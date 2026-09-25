@@ -20,6 +20,94 @@ class PositionTracker:
         self.order_router = order_router
         self.researcher = researcher
         self.position_modes = {}
+        self.initial_risks = {}
+
+    def register_position(self, ticket: int, mode: str, sl_distance: float = 0.0):
+        """Mendaftarkan posisi aktif baru secara instan saat eksekusi live."""
+        self.position_modes[ticket] = mode.upper()
+        if sl_distance and sl_distance > 0.1:
+            self.initial_risks[ticket] = float(sl_distance)
+
+    def get_or_recover_initial_risk(self, pos, is_runner: bool) -> float:
+        """
+        Multi-Tier Institutional Recovery untuk Initial Risk (SSOT):
+        1. In-memory cache
+        2. Database TradeLog (SL asli saat eksekusi)
+        3. Database LiveDecisionSample (SL asli saat sinyal)
+        4. MT5 History Orders/Deals
+        5. Kalkulasi rasio TP awal (TP distance / 2.0 untuk HIT_RUN atau runner_rr untuk RUNNER)
+        6. Posisi SL saat ini (jika belum BE)
+        7. Fallback aman institusional (5.0 / 500 pts)
+        """
+        ticket = pos.ticket
+        if ticket in self.initial_risks and self.initial_risks[ticket] > 0.5:
+            return self.initial_risks[ticket]
+            
+        entry_price = pos.price_open
+        
+        # 1. Coba recover dari database TradeLog
+        try:
+            from database import Session, sync_engine, TradeLog
+            with Session(sync_engine) as session:
+                t_rec = session.query(TradeLog).filter(TradeLog.ticket == ticket).first()
+                if t_rec and t_rec.sl and t_rec.sl > 0:
+                    dist = round(abs(entry_price - t_rec.sl), 2)
+                    if dist > 0.5:
+                        self.initial_risks[ticket] = dist
+                        return dist
+        except Exception:
+            pass
+
+        # 2. Coba recover dari database LiveDecisionSample
+        try:
+            from database import Session, sync_engine, LiveDecisionSample
+            with Session(sync_engine) as session:
+                sample = session.query(LiveDecisionSample).filter(LiveDecisionSample.ticket == ticket).first()
+                if sample and sample.sl and sample.sl > 0:
+                    dist = round(abs(entry_price - sample.sl), 2)
+                    if dist > 0.5:
+                        self.initial_risks[ticket] = dist
+                        return dist
+        except Exception:
+            pass
+
+        # 3. Coba recover dari MT5 order history
+        try:
+            history_orders = mt5.history_orders_get(position=ticket)
+            if history_orders:
+                for h_ord in history_orders:
+                    if h_ord.sl > 0:
+                        dist = round(abs(entry_price - h_ord.sl), 2)
+                        if dist > 0.5:
+                            self.initial_risks[ticket] = dist
+                            return dist
+        except Exception:
+            pass
+
+        # 4. Coba kalkulasi dari Hard TP awal
+        if pos.tp > 0:
+            tp_dist = abs(pos.tp - entry_price)
+            if tp_dist > 1.0:
+                expected_rr = 4.0 if is_runner else 2.0
+                inferred_risk = round(tp_dist / expected_rr, 2)
+                if inferred_risk > 0.5:
+                    self.initial_risks[ticket] = inferred_risk
+                    return inferred_risk
+
+        # 5. Cek apakah SL saat ini belum di BE (masih SL asli)
+        if pos.sl > 0:
+            current_sl_dist = round(abs(entry_price - pos.sl), 2)
+            if current_sl_dist > 1.0:
+                is_be = (pos.type == mt5.ORDER_TYPE_BUY and pos.sl >= entry_price) or \
+                        (pos.type == mt5.ORDER_TYPE_SELL and pos.sl <= entry_price)
+                if not is_be:
+                    self.initial_risks[ticket] = current_sl_dist
+                    return current_sl_dist
+
+        # 6. Fallback aman institusional (Gold $5.00)
+        fallback_risk = 5.0
+        self.initial_risks[ticket] = fallback_risk
+        return fallback_risk
 
     def detect_position_mode(self, pos) -> str:
         """
@@ -72,6 +160,8 @@ class PositionTracker:
             for pos in positions:
                 mode = self.detect_position_mode(pos)
                 self.position_modes[pos.ticket] = mode
+                is_runner = (mode == "RUNNER")
+                self.get_or_recover_initial_risk(pos, is_runner)
                 
                 # Cek apakah posisi tidak memiliki Hard SL
                 if pos.sl == 0.0 or pos.sl is None:
@@ -127,9 +217,11 @@ class PositionTracker:
 
     def process_active_positions(self, symbol: str, latest_df=None, latest_probs=None):
         """
-        Loop evaluasi manajemen trade aktif:
+        Loop evaluasi manajemen trade aktif institusional:
+        - Pemulihan & pelacakan initial risk yang persisten (anti-hilang saat SL geser ke BE)
+        - Evaluasi Thesis Invalidation & Reversal Exit untuk SEMUA posisi (NORMAL & RUNNER)
         - HIT_RUN: Target 1:1 -> SL ke BE, Target 1:2 -> Full Close
-        - RUNNER: Milestone 1:2 -> Partial Close 50% & SL ke BE, Max RR / Reversal -> Full Close
+        - RUNNER: Milestone 1:2 -> Partial Close 50% & SL ke BE, Max RR Exit -> Full Close
         """
         positions = mt5.positions_get(symbol=symbol)
         if not positions:
@@ -142,80 +234,117 @@ class PositionTracker:
             ticket = pos.ticket
             entry_price = pos.price_open
             current_price = pos.price_current
-            sl_price = pos.sl
             
-            if pos.type == mt5.ORDER_TYPE_BUY:
-                initial_risk = abs(entry_price - sl_price) if sl_price > 0 else 0
-                current_gain = current_price - entry_price
-            else:
-                initial_risk = abs(sl_price - entry_price) if sl_price > 0 else 0
-                current_gain = entry_price - current_price
-                
             mode = self.detect_position_mode(pos)
             is_runner = (mode == "RUNNER")
+            initial_risk = self.get_or_recover_initial_risk(pos, is_runner)
             
+            # Cek apakah posisi sudah berada di Break-Even
+            is_already_be = (pos.type == mt5.ORDER_TYPE_BUY and pos.sl >= entry_price) or \
+                            (pos.type == mt5.ORDER_TYPE_SELL and 0 < pos.sl <= entry_price)
+
+            if pos.type == mt5.ORDER_TYPE_BUY:
+                current_gain = current_price - entry_price
+            else:
+                current_gain = entry_price - current_price
+
+            current_r = round(current_gain / initial_risk, 2) if initial_risk > 0 else 0.0
+
+            # =========================================================================
+            # 1. EVALUASI REVERSAL & THESIS INVALIDATION (Berlaku untuk SEMUA mode)
+            # =========================================================================
+            reversal_detected = False
+            reversal_reason = ""
+            probs = latest_probs or {}
+            p_sell_rev = max(probs.get("runner_sell", 0.0), probs.get("normal_sell", 0.0))
+            p_buy_rev = max(probs.get("runner_buy", 0.0), probs.get("normal_buy", 0.0))
+
+            if latest_df is not None and not latest_df.empty:
+                last_candle = latest_df.iloc[-1]
+                c_close = last_candle.get('close', current_price)
+                c_ema = last_candle.get('EMA_50', 0.0)
+                c_sma20 = last_candle.get('SMA_20', 0.0)
+                lwma_10_l = last_candle.get('LWMA_10_Low', 0.0)
+                lwma_10_h = last_candle.get('LWMA_10_High', 0.0)
+
+                if pos.type == mt5.ORDER_TYPE_BUY:
+                    # Syarat Batal ZZL (Slide 51-56): Close menembus di bawah EMA 50
+                    if c_ema > 0 and c_close < c_ema:
+                        reversal_detected = True
+                        reversal_reason = f"Thesis Invalidation: Close ({c_close:.2f}) < EMA 50 ({c_ema:.2f})"
+                    # Konfirmasi CSAK/CSM Sell Lawan Arah (Slide 31): Close < Mid BB dan < LWMA 10 Low
+                    elif c_sma20 > 0 and lwma_10_l > 0 and c_close < c_sma20 and c_close < lwma_10_l:
+                        reversal_detected = True
+                        reversal_reason = f"Opposite CSAK Sell: Close ({c_close:.2f}) < Mid BB ({c_sma20:.2f}) & LWMA 10 Low ({lwma_10_l:.2f})"
+                    # AI Signal Surge ke arah lawan
+                    elif p_sell_rev >= 0.70:
+                        reversal_detected = True
+                        reversal_reason = f"AI Reversal Surge: Prob SELL {p_sell_rev*100:.0f}%"
+
+                elif pos.type == mt5.ORDER_TYPE_SELL:
+                    # Syarat Batal ZZL (Slide 51-56): Close menembus di atas EMA 50
+                    if c_ema > 0 and c_close > c_ema:
+                        reversal_detected = True
+                        reversal_reason = f"Thesis Invalidation: Close ({c_close:.2f}) > EMA 50 ({c_ema:.2f})"
+                    # Konfirmasi CSAK/CSM Buy Lawan Arah (Slide 31): Close > Mid BB dan > LWMA 10 High
+                    elif c_sma20 > 0 and lwma_10_h > 0 and c_close > c_sma20 and c_close > lwma_10_h:
+                        reversal_detected = True
+                        reversal_reason = f"Opposite CSAK Buy: Close ({c_close:.2f}) > Mid BB ({c_sma20:.2f}) & LWMA 10 High ({lwma_10_h:.2f})"
+                    # AI Signal Surge ke arah lawan
+                    elif p_buy_rev >= 0.70:
+                        reversal_detected = True
+                        reversal_reason = f"AI Reversal Surge: Prob BUY {p_buy_rev*100:.0f}%"
+
+            if reversal_detected:
+                logging.warning(
+                    f"[REVERSAL EXIT] ⚠️ Sinyal Pembalikan terdeteksi untuk tiket #{ticket} ({mode}): "
+                    f"{reversal_reason}. Menjalankan Full Close."
+                )
+                success = self.order_router.execute_full_close(ticket, reason=f"Rev: {reversal_reason}", symbol=symbol)
+                if success:
+                    self.initial_risks.pop(ticket, None)
+                    self.position_modes.pop(ticket, None)
+                continue
+
+            # =========================================================================
+            # 2. EVALUASI TARGET RISK:REWARD (RR) & MILESTONES
+            # =========================================================================
             if not is_runner:
-                # --- HIT_RUN LOGIC (RR 1:2 Target) ---
-                if initial_risk > 0:
-                    if current_gain >= (1.0 * initial_risk) and abs(pos.sl - pos.price_open) > 0.05:
-                        logging.info(f"[HIT_RUN] Target RR 1:1 tercapai untuk tiket {ticket}. Geser SL ke BE.")
-                        self.order_router.modify_sl_to_break_even(ticket, symbol)
-                    if current_gain >= (2.0 * initial_risk):
-                        logging.info(f"[HIT_RUN] Target RR 1:2 pas tercapai untuk tiket {ticket}. Menjalankan Full Close.")
-                        self.order_router.execute_full_close(ticket, reason="Hit & Run: Target RR 1:2 Pas Tercapai (Full Close)", symbol=symbol)
+                # --- HIT_RUN LOGIC (Target RR 1:2) ---
+                if current_r >= 1.0 and not is_already_be:
+                    logging.info(f"[HIT_RUN] Target RR 1:1 tercapai ({current_r:.2f}R) untuk tiket #{ticket}. Geser SL ke BE.")
+                    self.order_router.modify_sl_to_break_even(ticket, symbol)
+                    
+                if current_r >= 2.0:
+                    logging.info(f"[HIT_RUN] 🎯 Target RR 1:2 tercapai ({current_r:.2f}R) untuk tiket #{ticket}. Menjalankan Full Close.")
+                    success = self.order_router.execute_full_close(
+                        ticket, 
+                        reason=f"Hit&Run RR 1:2 TP ({current_r:.1f}R)", 
+                        symbol=symbol
+                    )
+                    if success:
+                        self.initial_risks.pop(ticket, None)
+                        self.position_modes.pop(ticket, None)
+                    continue
             else:
                 # --- RUNNER LOGIC ---
-                # 1. Partial close 50% & BE at 2R
-                if initial_risk > 0 and current_gain >= (2.0 * initial_risk):
-                    if abs(pos.sl - pos.price_open) > 0.05:
-                        logging.info(f"[RUNNER] Milestone RR 1:2 tercapai untuk tiket {ticket}. Partial Close 50% & SL ke BE.")
+                # 1. Milestone 1:2 -> Partial close 50% & BE at 2R
+                if current_r >= 2.0:
+                    if not is_already_be:
+                        logging.info(f"[RUNNER] Milestone RR 1:2 tercapai ({current_r:.2f}R) untuk tiket #{ticket}. Partial Close 50% & SL ke BE.")
                         self.order_router.execute_partial_close_50(ticket, symbol)
                         self.order_router.modify_sl_to_break_even(ticket, symbol)
 
-                # 2. Maximum learned RR
+                # 2. Maximum learned RR Exit
                 max_runner_rr = getattr(self.researcher, 'max_runner_rr', 5.0) if self.researcher else 5.0
-                if initial_risk > 0 and current_gain >= (max_runner_rr * initial_risk):
-                    logging.info(f"[RUNNER EXIT] 🎯 Maximum RR ({max_runner_rr:.1f}R) tercapai untuk tiket {ticket}. Menjalankan Full Close.")
-                    self.order_router.execute_full_close(ticket, reason=f"Runner Exit: Maximum RR ({max_runner_rr:.1f}R) Tercapai", symbol=symbol)
+                if current_r >= max_runner_rr:
+                    logging.info(f"[RUNNER EXIT] 🎯 Maximum RR ({max_runner_rr:.1f}R) tercapai ({current_r:.2f}R) untuk tiket #{ticket}. Menjalankan Full Close.")
+                    success = self.order_router.execute_full_close(
+                        ticket, 
+                        reason=f"Runner Max RR ({max_runner_rr:.1f}R)", 
+                        symbol=symbol
+                    )
+                    if success:
+                        self.initial_risks.pop(ticket, None)
+                        self.position_modes.pop(ticket, None)
                     continue
-
-                # 3. Reversal Exit Analysis (dengan ADX confirmation filter)
-                reversal_detected = False
-                reversal_reason = ""
-                probs = latest_probs or {}
-                p_sell_rev = max(probs.get("runner_sell", 0.0), probs.get("normal_sell", 0.0))
-                p_buy_rev = max(probs.get("runner_buy", 0.0), probs.get("normal_buy", 0.0))
-
-                adx_current = 25.0
-                if latest_df is not None and not latest_df.empty:
-                    if 'adx' in latest_df.columns:
-                        val = latest_df['adx'].iloc[-1]
-                        if not np.isnan(val):
-                            adx_current = float(val)
-
-                if pos.type == mt5.ORDER_TYPE_BUY:
-                    if p_sell_rev >= 0.65 and adx_current < 25.0:
-                        reversal_detected = True
-                        reversal_reason = f"AI mendeteksi lonjakan probabilitas SELL ({p_sell_rev:.2f}) + ADX lemah ({adx_current:.1f} < 25)"
-                    elif latest_df is not None and not latest_df.empty and 'EMA_50' in latest_df.columns and 'LWMA_10_Low' in latest_df.columns:
-                        c_close = latest_df['close'].iloc[-1]
-                        c_ema = latest_df['EMA_50'].iloc[-1]
-                        c_lwma = latest_df['LWMA_10_Low'].iloc[-1]
-                        if c_close < c_ema and c_close < c_lwma and adx_current < 30.0:
-                            reversal_detected = True
-                            reversal_reason = f"Reversal Teknis: Close ({c_close:.2f}) menembus bawah EMA 50 ({c_ema:.2f}) & LWMA 10 Low ({c_lwma:.2f}) [ADX: {adx_current:.1f} < 30]"
-                elif pos.type == mt5.ORDER_TYPE_SELL:
-                    if p_buy_rev >= 0.65 and adx_current < 25.0:
-                        reversal_detected = True
-                        reversal_reason = f"AI mendeteksi lonjakan probabilitas BUY ({p_buy_rev:.2f}) + ADX lemah ({adx_current:.1f} < 25)"
-                    elif latest_df is not None and not latest_df.empty and 'EMA_50' in latest_df.columns and 'LWMA_10_High' in latest_df.columns:
-                        c_close = latest_df['close'].iloc[-1]
-                        c_ema = latest_df['EMA_50'].iloc[-1]
-                        c_lwma = latest_df['LWMA_10_High'].iloc[-1]
-                        if c_close > c_ema and c_close > c_lwma and adx_current < 30.0:
-                            reversal_detected = True
-                            reversal_reason = f"Reversal Teknis: Close ({c_close:.2f}) menembus atas EMA 50 ({c_ema:.2f}) & LWMA 10 High ({c_lwma:.2f}) [ADX: {adx_current:.1f} < 30]"
-
-                if reversal_detected:
-                    logging.warning(f"[RUNNER REVERSAL EXIT] ⚠️ Sinyal Reversal terdeteksi untuk tiket {ticket}: {reversal_reason}. Menjalankan Full Close.")
-                    self.order_router.execute_full_close(ticket, reason=f"Runner Reversal Exit: {reversal_reason}", symbol=symbol)

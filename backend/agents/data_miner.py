@@ -196,6 +196,67 @@ class DataMinerAgent:
         logging.info(f"Data merged successfully. Shape: {df_merged.shape}")
         return df_merged
 
+    def _save_market_data(self, df, if_exists='append'):
+        """
+        Menyimpan DataFrame ke tabel market_data_merged dengan aman.
+        Menghitung chunksize secara dinamis agar jumlah bind parameter tidak pernah melebihi batas PostgreSQL (65.535 / 32.767).
+        Juga memastikan kolom-kolom baru otomatis di-ALTER jika belum ada.
+        """
+        if df is None or df.empty:
+            return 0
+
+        # Pastikan index bersih dari duplikasi dan timezone-naive
+        df = df[~df.index.duplicated(keep='last')].sort_index()
+        if hasattr(df.index, 'tzinfo') and df.index.tzinfo is not None:
+            df.index = df.index.tz_localize(None)
+
+        # Pastikan kolom-kolom baru ada di database jika tabel sudah terbentuk
+        try:
+            with sync_engine.connect() as conn:
+                sample_cols = pd.read_sql("SELECT * FROM market_data_merged LIMIT 0", con=conn).columns
+                missing_cols = set(df.columns) - set(sample_cols)
+                if missing_cols:
+                    logging.info(f"Terdeteksi {len(missing_cols)} kolom baru yang belum ada di database: {missing_cols}")
+                    with sync_engine.begin() as alter_conn:
+                        for col in missing_cols:
+                            dtype_str = str(df[col].dtype)
+                            if 'float' in dtype_str:
+                                sql_type = 'FLOAT'
+                            elif 'int' in dtype_str:
+                                sql_type = 'BIGINT'
+                            elif 'bool' in dtype_str:
+                                sql_type = 'BOOLEAN'
+                            else:
+                                sql_type = 'TEXT'
+                            alter_conn.execute(text(f'ALTER TABLE market_data_merged ADD COLUMN IF NOT EXISTS "{col}" {sql_type}'))
+        except Exception as e:
+            # Jika tabel belum ada, to_sql akan membuatnya secara otomatis
+            logging.debug(f"Pengecekan schema kolom dilewati: {e}")
+
+        # Hitung chunksize aman untuk method='multi'
+        # Batas parameter PostgreSQL adalah 65.535 (int16/uint16).
+        # Kita gunakan batas aman 30.000 parameter per query INSERT.
+        num_cols = len(df.columns) + 1  # +1 untuk kolom time (index)
+        safe_chunksize = max(1, 30000 // max(1, num_cols))
+
+        df.to_sql(
+            'market_data_merged',
+            con=sync_engine,
+            if_exists=if_exists,
+            index=True,
+            chunksize=safe_chunksize,
+            method='multi'
+        )
+
+        # Buat index pada kolom time jika belum ada untuk mempercepat MAX(time) dan ORDER BY
+        try:
+            with sync_engine.begin() as conn:
+                conn.execute(text('CREATE INDEX IF NOT EXISTS ix_market_data_merged_time ON market_data_merged ("time")'))
+        except Exception:
+            pass
+
+        return len(df)
+
     def sync_latest_data(self):
         """
         Sinkronisasi Cepat (Incremental Sync):
@@ -275,17 +336,9 @@ class DataMinerAgent:
             logging.info(f"[SYNC] {msg}")
             return 0, msg
 
-        # 6. Simpan (APPEND) ke PostgreSQL tanpa drop
+        # 6. Simpan (APPEND) ke PostgreSQL tanpa drop menggunakan batch aman
         try:
-            df_new.to_sql(
-                'market_data_merged',
-                con=sync_engine,
-                if_exists='append',
-                index=True,
-                chunksize=10000,
-                method='multi'
-            )
-            inserted = len(df_new)
+            inserted = self._save_market_data(df_new, if_exists='append')
             msg = f"Sukses menyambungkan {inserted:,} candle baru ke database!"
             logging.info(f"[SYNC SUCCESS] {msg}")
             return inserted, msg
@@ -408,17 +461,7 @@ class DataMinerAgent:
                 
             if not df.empty:
                 current_if_exists = 'replace' if (force_rebuild and batch_idx == 0) else 'append'
-                
-                df.to_sql(
-                    'market_data_merged',
-                    con=sync_engine,
-                    if_exists=current_if_exists,
-                    index=True,
-                    chunksize=50000,
-                    method='multi'
-                )
-                
-                rows_in_chunk = len(df)
+                rows_in_chunk = self._save_market_data(df, if_exists=current_if_exists)
                 total_inserted += rows_in_chunk
                 pct = ((batch_idx + 1) / total_mt5_batches) * 100
                 logging.info(f"[DB Progress] MT5 Batch {batch_idx+1}/{total_mt5_batches} selesai: {rows_in_chunk:,} baris ({pct:.1f}%) tersimpan ke database.")

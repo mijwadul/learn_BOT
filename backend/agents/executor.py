@@ -126,8 +126,8 @@ class ExecutorAgent:
                     try:
                         positions = mt5.positions_get(symbol=Config.SYMBOL)
                         if positions:
-                            runner_buys = [p for p in positions if p.type == mt5.ORDER_TYPE_BUY and "RUNNER" in (p.comment or "").upper()]
-                            runner_sells = [p for p in positions if p.type == mt5.ORDER_TYPE_SELL and "RUNNER" in (p.comment or "").upper()]
+                            runner_buys = [p for p in positions if p.type == mt5.ORDER_TYPE_BUY and self.position_tracker.detect_position_mode(p) == "RUNNER"]
+                            runner_sells = [p for p in positions if p.type == mt5.ORDER_TYPE_SELL and self.position_tracker.detect_position_mode(p) == "RUNNER"]
                             
                             if runner_buys or runner_sells:
                                 df_live = await asyncio.to_thread(self.data_miner.fetch_and_merge_data, 30)
@@ -149,12 +149,12 @@ class ExecutorAgent:
                                     if runner_buys and prob_runner < threshold:
                                         logging.warning(f"[AI_TRAILING] Probabilitas trend turun ke {prob_runner*100:.0f}%. Melikuidasi BUY RUNNER!")
                                         for p in runner_buys:
-                                            self.order_router.execute_full_close(p.ticket, reason=f"AI Probability Trailing Stop: {prob_runner*100:.0f}%", symbol=Config.SYMBOL)
+                                            self.order_router.execute_full_close(p.ticket, reason=f"AI Trailing: {prob_runner*100:.0f}%", symbol=Config.SYMBOL)
                                                 
                                     if runner_sells and prob_runner > (1.0 - threshold):
                                         logging.warning(f"[AI_TRAILING] Probabilitas pembalikan naik ke {prob_runner*100:.0f}%. Melikuidasi SELL RUNNER!")
                                         for p in runner_sells:
-                                            self.order_router.execute_full_close(p.ticket, reason=f"AI Probability Trailing Stop: {prob_runner*100:.0f}%", symbol=Config.SYMBOL)
+                                            self.order_router.execute_full_close(p.ticket, reason=f"AI Trailing: {prob_runner*100:.0f}%", symbol=Config.SYMBOL)
                     except Exception as e:
                         logging.debug(f"[EXHAUSTION] Gagal cek: {e}")
 
@@ -165,6 +165,9 @@ class ExecutorAgent:
                     try:
                         df_live = await asyncio.to_thread(self.data_miner.fetch_and_merge_data, 30)
                         if df_live is not None and not df_live.empty:
+                            if 'adx' not in df_live.columns or df_live['adx'].isna().all():
+                                from utils.indicators import calculate_adx
+                                df_live['adx'] = calculate_adx(df_live, 14)
                             last_row = df_live.iloc[[-1]]
                             probs = await asyncio.to_thread(self.researcher.get_live_probabilities, last_row)
                             self.latest_df_live = df_live
@@ -360,6 +363,7 @@ class ExecutorAgent:
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
             order_ticket = result.order
             self.position_modes[order_ticket] = trade_mode.upper()
+            self.position_tracker.register_position(order_ticket, trade_mode, sl_distance=sl_abs)
             setup_id = f"SETUP_LIVE_{trade_mode}_{order_ticket}"
             
             # Post-execution DB recording (asinkron)

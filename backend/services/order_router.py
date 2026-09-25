@@ -120,6 +120,14 @@ class OrderRouter:
         buffer_pts = buffer_raw if pos.type == mt5.ORDER_TYPE_BUY else -buffer_raw
         new_sl = round(entry_price + buffer_pts, digits)
         
+        # Cek jika SL saat ini sudah berada di Break-Even atau lebih menguntungkan
+        if pos.type == mt5.ORDER_TYPE_BUY and pos.sl >= new_sl:
+            logging.debug(f"[OrderRouter] Tiket {ticket} SL sudah di Break-Even ({pos.sl} >= {new_sl}). Tidak perlu kirim request.")
+            return True
+        elif pos.type == mt5.ORDER_TYPE_SELL and 0 < pos.sl <= new_sl:
+            logging.debug(f"[OrderRouter] Tiket {ticket} SL sudah di Break-Even ({pos.sl} <= {new_sl}). Tidak perlu kirim request.")
+            return True
+
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
             "position": pos.ticket,
@@ -129,20 +137,105 @@ class OrderRouter:
         }
         
         res = mt5.order_send(request)
-        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-            logging.info(f"[OrderRouter] Tiket {ticket} berhasil digeser ke Break-Even (Entry: {entry_price}, Buffer: {buffer_pts:+.2f}, New SL: {new_sl}).")
+        retcode_no_changes = getattr(mt5, 'TRADE_RETCODE_NO_CHANGES', 10025)
+        if res and res.retcode in [mt5.TRADE_RETCODE_DONE, retcode_no_changes]:
+            if res.retcode == retcode_no_changes:
+                logging.info(f"[OrderRouter] Tiket {ticket} sudah berada pada Break-Even di broker ({new_sl}), retcode 10025 (No Changes).")
+            else:
+                logging.info(f"[OrderRouter] Tiket {ticket} berhasil digeser ke Break-Even (Entry: {entry_price}, Buffer: {buffer_pts:+.2f}, New SL: {new_sl}).")
             return True
         else:
             code = res.retcode if res else "None"
             logging.error(f"[OrderRouter] Gagal geser BE untuk tiket {ticket}, retcode: {code}")
             return False
 
+    def _send_close_deal(self, pos, sym: str, volume: float, close_type: int, comment: str = "", max_retries: int = 2) -> bool:
+        """
+        Helper eksekusi deal close MT5 tingkat institusional:
+        - Adaptive Filling Mode Fallback Matrix (symbol preference -> RETURN -> IOC -> FOK)
+        - Dynamic Slippage & Adaptive Requote Retries (refresh tick)
+        - MT5 Protocol Comment Sanitization (max 31 chars)
+        """
+        sanitized_comment = str(comment or "Close Position")[:31]
+        primary_filling = get_symbol_filling_mode(sym)
+        
+        # Matrix fallback filling mode jika broker menolak dengan retcode 10030 (INVALID_FILL)
+        candidate_fillings = [primary_filling]
+        for f_mode in [
+            getattr(mt5, 'ORDER_FILLING_RETURN', 2),
+            mt5.ORDER_FILLING_IOC,
+            mt5.ORDER_FILLING_FOK
+        ]:
+            if f_mode not in candidate_fillings:
+                candidate_fillings.append(f_mode)
+                
+        for attempt in range(max_retries + 1):
+            tick = mt5.symbol_info_tick(sym)
+            if not tick:
+                time.sleep(0.1)
+                continue
+                
+            price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
+            deviation = self.calculate_dynamic_deviation(sym)
+            
+            # Coba candidate filling modes jika terjadi invalid filling
+            last_res = None
+            executed = False
+            for filling_mode in candidate_fillings:
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "position": pos.ticket,
+                    "symbol": sym,
+                    "volume": float(volume),
+                    "type": close_type,
+                    "price": float(price),
+                    "deviation": deviation,
+                    "magic": Config.MAGIC_NUMBER_BASE,
+                    "comment": sanitized_comment,
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": filling_mode,
+                }
+                
+                res = mt5.order_send(request)
+                last_res = res
+                
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    executed = True
+                    break
+                elif res and res.retcode == getattr(mt5, 'TRADE_RETCODE_INVALID_FILL', 10030):
+                    # Broker menolak filling mode ini, coba candidate fallback berikutnya
+                    continue
+                else:
+                    # Bukan error filling mode (misal requote, price changed, dll)
+                    break
+                    
+            if executed:
+                return True
+                
+            if last_res and last_res.retcode in (
+                mt5.TRADE_RETCODE_REQUOTE,
+                getattr(mt5, 'TRADE_RETCODE_PRICE_OFF', 10021)
+            ):
+                logging.warning(
+                    f"[OrderRouter] Requote saat close tiket #{pos.ticket} (code={last_res.retcode}). "
+                    f"Retry {attempt + 1}/{max_retries} dengan refresh tick..."
+                )
+                time.sleep(0.15)
+                continue
+            else:
+                code = last_res.retcode if last_res else "None"
+                logging.error(f"[OrderRouter] Gagal close tiket #{pos.ticket}, retcode: {code}")
+                time.sleep(0.1)
+                
+        return False
+
     def execute_partial_close_50(self, ticket: int, symbol: str = None) -> bool:
         """
-        Tutup 50% volume posisi aktif (Partial Profit Taking).
+        Tutup 50% volume posisi aktif (Partial Profit Taking) tingkat institusional.
         """
         positions = mt5.positions_get(ticket=ticket)
         if not positions:
+            logging.warning(f"[OrderRouter] Posisi tiket #{ticket} tidak ditemukan untuk partial close.")
             return False
             
         pos = positions[0]
@@ -152,74 +245,27 @@ class OrderRouter:
             logging.warning(f"[OrderRouter] Volume posisi {pos.volume} terlalu kecil untuk partial close 50%.")
             return False
             
-        tick = mt5.symbol_info_tick(sym)
-        if not tick:
-            return False
-            
         close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-        price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
-        deviation = self.calculate_dynamic_deviation(sym)
-        
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "position": pos.ticket,
-            "symbol": sym,
-            "volume": float(close_volume),
-            "type": close_type,
-            "price": float(price),
-            "deviation": deviation,
-            "magic": Config.MAGIC_NUMBER_BASE,
-            "comment": "Partial Close 50% Milestone RR 1:2",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        
-        res = mt5.order_send(request)
-        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-            logging.info(f"[OrderRouter] Berhasil Partial Close 50% tiket {ticket} (Volume ditutup: {close_volume}).")
-            return True
-        else:
-            code = res.retcode if res else "None"
-            logging.error(f"[OrderRouter] Gagal Partial Close tiket {ticket}, retcode: {code}")
-            return False
+        max_retries = getattr(Config, 'REQUOTE_MAX_RETRIES', 2)
+        success = self._send_close_deal(pos, sym, close_volume, close_type, "Partial Close 50%", max_retries=max_retries)
+        if success:
+            logging.info(f"[OrderRouter] ✅ Berhasil Partial Close 50% tiket #{ticket} (Volume: {close_volume}).")
+        return success
 
     def execute_full_close(self, ticket: int, reason: str = "", symbol: str = None) -> bool:
         """
-        Tutup seluruh posisi aktif via MT5 Deal Order.
+        Tutup seluruh posisi aktif via MT5 Deal Order dengan jaminan eksekusi institusional.
         """
         positions = mt5.positions_get(ticket=ticket)
         if not positions:
+            logging.warning(f"[OrderRouter] Posisi tiket #{ticket} tidak ditemukan untuk full close.")
             return False
             
         pos = positions[0]
         sym = symbol or pos.symbol
-        tick = mt5.symbol_info_tick(sym)
-        if not tick:
-            return False
-            
         close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-        price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
-        deviation = self.calculate_dynamic_deviation(sym)
-        
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "position": pos.ticket,
-            "symbol": sym,
-            "volume": float(pos.volume),
-            "type": close_type,
-            "price": float(price),
-            "deviation": deviation,
-            "magic": Config.MAGIC_NUMBER_BASE,
-            "comment": reason or "Full Close Position",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        
-        res = mt5.order_send(request)
-        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-            logging.info(f"[OrderRouter] Berhasil Full Close tiket {ticket} (Alasan: {reason}).")
-            return True
-        else:
-            code = res.retcode if res else "None"
-            logging.error(f"[OrderRouter] Gagal Full Close tiket {ticket}, retcode: {code}")
-            return False
+        max_retries = getattr(Config, 'REQUOTE_MAX_RETRIES', 2)
+        success = self._send_close_deal(pos, sym, pos.volume, close_type, reason or "Full Close", max_retries=max_retries)
+        if success:
+            logging.info(f"[OrderRouter] ✅ Berhasil Full Close tiket #{ticket} (Alasan: {reason}).")
+        return success
