@@ -104,39 +104,75 @@ class ResearcherAgent:
         return generate_targets(df, max_runner_rr=getattr(self, 'max_runner_rr', 5.0))
 
 
-    def optimize_hyperparameters(self, X, y, sample_weights, n_trials=20):
+    def optimize_hyperparameters(self, X, y, sample_weights, mode="normal", n_trials=25):
         import optuna
-        from sklearn.metrics import accuracy_score
         
         # Split subset of data for fast evaluation
         X_train, X_val, y_train, y_val, sw_train, sw_val = train_test_split(
-            X, y, sample_weights, test_size=0.2, shuffle=False
+            X, y, sample_weights, test_size=0.25, shuffle=False
         )
+
+        from config import Config
+        import os
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+        if mode == "runner":
+            entry_thresh = float(os.getenv("AI_RUNNER_ENTRY_THRESHOLD", getattr(Config, 'AI_RUNNER_ENTRY_THRESHOLD', 55.0))) / 100.0
+        else:
+            entry_thresh = float(os.getenv("AI_NORMAL_ENTRY_THRESHOLD", getattr(Config, 'AI_NORMAL_ENTRY_THRESHOLD', 60.0))) / 100.0
 
         def objective(trial):
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 50, 150),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
-                'max_depth': trial.suggest_int('max_depth', 3, 7),
-                'num_leaves': trial.suggest_int('num_leaves', 10, 31),
-                'min_child_samples': trial.suggest_int('min_child_samples', 20, 100),
-                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-                'random_state': 42,
+                'n_estimators': trial.suggest_int('n_estimators', 80, 200),
+                'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.08, log=True),
+                'max_depth': trial.suggest_int('max_depth', 4, 7),
+                'num_leaves': trial.suggest_int('num_leaves', 15, 45),
+                'min_child_samples': trial.suggest_int('min_child_samples', 30, 100),
+                'subsample': trial.suggest_float('subsample', 0.65, 0.95),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.65, 0.95),
+                'reg_alpha': trial.suggest_float('reg_alpha', 1e-3, 5.0, log=True),
+                'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 5.0, log=True),
+                'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 0.5),
                 'class_weight': 'balanced',
+                'random_state': 42,
                 'verbose': -1
             }
             
             model = lgb.LGBMClassifier(**params)
             model.fit(X_train, y_train, sample_weight=sw_train)
-            preds = model.predict(X_val)
-            acc = accuracy_score(y_val, preds)
-            return acc
+            
+            if hasattr(model, 'predict_proba'):
+                probs = model.predict_proba(X_val)
+                classes = list(getattr(model, 'classes_', [0, 1, 2]))
+                idx_buy = classes.index(1) if 1 in classes else -1
+                idx_sell = classes.index(2) if 2 in classes else -1
+                
+                preds = np.zeros(len(X_val), dtype=int)
+                for i in range(len(X_val)):
+                    pb = probs[i][idx_buy] if idx_buy != -1 and idx_buy < len(probs[i]) else 0.0
+                    ps = probs[i][idx_sell] if idx_sell != -1 and idx_sell < len(probs[i]) else 0.0
+                    if pb >= entry_thresh and pb > ps:
+                        preds[i] = 1
+                    elif ps >= entry_thresh and ps > pb:
+                        preds[i] = 2
+            else:
+                preds = model.predict(X_val)
+
+            trade_mask = (preds == 1) | (preds == 2)
+            n_trades = int(trade_mask.sum())
+            if n_trades >= 30:
+                y_val_arr = y_val.values if hasattr(y_val, 'values') else np.array(y_val)
+                trade_wr = float((preds[trade_mask] == y_val_arr[trade_mask]).mean())
+                return trade_wr
+            else:
+                # Penalti keras jika model takut masuk posisi atau sinyal terlalu sedikit
+                return 0.0
             
         study = optuna.create_study(direction='maximize')
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study.optimize(objective, n_trials=n_trials)
         
+        logging.info(f"[{mode.upper()} OPTUNA] Best Trial Win Rate: {study.best_value * 100:.2f}% | Best Params: {study.best_params}")
         return study.best_params
 
     def _fetch_rlhf_pnl_data(self, mode="normal"):
@@ -175,9 +211,17 @@ class ResearcherAgent:
                 y_normal = df['Target_Normal']
             else:
                 df = self.generate_targets(df)
-                reentry_sell_mask = df['high'] >= df[['LWMA_5_High', 'LWMA_10_High']].min(axis=1)
-                reentry_buy_mask = df['low'] <= df[['LWMA_5_Low', 'LWMA_10_Low']].max(axis=1)
-                df = df[reentry_sell_mask | reentry_buy_mask].copy()
+                lwma_low_zone = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values)
+                lwma_high_zone = np.minimum(df['LWMA_5_High'].values, df['LWMA_10_High'].values)
+                sma_20_vals = df['SMA_20'].values if 'SMA_20' in df.columns else df['close'].values
+                ema_50_vals = df['EMA_50'].values if 'EMA_50' in df.columns else df['close'].values
+                bb_upper_vals = df['BB_Upper'].values if 'BB_Upper' in df.columns else df['close'].values
+                bb_lower_vals = df['BB_Lower'].values if 'BB_Lower' in df.columns else df['close'].values
+
+                open_vals = df['open'].values if 'open' in df.columns else df['close'].values
+                reentry_buy_mask = (df['low'].values <= lwma_low_zone) & (df['close'].values >= sma_20_vals) & (df['close'].values <= bb_upper_vals) & (sma_20_vals >= ema_50_vals) & (df['close'].values >= ema_50_vals) & (df['close'].values >= open_vals)
+                reentry_sell_mask = (df['high'].values >= lwma_high_zone) & (df['close'].values <= sma_20_vals) & (df['close'].values >= bb_lower_vals) & (sma_20_vals <= ema_50_vals) & (df['close'].values <= ema_50_vals) & (df['close'].values <= open_vals)
+                df = df[reentry_buy_mask | reentry_sell_mask].copy()
 
                 if df.empty or len(df) < 50:
                     continue
@@ -238,14 +282,15 @@ class ResearcherAgent:
                     sample_weights *= regime_weights
 
             if chunk_idx == 1 and len(X) > 100:
-                best_params_normal = self.optimize_hyperparameters(X, y_normal, sample_weights, n_trials=20)
+                best_params_normal = self.optimize_hyperparameters(X, y_normal, sample_weights, mode="normal", n_trials=25)
                 
-            params_n = best_params_normal if best_params_normal else {
-                'n_estimators': 100, 'learning_rate': 0.05, 'max_depth': 4, 'num_leaves': 15,
-                'min_child_samples': 50, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
+            params_n = best_params_normal.copy() if best_params_normal else {
+                'n_estimators': 150, 'learning_rate': 0.03, 'max_depth': 5, 'num_leaves': 31,
+                'min_child_samples': 30, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
             }
-            params_n['verbose'] = -1
             params_n['class_weight'] = 'balanced'
+            params_n['verbose'] = -1
+            params_n['random_state'] = 42
 
             if self.model_normal is None:
                 base_est = params_n.get('n_estimators', 80)
@@ -253,12 +298,19 @@ class ResearcherAgent:
                 self.model_normal = lgb.LGBMClassifier(**params_n)
                 self.model_normal.fit(X, y_normal, sample_weight=sample_weights)
             else:
+                base_est = getattr(self.model_normal, 'n_estimators', 80) or 80
+                max_trees_cap = max(350, min(800, base_est + total_chunks * 5))
+                tree_step = max(2, min(8, (max_trees_cap - 80) // max(total_chunks, 1)))
                 curr_trees = getattr(self.model_normal, 'n_estimators', 80) or 80
-                max_trees_cap = 300
-                if curr_trees < max_trees_cap:
-                    new_trees = min(curr_trees + 10, max_trees_cap)
-                    self.model_normal.set_params(n_estimators=new_trees, verbose=-1, class_weight='balanced')
-                    self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=self.model_normal)
+                new_trees = min(curr_trees + tree_step, max_trees_cap)
+                if new_trees > curr_trees:
+                    self.model_normal.set_params(n_estimators=new_trees, verbose=-1)
+                    booster = getattr(self.model_normal, 'booster_', None)
+                    self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=booster)
+                else:
+                    self.model_normal.set_params(n_estimators=curr_trees + 1, verbose=-1)
+                    booster = getattr(self.model_normal, 'booster_', None)
+                    self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=booster)
                 
             if progress_callback:
                 progress_callback(chunk_idx, total_chunks)
@@ -297,9 +349,17 @@ class ResearcherAgent:
                 y_runner = df['Target_Runner']
             else:
                 df = self.generate_targets(df)
-                reentry_sell_mask = df['high'] >= df[['LWMA_5_High', 'LWMA_10_High']].min(axis=1)
-                reentry_buy_mask = df['low'] <= df[['LWMA_5_Low', 'LWMA_10_Low']].max(axis=1)
-                df = df[reentry_sell_mask | reentry_buy_mask].copy()
+                lwma_low_zone = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values)
+                lwma_high_zone = np.minimum(df['LWMA_5_High'].values, df['LWMA_10_High'].values)
+                sma_20_vals = df['SMA_20'].values if 'SMA_20' in df.columns else df['close'].values
+                ema_50_vals = df['EMA_50'].values if 'EMA_50' in df.columns else df['close'].values
+                bb_upper_vals = df['BB_Upper'].values if 'BB_Upper' in df.columns else df['close'].values
+                bb_lower_vals = df['BB_Lower'].values if 'BB_Lower' in df.columns else df['close'].values
+
+                open_vals = df['open'].values if 'open' in df.columns else df['close'].values
+                reentry_buy_mask = (df['low'].values <= lwma_low_zone) & (df['close'].values >= sma_20_vals) & (df['close'].values <= bb_upper_vals) & (sma_20_vals >= ema_50_vals) & (df['close'].values >= ema_50_vals) & (df['close'].values >= open_vals)
+                reentry_sell_mask = (df['high'].values >= lwma_high_zone) & (df['close'].values <= sma_20_vals) & (df['close'].values >= bb_lower_vals) & (sma_20_vals <= ema_50_vals) & (df['close'].values <= ema_50_vals) & (df['close'].values <= open_vals)
+                df = df[reentry_buy_mask | reentry_sell_mask].copy()
 
                 if df.empty or len(df) < 50:
                     continue
@@ -359,14 +419,15 @@ class ResearcherAgent:
                     sample_weights *= regime_weights
 
             if chunk_idx == 1 and len(X) > 100:
-                best_params_runner = self.optimize_hyperparameters(X, y_runner, sample_weights, n_trials=30)
+                best_params_runner = self.optimize_hyperparameters(X, y_runner, sample_weights, mode="runner", n_trials=25)
                 
-            params_r = best_params_runner if best_params_runner else {
-                'n_estimators': 150, 'learning_rate': 0.03, 'max_depth': 5, 'num_leaves': 20,
-                'min_child_samples': 40, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
+            params_r = best_params_runner.copy() if best_params_runner else {
+                'n_estimators': 150, 'learning_rate': 0.03, 'max_depth': 5, 'num_leaves': 31,
+                'min_child_samples': 30, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
             }
-            params_r['verbose'] = -1
             params_r['class_weight'] = 'balanced'
+            params_r['verbose'] = -1
+            params_r['random_state'] = 42
 
             if self.model_runner is None:
                 base_est = params_r.get('n_estimators', 100)
@@ -374,12 +435,19 @@ class ResearcherAgent:
                 self.model_runner = lgb.LGBMClassifier(**params_r)
                 self.model_runner.fit(X, y_runner, sample_weight=sample_weights)
             else:
+                base_est = getattr(self.model_runner, 'n_estimators', 100) or 100
+                max_trees_cap = max(400, min(800, base_est + total_chunks * 5))
+                tree_step = max(2, min(8, (max_trees_cap - 100) // max(total_chunks, 1)))
                 curr_trees = getattr(self.model_runner, 'n_estimators', 100) or 100
-                max_trees_cap = 350
-                if curr_trees < max_trees_cap:
-                    new_trees = min(curr_trees + 10, max_trees_cap)
-                    self.model_runner.set_params(n_estimators=new_trees, verbose=-1, class_weight='balanced')
-                    self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=self.model_runner)
+                new_trees = min(curr_trees + tree_step, max_trees_cap)
+                if new_trees > curr_trees:
+                    self.model_runner.set_params(n_estimators=new_trees, verbose=-1)
+                    booster = getattr(self.model_runner, 'booster_', None)
+                    self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=booster)
+                else:
+                    self.model_runner.set_params(n_estimators=curr_trees + 1, verbose=-1)
+                    booster = getattr(self.model_runner, 'booster_', None)
+                    self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=booster)
                 
             if progress_callback:
                 progress_callback(chunk_idx, total_chunks)
@@ -420,11 +488,19 @@ class ResearcherAgent:
                 logging.warning(f"[MICRO-RETRAIN] Data candle recent kosong untuk {mode_str.upper()}.")
                 return False
 
-            # 1. Target generation & filter BBMA Re-entry
+            # 1. Target generation & filter BBMA Re-entry (Slide 20, 21, 33, 51-56)
             df = self.generate_targets(df_recent.copy())
-            reentry_sell_mask = df['high'] >= df[['LWMA_5_High', 'LWMA_10_High']].min(axis=1)
-            reentry_buy_mask = df['low'] <= df[['LWMA_5_Low', 'LWMA_10_Low']].max(axis=1)
-            df = df[reentry_sell_mask | reentry_buy_mask].copy()
+            lwma_low_zone = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values) if 'LWMA_5_Low' in df.columns else df['low'].values
+            lwma_high_zone = np.minimum(df['LWMA_5_High'].values, df['LWMA_10_High'].values) if 'LWMA_5_High' in df.columns else df['high'].values
+            sma_20_vals = df['SMA_20'].values if 'SMA_20' in df.columns else df['close'].values
+            ema_50_vals = df['EMA_50'].values if 'EMA_50' in df.columns else df['close'].values
+            bb_upper_vals = df['BB_Upper'].values if 'BB_Upper' in df.columns else df['close'].values
+            bb_lower_vals = df['BB_Lower'].values if 'BB_Lower' in df.columns else df['close'].values
+
+            open_vals = df['open'].values if 'open' in df.columns else df['close'].values
+            reentry_buy_mask = (df['low'].values <= lwma_low_zone) & (df['close'].values >= sma_20_vals) & (df['close'].values <= bb_upper_vals) & (sma_20_vals >= ema_50_vals) & (df['close'].values >= ema_50_vals) & (df['close'].values >= open_vals)
+            reentry_sell_mask = (df['high'].values >= lwma_high_zone) & (df['close'].values <= sma_20_vals) & (df['close'].values >= bb_lower_vals) & (sma_20_vals <= ema_50_vals) & (df['close'].values <= ema_50_vals) & (df['close'].values <= open_vals)
+            df = df[reentry_buy_mask | reentry_sell_mask].copy()
 
             if df.empty or len(df) < 20:
                 logging.info(f"[MICRO-RETRAIN] Terlalu sedikit sampel re-entry ({len(df)}) untuk {mode_str.upper()}. Lewati.")
@@ -477,7 +553,7 @@ class ResearcherAgent:
             # 3. Incremental Warm-Start Fit (Ringan: n_estimators bertambah 15 pohon)
             current_n_est = getattr(current_model, 'n_estimators', 100) or 100
             new_n_est = current_n_est + 15
-            current_model.set_params(n_estimators=new_n_est, class_weight='balanced', verbose=-1)
+            current_model.set_params(n_estimators=new_n_est, verbose=-1)
             current_model.fit(X, y, sample_weight=sample_weights, init_model=current_model)
 
             logging.info(f"[MICRO-RETRAIN] ✅ Berhasil update model {mode_str.upper()} secara inkremental ({len(X)} sampel, total pohon: {new_n_est}).")

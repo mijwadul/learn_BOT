@@ -243,21 +243,27 @@ class ExecutorAgent:
                                 elif trade_mode == "HIT_RUN" and not self.supervisor.is_normal_valid():
                                     allow_execution = False
 
-                                # Filter BBMA Re-entry LWMA Zone
+                                # Filter BBMA Re-entry LWMA Zone & Zon Zero Loss (Slide 20, 21, 33, 51-56)
                                 lwma_5_h = row_data.get('LWMA_5_High', 0)
                                 lwma_10_h = row_data.get('LWMA_10_High', 0)
                                 lwma_5_l = row_data.get('LWMA_5_Low', 0)
                                 lwma_10_l = row_data.get('LWMA_10_Low', 0)
                                 high_price = row_data.get('high', 0)
                                 low_price = row_data.get('low', 0)
+                                sma_20_val = row_data.get('SMA_20', 0)
+                                bb_upper_val = row_data.get('BB_Upper', 0)
+                                bb_lower_val = row_data.get('BB_Lower', 0)
                                 
+                                open_val = row_data.get('open', close_val)
                                 if action_type == mt5.ORDER_TYPE_SELL:
                                     reentry_zone = min(lwma_5_h, lwma_10_h)
-                                    if high_price < reentry_zone:
+                                    # Slide 33: Body rejection (close <= sma_20), Slide 20: not CSM (close >= bb_lower), Slide 51-56: ZZL (sma_20 <= ema_50 & close <= ema_50), Candle Rejection (close <= open)
+                                    if high_price < reentry_zone or close_val > sma_20_val or close_val < bb_lower_val or close_val > open_val or (ema_50_val > 0 and (sma_20_val > ema_50_val or close_val > ema_50_val)):
                                         allow_execution = False
                                 elif action_type == mt5.ORDER_TYPE_BUY:
                                     reentry_zone = max(lwma_5_l, lwma_10_l)
-                                    if low_price > reentry_zone:
+                                    # Slide 33: Body rejection (close >= sma_20), Slide 20: not CSM (close <= bb_upper), Slide 51-56: ZZL (sma_20 >= ema_50 & close >= ema_50), Candle Rejection (close >= open)
+                                    if low_price > reentry_zone or close_val < sma_20_val or close_val > bb_upper_val or close_val < open_val or (ema_50_val > 0 and (sma_20_val < ema_50_val or close_val < ema_50_val)):
                                         allow_execution = False
 
                                 # Institutional Risk Service Validation (Anti-Hedging, News Blackout, Hit-Run Limit, Pyramiding)

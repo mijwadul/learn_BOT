@@ -489,7 +489,7 @@ class DataMinerAgent:
             logging.error(f"Gagal memuat live decision samples: {e}")
             return pd.DataFrame()
             
-    def load_test_chunks(self, chunk_size=5000, split_ratio=0.80):
+    def load_test_chunks(self, chunk_size=100000, split_ratio=0.80):
         try:
             query_count = "SELECT COUNT(*) FROM market_data_merged"
             total_rows = pd.read_sql(query_count, con=sync_engine).iloc[0, 0]

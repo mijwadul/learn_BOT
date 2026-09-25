@@ -83,7 +83,7 @@ class BotState:
         # Initialize Models if exists
         if self.researcher.load_models():
             is_norm_ok = self.researcher.last_accuracy_normal >= 0.50 if self.researcher.last_accuracy_normal > 0 else True
-            is_run_ok = self.researcher.last_accuracy_runner >= 0.50 if self.researcher.last_accuracy_runner > 0 else True
+            is_run_ok = self.researcher.last_accuracy_runner >= 0.25 if self.researcher.last_accuracy_runner > 0 else True
             self.supervisor.set_model_validity(is_norm_ok, is_run_ok)
             
             if (self.researcher.model_normal is not None and self.researcher.last_accuracy_normal == 0.0) or \
@@ -111,7 +111,7 @@ class BotState:
             self.researcher.save_metadata()
             self.supervisor.set_model_validity(
                 self.researcher.last_accuracy_normal >= 0.50,
-                self.researcher.last_accuracy_runner >= 0.50
+                self.researcher.last_accuracy_runner >= 0.25
             )
             logging.info(f"✅ [STARTUP VALIDATION] Selesai. Akurasi tersimpan: Normal={self.researcher.last_accuracy_normal*100:.1f}%, Runner={self.researcher.last_accuracy_runner*100:.1f}%")
         except Exception as e:

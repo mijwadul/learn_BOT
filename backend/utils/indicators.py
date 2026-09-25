@@ -85,10 +85,44 @@ def calculate_bbma(df):
     df['SMA_20_Slope'] = df['SMA_20'] - df['SMA_20'].shift(3)
     df['BB_Width_Slope'] = df['BB_Width'] - df['BB_Width'].shift(3)
     
-    # Deteksi Momentum (CSM)
+    # Deteksi Momentum (CSM - Slide 20 & 38)
     df['is_CSM_Buy'] = np.where(df['close'] > df['BB_Upper'], 1, 0)
     df['is_CSM_Sell'] = np.where(df['close'] < df['BB_Lower'], 1, 0)
     
+    # Deteksi Extrem BBMA (Slide 21) - MA 5 keluar dari Bollinger Band
+    df['is_Extrem_Buy'] = np.where(df['LWMA_5_Low'] < df['BB_Lower'], 1, 0)
+    df['is_Extrem_Sell'] = np.where(df['LWMA_5_High'] > df['BB_Upper'], 1, 0)
+
+    # Deteksi Candlestick Arah Kukuh (CSAK - Slide 31)
+    df['is_CSAK_Buy'] = np.where(
+        (df['close'] > df['SMA_20']) & (df['close'] > df['LWMA_5_High']) & (df['close'] > df['LWMA_10_High']) & (df['open'] < df['SMA_20']),
+        1, 0
+    )
+    df['is_CSAK_Sell'] = np.where(
+        (df['close'] < df['SMA_20']) & (df['close'] < df['LWMA_5_Low']) & (df['close'] < df['LWMA_10_Low']) & (df['open'] > df['SMA_20']),
+        1, 0
+    )
+
+    # Kaedah Re-entry Valid BBMA (Slide 33: Body Rejection & No-CSM Filter)
+    df['is_Reentry_Buy_Valid'] = np.where(
+        (df['low'] <= lwma_low_zone) & (df['close'] >= df['SMA_20']) & (df['close'] <= df['BB_Upper']),
+        1, 0
+    )
+    df['is_Reentry_Sell_Valid'] = np.where(
+        (df['high'] >= lwma_high_zone) & (df['close'] <= df['SMA_20']) & (df['close'] >= df['BB_Lower']),
+        1, 0
+    )
+
+    # Zon Zero Loss (ZZL - Slide 51-56: Setup Win Rate Tertinggi BBMA)
+    df['is_ZZL_Buy'] = np.where(
+        (df['SMA_20'] >= df['EMA_50']) & (df['close'] >= df['EMA_50']) & (lwma_low_zone >= df['SMA_20']) & (df['is_Reentry_Buy_Valid'] == 1),
+        1, 0
+    )
+    df['is_ZZL_Sell'] = np.where(
+        (df['SMA_20'] <= df['EMA_50']) & (df['close'] <= df['EMA_50']) & (lwma_high_zone <= df['SMA_20']) & (df['is_Reentry_Sell_Valid'] == 1),
+        1, 0
+    )
+
     # Arah Tren LWMA (Crossover)
     df['LWMA_Crossover_High'] = df['LWMA_5_High'] - df['LWMA_10_High']
     df['LWMA_Crossover_Low'] = df['LWMA_5_Low'] - df['LWMA_10_Low']
@@ -125,3 +159,4 @@ def calculate_bbma(df):
     df.drop(columns=['prev_open', 'prev_close'], inplace=True)
     
     return df
+

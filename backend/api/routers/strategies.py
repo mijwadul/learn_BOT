@@ -36,12 +36,12 @@ async def train_model(req: TrainRequest):
         try:
             logging.info(f"Memulai pelatihan AI ({req.type}) untuk {req.mode} Mode...")
 
-            total_chunks, data_generator = bot.data_miner.load_train_chunks(chunk_size=5000, mode=req.mode)
+            total_chunks, data_generator = bot.data_miner.load_train_chunks(chunk_size=100000, mode=req.mode)
             if total_chunks == 0 or data_generator is None:
                 logging.warning("⚠️ Training dibatalkan: Database market_data kosong. Jalankan Force Backfill MT5 terlebih dahulu.")
                 return
                 
-            total_test_chunks, test_generator = bot.data_miner.load_test_chunks(chunk_size=5000)
+            total_test_chunks, test_generator = bot.data_miner.load_test_chunks(chunk_size=100000)
 
             if req.type == 'full':
                 if req.mode == 'normal':
@@ -61,12 +61,12 @@ async def train_model(req: TrainRequest):
                             bot.researcher.last_accuracy_normal = float(accuracy)
                             bot.researcher.last_trained_normal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             bot.researcher.save_metadata()
-                            if accuracy > 0.50:
+                            if accuracy >= 0.50:
                                 bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
-                                logging.info("✅ Model Normal lulus validasi. Supervisor Normal Mode = VALID.")
+                                logging.info(f"✅ Model Normal lulus validasi (Win Rate: {accuracy*100:.2f}% >= 50%). Supervisor Normal Mode = VALID.")
                             else:
                                 bot.supervisor.set_model_validity(False, bot.supervisor.is_runner_valid())
-                                logging.warning("❌ Model Normal gagal validasi (<50%). Supervisor Normal Mode = QUARANTINE.")
+                                logging.warning(f"❌ Model Normal gagal validasi (Win Rate: {accuracy*100:.2f}% < 50%). Supervisor Normal Mode = QUARANTINE.")
                         else:
                             bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
                             bot.researcher.last_trained_normal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -84,12 +84,13 @@ async def train_model(req: TrainRequest):
                             bot.researcher.last_accuracy_runner = float(accuracy)
                             bot.researcher.last_trained_runner = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             bot.researcher.save_metadata()
-                            if accuracy > 0.50:
+                            RUNNER_MIN_WIN_RATE = 0.25
+                            if accuracy >= RUNNER_MIN_WIN_RATE:
                                 bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), True)
-                                logging.info("✅ Model Runner lulus validasi. Supervisor Runner Mode = VALID.")
+                                logging.info(f"✅ Model Runner lulus validasi (Win Rate: {accuracy*100:.2f}% >= {RUNNER_MIN_WIN_RATE*100:.0f}% pada RR 1:5). Supervisor Runner Mode = VALID.")
                             else:
                                 bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), False)
-                                logging.warning("❌ Model Runner gagal validasi (<50%). Supervisor Runner Mode = QUARANTINE.")
+                                logging.warning(f"❌ Model Runner gagal validasi (Win Rate: {accuracy*100:.2f}% < {RUNNER_MIN_WIN_RATE*100:.0f}%). Supervisor Runner Mode = QUARANTINE.")
                         else:
                             bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), True)
                             bot.researcher.last_trained_runner = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -142,6 +143,48 @@ async def trigger_micro_train(req: MicroTrainRequest = None):
 
     threading.Thread(target=_micro_task, daemon=True).start()
     return {"status": "success", "message": f"Online Micro-Retrain ({target_mode.upper()}) started in background. Cek Logs untuk progress."}
+
+class ValidateRequest(BaseModel):
+    mode: str = "normal" # "normal" or "runner"
+
+@router.post("/api/strategies/validate")
+async def trigger_validate(req: ValidateRequest = None):
+    """Menjalankan validasi OOS langsung pada model tersimpan dengan parameter terbaru tanpa retraining."""
+    target_mode = req.mode.lower() if req and req.mode else "normal"
+    def _validate_task():
+        try:
+            total_test_chunks, test_generator = bot.data_miner.load_test_chunks(chunk_size=100000)
+            if not test_generator or total_test_chunks == 0:
+                logging.warning(f"⚠️ [VALIDATE] Data OOS kosong untuk {target_mode}.")
+                return
+            logging.info(f"Memulai validasi OOS on-demand untuk {target_mode.upper()}...")
+            accuracy = bot.gatekeeper.validate_model(target_mode, test_generator, total_test_chunks)
+            if target_mode == 'normal':
+                bot.researcher.last_accuracy_normal = float(accuracy)
+                bot.researcher.last_trained_normal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                bot.researcher.save_metadata()
+                if accuracy >= 0.50:
+                    bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
+                    logging.info(f"✅ Model Normal lulus validasi (Win Rate: {accuracy*100:.2f}% >= 50%). Supervisor Normal Mode = VALID.")
+                else:
+                    bot.supervisor.set_model_validity(False, bot.supervisor.is_runner_valid())
+                    logging.warning(f"❌ Model Normal gagal validasi (Win Rate: {accuracy*100:.2f}% < 50%). Supervisor Normal Mode = QUARANTINE.")
+            elif target_mode == 'runner':
+                bot.researcher.last_accuracy_runner = float(accuracy)
+                bot.researcher.last_trained_runner = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                bot.researcher.save_metadata()
+                RUNNER_MIN_WIN_RATE = 0.25
+                if accuracy >= RUNNER_MIN_WIN_RATE:
+                    bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), True)
+                    logging.info(f"✅ Model Runner lulus validasi (Win Rate: {accuracy*100:.2f}% >= {RUNNER_MIN_WIN_RATE*100:.0f}% pada RR 1:5). Supervisor Runner Mode = VALID.")
+                else:
+                    bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), False)
+                    logging.warning(f"❌ Model Runner gagal validasi (Win Rate: {accuracy*100:.2f}% < {RUNNER_MIN_WIN_RATE*100:.0f}%). Supervisor Runner Mode = QUARANTINE.")
+        except Exception as e:
+            logging.error(f"[VALIDATE] Gagal: {e}")
+
+    threading.Thread(target=_validate_task, daemon=True).start()
+    return {"status": "success", "message": f"Validasi OOS {target_mode.upper()} dimulai di background. Cek Logs untuk progress."}
 
 @router.post("/api/strategies/reset-models")
 async def reset_models():
