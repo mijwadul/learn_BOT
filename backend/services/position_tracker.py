@@ -261,15 +261,20 @@ class PositionTracker:
 
             if latest_df is not None and not latest_df.empty:
                 last_candle = latest_df.iloc[-1]
+                confirmed_candle = latest_df.iloc[-2] if len(latest_df) >= 2 else last_candle
+                
                 c_close = last_candle.get('close', current_price)
                 c_ema = last_candle.get('EMA_50', 0.0)
                 c_sma20 = last_candle.get('SMA_20', 0.0)
                 lwma_10_l = last_candle.get('LWMA_10_Low', 0.0)
                 lwma_10_h = last_candle.get('LWMA_10_High', 0.0)
+                
+                conf_close = confirmed_candle.get('close', c_close)
+                conf_ema = confirmed_candle.get('EMA_50', c_ema)
 
                 if pos.type == mt5.ORDER_TYPE_BUY:
-                    # Syarat Batal ZZL (Slide 51-56): Close menembus di bawah EMA 50
-                    if c_ema > 0 and c_close < c_ema:
+                    # Syarat Batal ZZL (Slide 51-56): Candle terkonfirmasi Close < EMA 50 atau harga tembus kuat (> 0.50)
+                    if (conf_ema > 0 and conf_close < conf_ema) or (c_ema > 0 and c_close < (c_ema - 0.50)):
                         reversal_detected = True
                         reversal_reason = f"Thesis Invalidation: Close ({c_close:.2f}) < EMA 50 ({c_ema:.2f})"
                     # Konfirmasi CSAK/CSM Sell Lawan Arah (Slide 31): Close < Mid BB dan < LWMA 10 Low
@@ -282,8 +287,8 @@ class PositionTracker:
                         reversal_reason = f"AI Reversal Surge: Prob SELL {p_sell_rev*100:.0f}%"
 
                 elif pos.type == mt5.ORDER_TYPE_SELL:
-                    # Syarat Batal ZZL (Slide 51-56): Close menembus di atas EMA 50
-                    if c_ema > 0 and c_close > c_ema:
+                    # Syarat Batal ZZL (Slide 51-56): Candle terkonfirmasi Close > EMA 50 atau harga tembus kuat (> 0.50)
+                    if (conf_ema > 0 and conf_close > conf_ema) or (c_ema > 0 and c_close > (c_ema + 0.50)):
                         reversal_detected = True
                         reversal_reason = f"Thesis Invalidation: Close ({c_close:.2f}) > EMA 50 ({c_ema:.2f})"
                     # Konfirmasi CSAK/CSM Buy Lawan Arah (Slide 31): Close > Mid BB dan > LWMA 10 High

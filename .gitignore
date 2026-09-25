@@ -1,28 +1,101 @@
+# =============================================================================
 # Python / Backend
-backend/venv/
-backend/__pycache__/
-backend/.env
-backend/.pytest_cache/
-backend/models/*.pkl
-backend/*.db
-backend/*.sqlite
-backend/*.sqlite3
-backend/*.log
-backend/.streamlit/secrets.toml
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Node / Frontend
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-frontend/build/
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+backend/venv/
+
+# Environment Variables & Secrets
+.env
+*.env
+backend/.env
+backend/.streamlit/secrets.toml
 frontend/.env.local
 frontend/.env.development.local
 frontend/.env.test.local
 frontend/.env.production.local
+
+# ML Models, Checkpoints & Large Binary Backups
+*.pkl
+*.pkl.*
+*.bck
+*.bak
+*.backup
+*.joblib
+*.onnx
+*.h5
+*.pt
+*.pth
+*.bin
+backend/models/*.pkl*
+backend/models/**/*.pkl*
+backend/models/Backup/
+models/Backup/
+
+# Databases & SQLite files
+*.db
+*.sqlite
+*.sqlite3
+backend/*.db
+backend/*.sqlite
+backend/*.sqlite3
+
+# Logs & Runtime Dumps
+*.log
+backend/*.log
+logs/
+*.pid
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# =============================================================================
+# Node / Frontend
+# =============================================================================
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
 frontend/npm-debug.log*
 frontend/yarn-debug.log*
 frontend/yarn-error.log*
 
-# OS
+# =============================================================================
+# IDE, OS & Editor artifacts
+# =============================================================================
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
