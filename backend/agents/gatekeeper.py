@@ -66,8 +66,8 @@ class GatekeeperAgent:
             for col in self.researcher.features:
                 if col not in df_test.columns:
                     df_test[col] = 0.0
-                if df_test[col].dtype == 'object':
-                    df_test[col] = pd.to_numeric(df_test[col], errors='coerce')
+                elif not (pd.api.types.is_numeric_dtype(df_test[col]) or pd.api.types.is_bool_dtype(df_test[col])):
+                    df_test[col] = pd.to_numeric(df_test[col], errors='coerce').fillna(0.0)
             
             target_col = 'Target_Normal' if mode == 'normal' else 'Target_Runner'
             

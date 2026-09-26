@@ -1,13 +1,14 @@
 {
   "symbol": "BTCUSD",
   "normal": {
-    "last_accuracy": 0.0,
-    "last_trained_at": null,
-    "trained": false
+    "last_accuracy": 0.3283916780864582,
+    "last_trained_at": "2026-09-26 16:43:05",
+    "trained": true
   },
   "runner": {
     "last_accuracy": 0.0,
     "last_trained_at": null,
-    "trained": false
+    "trained": false,
+    "max_runner_rr": 5.0
   }
 }

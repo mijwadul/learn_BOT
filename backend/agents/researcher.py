@@ -55,7 +55,7 @@ class ResearcherAgent:
             c = self._models_cache[clean_sym]
             self.model_normal = c["normal"]
             self.model_runner = c["runner"]
-            self.features = c["features"]
+            self.features = c.get("features", [])
             self.last_accuracy_normal = c["last_accuracy_normal"]
             self.last_accuracy_runner = c["last_accuracy_runner"]
             self.last_trained_normal = c["last_trained_normal"]
@@ -64,6 +64,11 @@ class ResearcherAgent:
         else:
             self.model_normal = None
             self.model_runner = None
+            self.features = []
+            self.last_accuracy_normal = 0.0
+            self.last_accuracy_runner = 0.0
+            self.last_trained_normal = None
+            self.last_trained_runner = None
             self.load_models()
 
     def get_model_dir(self) -> str:
@@ -143,6 +148,11 @@ class ResearcherAgent:
                         self.features = list(self.model_normal.feature_name_)
                     elif hasattr(self.model_normal, 'booster_'):
                         self.features = self.model_normal.booster_.feature_name()
+                elif self.model_runner is not None:
+                    if hasattr(self.model_runner, 'feature_name_'):
+                        self.features = list(self.model_runner.feature_name_)
+                    elif hasattr(self.model_runner, 'booster_'):
+                        self.features = self.model_runner.booster_.feature_name()
 
                 # Baca metadata akurasi persisten jika tersedia
                 target_meta = meta_path if os.path.exists(meta_path) else "models/models_metadata.json"
@@ -294,24 +304,34 @@ class ResearcherAgent:
                     continue
                 y_normal = df['Target_Normal']
 
-            forbidden_exact = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
-            forbidden_cols = []
+            forbidden_exact = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume', 'symbol', 'time', 'timestamp', 'datetime', 'date', 'id']
+            forbidden_cols = set()
             # Isolasi Dataset: Normal Mode tidak memuat fitur kompleks H4 untuk menghemat memori drastis
             for tf in ['', '_m5', '_m15']:
                 for c in forbidden_exact:
-                    forbidden_cols.append(f"{c}{tf}")
+                    forbidden_cols.add(f"{c}{tf}")
                 for c in ['SMA_20', 'BB_Upper', 'BB_Lower', 'EMA_50', 'LWMA_5_High', 'LWMA_10_High', 'LWMA_5_Low', 'LWMA_10_Low']:
-                    forbidden_cols.append(f"{c}{tf}")
+                    forbidden_cols.add(f"{c}{tf}")
 
             if not getattr(self, 'features', None) or (chunk_idx == 1 and not is_live_feedback):
-                self.features = [col for col in df.columns if col not in forbidden_cols and 'Target' not in col and not col.startswith('_')]
+                candidate_features = []
+                for col in df.columns:
+                    if col in forbidden_cols or 'Target' in col or col.startswith('_'):
+                        continue
+                    if pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col]):
+                        candidate_features.append(col)
+                    else:
+                        coerced = pd.to_numeric(df[col], errors='coerce')
+                        if not coerced.isna().all():
+                            candidate_features.append(col)
+                self.features = candidate_features
             
             # Lock fitur agar seragam dengan chunk pertama (mencegah crash LightGBM "features in data is not the same")
             for col in self.features:
                 if col not in df.columns:
                     df[col] = 0.0
-                if df[col].dtype == 'object':
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                elif not (pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col])):
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
                     
             X = df[self.features]
             
@@ -436,23 +456,33 @@ class ResearcherAgent:
                     continue
                 y_runner = df['Target_Runner']
 
-            forbidden_exact = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
-            forbidden_cols = []
+            forbidden_exact = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume', 'symbol', 'time', 'timestamp', 'datetime', 'date', 'id']
+            forbidden_cols = set()
             # Runner mode memuat semua timeframe hingga H4
             for tf in ['', '_m5', '_m15']:
                 for c in forbidden_exact:
-                    forbidden_cols.append(f"{c}{tf}")
+                    forbidden_cols.add(f"{c}{tf}")
                 for c in ['SMA_20', 'BB_Upper', 'BB_Lower', 'EMA_50', 'LWMA_5_High', 'LWMA_10_High', 'LWMA_5_Low', 'LWMA_10_Low']:
-                    forbidden_cols.append(f"{c}{tf}")
+                    forbidden_cols.add(f"{c}{tf}")
 
             if not getattr(self, 'features', None) or (chunk_idx == 1 and not is_live_feedback):
-                self.features = [col for col in df.columns if col not in forbidden_cols and 'Target' not in col and not col.startswith('_')]
+                candidate_features = []
+                for col in df.columns:
+                    if col in forbidden_cols or 'Target' in col or col.startswith('_'):
+                        continue
+                    if pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col]):
+                        candidate_features.append(col)
+                    else:
+                        coerced = pd.to_numeric(df[col], errors='coerce')
+                        if not coerced.isna().all():
+                            candidate_features.append(col)
+                self.features = candidate_features
             
             for col in self.features:
                 if col not in df.columns:
                     df[col] = 0.0
-                if df[col].dtype == 'object':
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                elif not (pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col])):
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
                     
             X = df[self.features]
             
@@ -594,8 +624,8 @@ class ResearcherAgent:
             for col in self.features:
                 if col not in df.columns:
                     df[col] = 0.0
-                if df[col].dtype == 'object':
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                elif not (pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col])):
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
 
             X = df[self.features].copy()
             sample_weights = np.ones(len(df), dtype=float)
@@ -613,8 +643,8 @@ class ResearcherAgent:
                 for col in self.features:
                     if col not in fb_df.columns:
                         fb_df[col] = 0.0
-                    if fb_df[col].dtype == 'object':
-                        fb_df[col] = pd.to_numeric(fb_df[col], errors='coerce')
+                    elif not (pd.api.types.is_numeric_dtype(fb_df[col]) or pd.api.types.is_bool_dtype(fb_df[col])):
+                        fb_df[col] = pd.to_numeric(fb_df[col], errors='coerce').fillna(0.0)
                 
                 if target_col in fb_df.columns:
                     X_fb = fb_df[self.features]
@@ -674,7 +704,10 @@ class ResearcherAgent:
             return {"normal_buy": 0.0, "normal_sell": 0.0, "runner_buy": 0.0, "runner_sell": 0.0, "normal": 0.0, "runner": 0.0}
 
         try:
-            X_eval = X_live[valid_cols]
+            X_eval = X_live[valid_cols].copy()
+            for c in valid_cols:
+                if not (pd.api.types.is_numeric_dtype(X_eval[c]) or pd.api.types.is_bool_dtype(X_eval[c])):
+                    X_eval[c] = pd.to_numeric(X_eval[c], errors='coerce').fillna(0.0)
             pn_buy, pn_sell = 0.0, 0.0
             pr_buy, pr_sell = 0.0, 0.0
 

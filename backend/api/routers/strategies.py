@@ -110,6 +110,7 @@ async def train_model(req: TrainRequest):
             total_test_chunks, test_generator = bot.data_miner.load_test_chunks(chunk_size=100000, symbol=target_symbol)
 
             if req.type == 'full':
+                bot.researcher.features = []
                 if req.mode == 'normal':
                     bot.researcher.model_normal = None
                     logging.info(f"[FULL TRAIN - {target_symbol}] Model Normal di-reset. Melatih dari awal...")
