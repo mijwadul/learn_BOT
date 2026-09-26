@@ -10,7 +10,6 @@ import {
   Wallet, 
   LineChart, 
   Settings2, 
-  Terminal, 
   BookOpen, 
   Database, 
   AlertOctagon, 
@@ -121,7 +120,6 @@ export default function Sidebar() {
           <NavItem href="/strategies" icon={<Settings2 size={22} />} label="Strategies" active={pathname === "/strategies"} isCollapsed={isCollapsed} onClick={closeSidebar} />
           <NavItem href="/database" icon={<Database size={22} />} label="Database" active={pathname === "/database"} isCollapsed={isCollapsed} onClick={closeSidebar} />
           <NavItem href="/journal" icon={<BookOpen size={22} />} label="Journal" active={pathname === "/journal"} isCollapsed={isCollapsed} onClick={closeSidebar} />
-          <NavItem href="/logs" icon={<Terminal size={22} />} label="Logs" active={pathname === "/logs"} isCollapsed={isCollapsed} onClick={closeSidebar} />
         </nav>
 
         {/* Emergency Stop Button */}

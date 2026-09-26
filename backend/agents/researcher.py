@@ -15,7 +15,8 @@ class ResearcherAgent:
     Melatih algoritma (LightGBM) menggunakan target dinamis.
     """
     
-    def __init__(self):
+    def __init__(self, symbol: str = "XAUUSD"):
+        self.symbol = str(symbol or "XAUUSD").upper()
         self.model_normal = None
         self.model_runner = None
         self.features = []
@@ -26,12 +27,63 @@ class ResearcherAgent:
         self.last_trained_normal = None
         self.last_trained_runner = None
         self.max_runner_rr = 5.0 # Maximum RR dinamis yang didapat dari proses belajar Runner
+        self._models_cache = {}
+
+    def set_symbol(self, symbol: str):
+        """Beralih ke model pair tertentu dengan in-memory caching instan tanpa reload disk berulang."""
+        clean_sym = str(symbol or "XAUUSD").upper()
+        if self.symbol == clean_sym and (self.model_normal is not None or self.model_runner is not None):
+            return
+
+        # Simpan model saat ini ke cache jika ada
+        if self.symbol:
+            self._models_cache[self.symbol] = {
+                "normal": self.model_normal,
+                "runner": self.model_runner,
+                "features": self.features,
+                "last_accuracy_normal": self.last_accuracy_normal,
+                "last_accuracy_runner": self.last_accuracy_runner,
+                "last_trained_normal": self.last_trained_normal,
+                "last_trained_runner": self.last_trained_runner,
+                "max_runner_rr": self.max_runner_rr
+            }
+
+        self.symbol = clean_sym
+
+        # Pulihkan dari cache jika sudah pernah dimuat
+        if clean_sym in self._models_cache:
+            c = self._models_cache[clean_sym]
+            self.model_normal = c["normal"]
+            self.model_runner = c["runner"]
+            self.features = c["features"]
+            self.last_accuracy_normal = c["last_accuracy_normal"]
+            self.last_accuracy_runner = c["last_accuracy_runner"]
+            self.last_trained_normal = c["last_trained_normal"]
+            self.last_trained_runner = c["last_trained_runner"]
+            self.max_runner_rr = c["max_runner_rr"]
+        else:
+            self.model_normal = None
+            self.model_runner = None
+            self.load_models()
+
+    def get_model_dir(self) -> str:
+        """Direktori subfolder khusus untuk pair bersangkutan (contoh: models/XAUUSD)."""
+        d = os.path.join("models", self.symbol)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def get_model_path(self, mode: str) -> str:
+        return os.path.join(self.get_model_dir(), f"model_{mode}.pkl")
+
+    def get_metadata_path(self) -> str:
+        return os.path.join(self.get_model_dir(), "models_metadata.json")
         
     def save_metadata(self):
         """Menyimpan akurasi dan metadata pelatihan ke file JSON agar persisten melintasi restart."""
         try:
-            os.makedirs("models", exist_ok=True)
+            meta_path = self.get_metadata_path()
             meta = {
+                "symbol": self.symbol,
                 "normal": {
                     "last_accuracy": float(self.last_accuracy_normal),
                     "last_trained_at": self.last_trained_normal,
@@ -44,33 +96,46 @@ class ResearcherAgent:
                     "max_runner_rr": float(self.max_runner_rr)
                 }
             }
-            with open("models/models_metadata.json", "w") as f:
+            with open(meta_path, "w") as f:
                 json.dump(meta, f, indent=2)
-            logging.info(f"[RESEARCHER] Metadata akurasi tersimpan ke models_metadata.json (Normal: {self.last_accuracy_normal*100:.1f}%, Runner: {self.last_accuracy_runner*100:.1f}%, Max RR: {self.max_runner_rr:.1f}R)")
+            logging.info(f"[RESEARCHER-{self.symbol}] Metadata akurasi tersimpan ke {meta_path} (Normal: {self.last_accuracy_normal*100:.1f}%, Runner: {self.last_accuracy_runner*100:.1f}%, Max RR: {self.max_runner_rr:.1f}R)")
         except Exception as e:
-            logging.error(f"Failed to save models metadata: {e}")
+            logging.error(f"Failed to save models metadata for {self.symbol}: {e}")
 
     def save_models(self):
         try:
-            os.makedirs("models", exist_ok=True)
+            self.get_model_dir()
+            path_normal = self.get_model_path("normal")
+            path_runner = self.get_model_path("runner")
             if self.model_normal is not None:
-                joblib.dump(self.model_normal, "models/model_normal.pkl")
+                joblib.dump(self.model_normal, path_normal)
             if self.model_runner is not None:
-                joblib.dump(self.model_runner, "models/model_runner.pkl")
+                joblib.dump(self.model_runner, path_runner)
             self.save_metadata()
-            logging.info("Model checkpoints and metadata saved to 'models/' directory.")
+            logging.info(f"Model checkpoints and metadata saved to '{self.get_model_dir()}' directory.")
         except Exception as e:
-            logging.error(f"Failed to save models: {e}")
+            logging.error(f"Failed to save models for {self.symbol}: {e}")
 
     def load_models(self):
         try:
             loaded_any = False
-            if os.path.exists("models/model_normal.pkl") and os.path.getsize("models/model_normal.pkl") > 100:
-                self.model_normal = joblib.load("models/model_normal.pkl")
+            path_normal = self.get_model_path("normal")
+            path_runner = self.get_model_path("runner")
+            meta_path = self.get_metadata_path()
+
+            # Cek subfolder pair, atau fallback ke root models/ jika belum dipindahkan
+            target_normal = path_normal if os.path.exists(path_normal) else "models/model_normal.pkl"
+            target_runner = path_runner if os.path.exists(path_runner) else "models/model_runner.pkl"
+
+            if os.path.exists(target_normal) and os.path.getsize(target_normal) > 100:
+                self.model_normal = joblib.load(target_normal)
                 loaded_any = True
-            if os.path.exists("models/model_runner.pkl") and os.path.getsize("models/model_runner.pkl") > 100:
-                self.model_runner = joblib.load("models/model_runner.pkl")
+                logging.info(f"[RESEARCHER-{self.symbol}] Model Normal loaded from {target_normal}")
+
+            if os.path.exists(target_runner) and os.path.getsize(target_runner) > 100:
+                self.model_runner = joblib.load(target_runner)
                 loaded_any = True
+                logging.info(f"[RESEARCHER-{self.symbol}] Model Runner loaded from {target_runner}")
 
             if loaded_any:
                 if self.model_normal is not None:
@@ -80,18 +145,20 @@ class ResearcherAgent:
                         self.features = self.model_normal.booster_.feature_name()
 
                 # Baca metadata akurasi persisten jika tersedia
-                if os.path.exists("models/models_metadata.json"):
+                target_meta = meta_path if os.path.exists(meta_path) else "models/models_metadata.json"
+                if os.path.exists(target_meta):
                     try:
-                        with open("models/models_metadata.json", "r") as f:
+                        with open(target_meta, "r") as f:
                             meta = json.load(f)
                         self.last_accuracy_normal = float(meta.get("normal", {}).get("last_accuracy", 0.0))
                         self.last_trained_normal = meta.get("normal", {}).get("last_trained_at")
                         self.last_accuracy_runner = float(meta.get("runner", {}).get("last_accuracy", 0.0))
                         self.last_trained_runner = meta.get("runner", {}).get("last_trained_at")
                         self.max_runner_rr = float(meta.get("runner", {}).get("max_runner_rr", 5.0))
-                        logging.info(f"[RESEARCHER] Metadata loaded: Normal Acc={self.last_accuracy_normal*100:.1f}%, Runner Acc={self.last_accuracy_runner*100:.1f}%, Max Runner RR={self.max_runner_rr:.1f}R")
+                        logging.info(f"[RESEARCHER-{self.symbol}] Metadata loaded: Normal Acc={self.last_accuracy_normal*100:.1f}%, Runner Acc={self.last_accuracy_runner*100:.1f}%, Max Runner RR={self.max_runner_rr:.1f}R")
                     except Exception as em:
-                        logging.warning(f"Gagal membaca models_metadata.json: {em}")
+                        logging.warning(f"Gagal membaca metadata {target_meta}: {em}")
+
 
                 logging.info("Model checkpoints loaded successfully.")
                 return True
@@ -262,13 +329,17 @@ class ResearcherAgent:
                             sample_weights[i] = 0.1
 
                 if not pnl_df.empty:
-                    if 'time' in df.columns:
-                        df_time_floor = pd.to_datetime(df['time']).dt.floor('Min')
-                    else:
-                        df_time_floor = pd.to_datetime(df.index).floor('Min')
-                    pnl_time_floor = pnl_df['time'].dt.floor('Min')
-                    for pnl_idx, pnl_row in pnl_df.iterrows():
-                        match_idx = np.where(df_time_floor == pnl_time_floor[pnl_idx])[0]
+                    df_times = pd.to_datetime(df['time'] if 'time' in df.columns else df.index)
+                    if hasattr(df_times, 'dt') and hasattr(df_times.dt, 'tz') and df_times.dt.tz is not None:
+                        df_times = df_times.dt.tz_localize(None)
+                    df_time_floor = df_times.dt.floor('min') if hasattr(df_times, 'dt') else df_times.floor('min')
+                    
+                    for _, pnl_row in pnl_df.iterrows():
+                        p_time = pd.to_datetime(pnl_row['time'])
+                        if hasattr(p_time, 'tzinfo') and p_time.tzinfo is not None:
+                            p_time = p_time.tz_localize(None)
+                        p_time_floor = p_time.floor('min')
+                        match_idx = np.where(df_time_floor == p_time_floor)[0]
                         if len(match_idx) > 0:
                             idx = match_idx[0]
                             if pnl_row['profit'] < 0:
@@ -399,13 +470,17 @@ class ResearcherAgent:
                             sample_weights[i] = 0.1
 
                 if not pnl_df.empty:
-                    if 'time' in df.columns:
-                        df_time_floor = pd.to_datetime(df['time']).dt.floor('Min')
-                    else:
-                        df_time_floor = pd.to_datetime(df.index).floor('Min')
-                    pnl_time_floor = pnl_df['time'].dt.floor('Min')
-                    for pnl_idx, pnl_row in pnl_df.iterrows():
-                        match_idx = np.where(df_time_floor == pnl_time_floor[pnl_idx])[0]
+                    df_times = pd.to_datetime(df['time'] if 'time' in df.columns else df.index)
+                    if hasattr(df_times, 'dt') and hasattr(df_times.dt, 'tz') and df_times.dt.tz is not None:
+                        df_times = df_times.dt.tz_localize(None)
+                    df_time_floor = df_times.dt.floor('min') if hasattr(df_times, 'dt') else df_times.floor('min')
+                    
+                    for _, pnl_row in pnl_df.iterrows():
+                        p_time = pd.to_datetime(pnl_row['time'])
+                        if hasattr(p_time, 'tzinfo') and p_time.tzinfo is not None:
+                            p_time = p_time.tz_localize(None)
+                        p_time_floor = p_time.floor('min')
+                        match_idx = np.where(df_time_floor == p_time_floor)[0]
                         if len(match_idx) > 0:
                             idx = match_idx[0]
                             if pnl_row['profit'] < 0:
@@ -585,9 +660,10 @@ class ResearcherAgent:
         """
         Membaca skor probabilitas seketika (live) dari model yang telah dilatih
         (Digunakan untuk pemicu Dynamic Exhaustion Exit & Entry Signal).
+        Mendukung evaluasi mandiri (Normal tetap aktif meski Runner belum dilatih, dan sebaliknya).
         """
-        if self.model_normal is None or self.model_runner is None:
-            return {"normal_buy": 0.0, "normal_sell": 0.0, "runner_buy": 0.0, "runner_sell": 0.0}
+        if self.model_normal is None and self.model_runner is None:
+            return {"normal_buy": 0.0, "normal_sell": 0.0, "runner_buy": 0.0, "runner_sell": 0.0, "normal": 0.0, "runner": 0.0}
 
         # Filter kolom fitur yang valid
         if isinstance(X_live, pd.Series):
@@ -595,32 +671,37 @@ class ResearcherAgent:
             
         valid_cols = [c for c in self.features if c in X_live.columns]
         if not valid_cols:
-            return {"normal_buy": 0.0, "normal_sell": 0.0, "runner_buy": 0.0, "runner_sell": 0.0}
+            return {"normal_buy": 0.0, "normal_sell": 0.0, "runner_buy": 0.0, "runner_sell": 0.0, "normal": 0.0, "runner": 0.0}
 
         try:
             X_eval = X_live[valid_cols]
-            probs_n = self.model_normal.predict_proba(X_eval)[0]
-            probs_r = self.model_runner.predict_proba(X_eval)[0]
-            
-            # Support untuk Multiclass (3 kelas: 0=Fail, 1=Buy, 2=Sell)
-            if len(probs_n) >= 3:
-                pn_buy, pn_sell = float(probs_n[1]), float(probs_n[2])
-            else:
-                pn_buy = float(probs_n[1]) if len(probs_n) > 1 else 0.0
-                pn_sell = 0.0
-                
-            if len(probs_r) >= 3:
-                pr_buy, pr_sell = float(probs_r[1]), float(probs_r[2])
-            else:
-                pr_buy = float(probs_r[1]) if len(probs_r) > 1 else 0.0
-                pr_sell = 0.0
+            pn_buy, pn_sell = 0.0, 0.0
+            pr_buy, pr_sell = 0.0, 0.0
+
+            if self.model_normal is not None:
+                probs_n = self.model_normal.predict_proba(X_eval)[0]
+                classes_n = list(getattr(self.model_normal, 'classes_', [0, 1, 2]))
+                idx_n_b = classes_n.index(1) if 1 in classes_n else -1
+                idx_n_s = classes_n.index(2) if 2 in classes_n else -1
+                pn_buy = float(probs_n[idx_n_b]) if idx_n_b != -1 and idx_n_b < len(probs_n) else 0.0
+                pn_sell = float(probs_n[idx_n_s]) if idx_n_s != -1 and idx_n_s < len(probs_n) else 0.0
+
+            if self.model_runner is not None:
+                probs_r = self.model_runner.predict_proba(X_eval)[0]
+                classes_r = list(getattr(self.model_runner, 'classes_', [0, 1, 2]))
+                idx_r_b = classes_r.index(1) if 1 in classes_r else -1
+                idx_r_s = classes_r.index(2) if 2 in classes_r else -1
+                pr_buy = float(probs_r[idx_r_b]) if idx_r_b != -1 and idx_r_b < len(probs_r) else 0.0
+                pr_sell = float(probs_r[idx_r_s]) if idx_r_s != -1 and idx_r_s < len(probs_r) else 0.0
 
             return {
                 "normal_buy": pn_buy, 
                 "normal_sell": pn_sell,
                 "runner_buy": pr_buy, 
-                "runner_sell": pr_sell
+                "runner_sell": pr_sell,
+                "normal": max(pn_buy, pn_sell),
+                "runner": max(pr_buy, pr_sell)
             }
         except Exception as e:
             logging.debug(f"Gagal kalkulasi live probabilities: {e}")
-            return {"normal_buy": 0.0, "normal_sell": 0.0, "runner_buy": 0.0, "runner_sell": 0.0}
+            return {"normal_buy": 0.0, "normal_sell": 0.0, "runner_buy": 0.0, "runner_sell": 0.0, "normal": 0.0, "runner": 0.0}

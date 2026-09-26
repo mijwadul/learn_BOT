@@ -15,6 +15,7 @@ from api.routers import (
     rlhf_router,
     journal_router,
     websockets_router,
+    pairs_router,
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -58,6 +59,8 @@ app.include_router(macro_router)
 app.include_router(rlhf_router)
 app.include_router(journal_router)
 app.include_router(websockets_router)
+app.include_router(pairs_router)
+
 
 if __name__ == "__main__":
     import uvicorn

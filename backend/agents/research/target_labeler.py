@@ -85,25 +85,49 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0) -> pd.DataFra
         if not eval_buy and not eval_sell:
             continue
 
-        # Slide 20 & 21: Titik Entry adalah di level batas zona LWMA Re-entry (MA 5 / MA 10)
-        entry_buy = lwma_low_zone[i]
-        entry_sell = lwma_high_zone[i]
+        # Realistis: Entry pada candle close konfirmasi (bukan retroaktif fill di dasar/ujung shadow)
+        entry_buy = closes[i]
+        entry_sell = closes[i]
         
-        # Proteksi SL adaptif ATR (minimal 0.5 poin untuk Gold M1)
-        sl_dist = max(float(atrs[i]), 0.5)
+        atr_i = float(atrs[i]) if atrs[i] > 0 else 0.001
+        min_sl = 0.5 * atr_i
+        max_sl = 2.5 * atr_i
+        lookback_idx = max(0, i - 9)
+
+        # Dynamic Structural SL untuk BUY (Berdasarkan Support & Setup Invalidation)
+        recent_low = float(np.min(lows[lookback_idx:i+1]))
+        buy_supports = [recent_low]
+        if ema_50_vals[i] > 0 and ema_50_vals[i] < entry_buy:
+            buy_supports.append(float(ema_50_vals[i]))
+        if sma_20_vals[i] > 0 and sma_20_vals[i] < entry_buy:
+            buy_supports.append(float(sma_20_vals[i]))
+        support_level = min(buy_supports)
+        raw_sl_buy = (entry_buy - support_level) + (0.2 * atr_i)
+        sl_dist_buy = max(min_sl, min(max_sl, raw_sl_buy))
+
+        # Dynamic Structural SL untuk SELL (Berdasarkan Resistance & Setup Invalidation)
+        recent_high = float(np.max(highs[lookback_idx:i+1]))
+        sell_resists = [recent_high]
+        if ema_50_vals[i] > entry_sell:
+            sell_resists.append(float(ema_50_vals[i]))
+        if sma_20_vals[i] > entry_sell:
+            sell_resists.append(float(sma_20_vals[i]))
+        resist_level = max(sell_resists)
+        raw_sl_sell = (resist_level - entry_sell) + (0.2 * atr_i)
+        sl_dist_sell = max(min_sl, min(max_sl, raw_sl_sell))
         
-        # Target Normal: Tetap RR murni 1:2 (TP 2x SL, SL 1x SL)
-        tp_buy_normal = entry_buy + (sl_dist * 2.0)
-        sl_buy_normal = entry_buy - sl_dist
-        tp_sell_normal = entry_sell - (sl_dist * 2.0)
-        sl_sell_normal = entry_sell + sl_dist
+        # Target Normal: Tetap RR murni 1:2
+        tp_buy_normal = entry_buy + (sl_dist_buy * 2.0)
+        sl_buy_normal = entry_buy - sl_dist_buy
+        tp_sell_normal = entry_sell - (sl_dist_sell * 2.0)
+        sl_sell_normal = entry_sell + sl_dist_sell
         
         # Target Runner: RR dinamis
         runner_rr = max_runner_rr
-        tp_buy_runner = entry_buy + (sl_dist * runner_rr)
-        sl_buy_runner = entry_buy - sl_dist
-        tp_sell_runner = entry_sell - (sl_dist * runner_rr)
-        sl_sell_runner = entry_sell + sl_dist
+        tp_buy_runner = entry_buy + (sl_dist_buy * runner_rr)
+        sl_buy_runner = entry_buy - sl_dist_buy
+        tp_sell_runner = entry_sell - (sl_dist_sell * runner_rr)
+        sl_sell_runner = entry_sell + sl_dist_sell
 
         # 1. Evaluasi Setup BUY (Triple Barrier Method Murni)
         if eval_buy:

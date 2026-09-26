@@ -8,15 +8,75 @@ from ..dependencies import bot
 
 router = APIRouter(tags=["Strategies & Training"])
 
+from typing import Optional
+import os
+import json
+from pathlib import Path
+
 class ModeRequest(BaseModel):
     mode: str
 
 class TrainRequest(BaseModel):
     type: str # 'full' or 'incremental'
     mode: str # 'normal' or 'runner'
+    symbol: Optional[str] = "XAUUSD"
+
+class ResetModelRequest(BaseModel):
+    symbol: Optional[str] = "XAUUSD"
 
 class MicroTrainRequest(BaseModel):
     mode: str = "all" # "normal", "runner", or "all"
+
+@router.get("/api/strategies/status")
+async def get_strategy_model_status(symbol: Optional[str] = "XAUUSD"):
+    """Mengembalikan status model dan akurasi khusus untuk pair tertentu dari disk/memory."""
+    sym = (symbol or "XAUUSD").upper()
+    meta_path = Path("models") / sym / "models_metadata.json"
+    norm_pkl = Path("models") / sym / "model_normal.pkl"
+    run_pkl = Path("models") / sym / "model_runner.pkl"
+
+    meta = {}
+    if meta_path.exists():
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+        except Exception:
+            pass
+
+    # Jika sedang melatih pair yang sama di in-memory bot
+    is_same_pair = (getattr(bot.researcher, "symbol", "XAUUSD").upper() == sym)
+    
+    norm_meta = meta.get("normal", {})
+    run_meta = meta.get("runner", {})
+
+    last_acc_normal = bot.researcher.last_accuracy_normal if is_same_pair else float(norm_meta.get("last_accuracy", 0.0))
+    last_acc_runner = bot.researcher.last_accuracy_runner if is_same_pair else float(run_meta.get("last_accuracy", 0.0))
+    last_train_normal = bot.researcher.last_trained_normal if is_same_pair else norm_meta.get("last_trained_at")
+    last_train_runner = bot.researcher.last_trained_runner if is_same_pair else run_meta.get("last_trained_at")
+
+    normal_trained = (bot.researcher.model_normal is not None if is_same_pair else (norm_pkl.exists() or norm_meta.get("trained", False)))
+    runner_trained = (bot.researcher.model_runner is not None if is_same_pair else (run_pkl.exists() or run_meta.get("trained", False)))
+
+    return {
+        "status": "success",
+        "symbol": sym,
+        "models_status": {
+            "normal": {
+                "trained": normal_trained,
+                "status": "LIVE/LAYAK" if last_acc_normal >= 0.50 else "IDLE/QUARANTINE",
+                "is_training": bot.researcher.is_training_normal if is_same_pair else False,
+                "last_accuracy": last_acc_normal,
+                "last_trained": last_train_normal
+            },
+            "runner": {
+                "trained": runner_trained,
+                "status": "LIVE/LAYAK" if last_acc_runner >= 0.25 else "IDLE/QUARANTINE",
+                "is_training": bot.researcher.is_training_runner if is_same_pair else False,
+                "last_accuracy": last_acc_runner,
+                "last_trained": last_train_runner
+            }
+        }
+    }
 
 @router.post("/api/strategies/force_live")
 async def force_live(req: ModeRequest):
@@ -32,24 +92,30 @@ async def quarantine(req: ModeRequest):
 
 @router.post("/api/strategies/train")
 async def train_model(req: TrainRequest):
+    target_symbol = (req.symbol or "XAUUSD").upper()
+
     def _train_task():
         try:
-            logging.info(f"Memulai pelatihan AI ({req.type}) untuk {req.mode} Mode...")
+            logging.info(f"Memulai pelatihan AI ({req.type}) untuk {target_symbol} - {req.mode} Mode...")
 
-            total_chunks, data_generator = bot.data_miner.load_train_chunks(chunk_size=100000, mode=req.mode)
+            # Sinkronkan target symbol ke miner dan researcher
+            bot.data_miner.set_symbol(target_symbol)
+            bot.researcher.set_symbol(target_symbol)
+
+            total_chunks, data_generator = bot.data_miner.load_train_chunks(chunk_size=100000, mode=req.mode, symbol=target_symbol)
             if total_chunks == 0 or data_generator is None:
-                logging.warning("⚠️ Training dibatalkan: Database market_data kosong. Jalankan Force Backfill MT5 terlebih dahulu.")
+                logging.warning(f"⚠️ Training dibatalkan: Database {bot.data_miner.table_name} kosong. Jalankan Force Backfill MT5 terlebih dahulu.")
                 return
                 
-            total_test_chunks, test_generator = bot.data_miner.load_test_chunks(chunk_size=100000)
+            total_test_chunks, test_generator = bot.data_miner.load_test_chunks(chunk_size=100000, symbol=target_symbol)
 
             if req.type == 'full':
                 if req.mode == 'normal':
                     bot.researcher.model_normal = None
-                    logging.info("[FULL TRAIN] Model Normal di-reset. Melatih dari awal...")
+                    logging.info(f"[FULL TRAIN - {target_symbol}] Model Normal di-reset. Melatih dari awal...")
                 elif req.mode == 'runner':
                     bot.researcher.model_runner = None
-                    logging.info("[FULL TRAIN] Model Runner di-reset. Melatih dari awal...")
+                    logging.info(f"[FULL TRAIN - {target_symbol}] Model Runner di-reset. Melatih dari awal...")
 
             if req.mode == 'normal':
                 bot.researcher.is_training_normal = True
@@ -63,15 +129,15 @@ async def train_model(req: TrainRequest):
                             bot.researcher.save_metadata()
                             if accuracy >= 0.50:
                                 bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
-                                logging.info(f"✅ Model Normal lulus validasi (Win Rate: {accuracy*100:.2f}% >= 50%). Supervisor Normal Mode = VALID.")
+                                logging.info(f"✅ Model Normal ({target_symbol}) lulus validasi (Win Rate: {accuracy*100:.2f}% >= 50%). Supervisor Normal Mode = VALID.")
                             else:
                                 bot.supervisor.set_model_validity(False, bot.supervisor.is_runner_valid())
-                                logging.warning(f"❌ Model Normal gagal validasi (Win Rate: {accuracy*100:.2f}% < 50%). Supervisor Normal Mode = QUARANTINE.")
+                                logging.warning(f"❌ Model Normal ({target_symbol}) gagal validasi (Win Rate: {accuracy*100:.2f}% < 50%). Supervisor Normal Mode = QUARANTINE.")
                         else:
                             bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
                             bot.researcher.last_trained_normal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             bot.researcher.save_metadata()
-                            logging.info("✅ Model Normal dilatih tanpa OOS. Supervisor Normal Mode = VALID.")
+                            logging.info(f"✅ Model Normal ({target_symbol}) dilatih tanpa OOS. Supervisor Normal Mode = VALID.")
                 finally:
                     bot.researcher.is_training_normal = False
             elif req.mode == 'runner':
@@ -187,45 +253,51 @@ async def trigger_validate(req: ValidateRequest = None):
     return {"status": "success", "message": f"Validasi OOS {target_mode.upper()} dimulai di background. Cek Logs untuk progress."}
 
 @router.post("/api/strategies/reset-models")
-async def reset_models():
-    """Menghapus seluruh checkpoint model (.pkl), mengosongkan tabel hard_negatives,
+async def reset_models(req: Optional[ResetModelRequest] = None):
+    """Menghapus checkpoint model (.pkl) untuk pair bersangkutan, mengosongkan tabel hard_negatives,
     dan mengembalikan status model ke awal (Fresh Quantitative Baseline)."""
     import os
     from pathlib import Path
     from database import reset_ai_trade_history
 
+    sym = (req.symbol if req and req.symbol else getattr(bot.researcher, "symbol", "XAUUSD")).upper()
+
     deleted = []
-    # Jalur absolut dan relatif ke direktori models
     backend_dir = Path(__file__).resolve().parent.parent.parent
     candidate_paths = [
-        Path("models/model_normal.pkl"),
-        Path("models/model_runner.pkl"),
-        backend_dir / "models" / "model_normal.pkl",
-        backend_dir / "models" / "model_runner.pkl",
+        Path("models") / sym / "model_normal.pkl",
+        Path("models") / sym / "model_runner.pkl",
+        Path("models") / sym / "models_metadata.json",
+        backend_dir / "models" / sym / "model_normal.pkl",
+        backend_dir / "models" / sym / "model_runner.pkl",
+        backend_dir / "models" / sym / "models_metadata.json",
     ]
+    if sym == "XAUUSD":
+        candidate_paths.extend([
+            Path("models/model_normal.pkl"),
+            Path("models/model_runner.pkl"),
+            backend_dir / "models" / "model_normal.pkl",
+            backend_dir / "models" / "model_runner.pkl",
+        ])
+
     for p in candidate_paths:
         if p.exists():
             try:
                 p.unlink()
-                deleted.append(p.name)
-                logging.info(f"🗑️ [API RESET] Berhasil menghapus file model: {p}")
+                deleted.append(str(p.name))
+                logging.info(f"🗑️ [API RESET - {sym}] Berhasil menghapus file model: {p}")
             except Exception as e:
                 logging.warning(f"Gagal menghapus {p}: {e}")
 
-    # Reset in-memory state Researcher & Supervisor
-    bot.researcher.model_normal = None
-    bot.researcher.model_runner = None
-    bot.researcher.last_accuracy_normal = 0.0
-    bot.researcher.last_accuracy_runner = 0.0
-    bot.researcher.last_trained_normal = "Never"
-    bot.researcher.last_trained_runner = "Never"
-    bot.supervisor.set_model_validity(False, False)
-
-    # Reset metadata file
-    try:
-        bot.researcher.save_metadata()
-    except Exception as e_m:
-        logging.warning(f"Gagal menyimpan metadata model reset: {e_m}")
+    # Reset in-memory state Researcher & Supervisor jika sedang mengelola pair ini
+    if getattr(bot.researcher, "symbol", "XAUUSD").upper() == sym:
+        bot.researcher.model_normal = None
+        bot.researcher.model_runner = None
+        bot.researcher.last_accuracy_normal = 0.0
+        bot.researcher.last_accuracy_runner = 0.0
+        bot.researcher.last_trained_normal = "Never"
+        bot.researcher.last_trained_runner = "Never"
+        bot.supervisor.set_model_validity(False, False)
 
     # Truncate tabel hard_negatives
     cleared_hn = 0
@@ -237,8 +309,10 @@ async def reset_models():
 
     return {
         "status": "success",
-        "message": "Fresh Quantitative Baseline aktif: Seluruh model lama (.pkl), metadata, dan hard_negatives berhasil di-reset.",
+        "symbol": sym,
+        "message": f"Fresh Quantitative Baseline ({sym}) aktif: Seluruh model (.pkl), metadata di models/{sym}/ berhasil di-reset.",
         "deleted_files": list(set(deleted)),
         "cleared_hard_negatives": cleared_hn,
     }
+
 

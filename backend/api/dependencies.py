@@ -64,11 +64,21 @@ class BotState:
         self.is_live = False
         self.active_since = None
         self.mt5_connected = False
+        self.active_symbol = "XAUUSD"
+        self.active_pairs = ["XAUUSD"]
+        try:
+            if os.path.exists("registered_pairs.json"):
+                with open("registered_pairs.json", "r") as f:
+                    reg = json.load(f)
+                    if isinstance(reg, list) and reg:
+                        self.active_pairs = [str(p).upper() for p in reg if str(p).strip()]
+        except Exception:
+            pass
         
         # Initialize Agents
         self.supervisor = SupervisorAgent()
         self.data_miner = DataMinerAgent(symbol=Config.SYMBOL)
-        self.researcher = ResearcherAgent()
+        self.researcher = ResearcherAgent(symbol="XAUUSD")
         self.gatekeeper = GatekeeperAgent(self.researcher)
         self.executor = ExecutorAgent(
             self.supervisor,
@@ -123,12 +133,12 @@ class BotState:
                 logging.info("Successfully connected to MT5.")
                 self.mt5_connected = True
 
-                from utils.mt5_utils import detect_gold_symbol
-                resolved_symbol = detect_gold_symbol(Config.SYMBOL)
+                from utils.mt5_utils import resolve_broker_symbol
+                resolved_symbol = resolve_broker_symbol(Config.SYMBOL)
                 Config.SYMBOL = resolved_symbol
                 if hasattr(self, 'data_miner') and self.data_miner is not None:
-                    self.data_miner.symbol = resolved_symbol
-                logging.info(f"🎯 [SMART SYMBOL] Instrumen Gold aktif terdeteksi: {Config.SYMBOL}")
+                    self.data_miner.set_symbol(resolved_symbol)
+                logging.info(f"🎯 [SMART SYMBOL] Instrumen aktif terdeteksi: {Config.SYMBOL}")
 
                 self.executor.data_miner = self.data_miner
                 self.executor.researcher = self.researcher
@@ -138,13 +148,13 @@ class BotState:
                 if Config.SYMBOL == "AUTO":
                     Config.SYMBOL = "XAUUSDm"
                     if hasattr(self, 'data_miner') and self.data_miner is not None:
-                        self.data_miner.symbol = Config.SYMBOL
+                        self.data_miner.set_symbol(Config.SYMBOL)
         except Exception as e:
             logging.error(f"MT5 initialization error: {e}")
             self.mt5_connected = False
             if Config.SYMBOL == "AUTO":
                 Config.SYMBOL = "XAUUSDm"
                 if hasattr(self, 'data_miner') and self.data_miner is not None:
-                    self.data_miner.symbol = Config.SYMBOL
+                    self.data_miner.set_symbol(Config.SYMBOL)
 
 bot = BotState()

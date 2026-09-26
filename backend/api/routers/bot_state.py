@@ -55,11 +55,11 @@ async def get_state():
                 portfolio_value = acc.balance
                 equity = acc.equity
                 
-            positions = await asyncio.to_thread(mt5.positions_get, symbol=Config.SYMBOL)
+            positions = await asyncio.to_thread(mt5.positions_get)
             if positions:
                 for p in positions:
                     open_positions.append({
-                        "symbol": Config.SYMBOL,
+                        "symbol": p.symbol,
                         "ticket": p.ticket,
                         "type": "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
                         "volume": p.volume,
@@ -73,9 +73,13 @@ async def get_state():
             pass
 
     # Sinkronisasi metadata akurasi persisten jika perlu
-    if (bot.researcher.last_accuracy_normal == 0.0 or bot.researcher.last_accuracy_runner == 0.0) and os.path.exists("models/models_metadata.json"):
+    target_sym = getattr(bot.researcher, "symbol", "XAUUSD")
+    meta_path = f"models/{target_sym}/models_metadata.json"
+    if not os.path.exists(meta_path):
+        meta_path = "models/models_metadata.json"
+    if (bot.researcher.last_accuracy_normal == 0.0 or bot.researcher.last_accuracy_runner == 0.0) and os.path.exists(meta_path):
         try:
-            with open("models/models_metadata.json", "r") as _mf:
+            with open(meta_path, "r") as _mf:
                 _meta = json.load(_mf)
             if bot.researcher.last_accuracy_normal == 0.0:
                 bot.researcher.last_accuracy_normal = float(_meta.get("normal", {}).get("last_accuracy", 0.0))
@@ -98,7 +102,8 @@ async def get_state():
         "is_live": bot.is_live,
         "active_since": bot.active_since,
         "mt5_connected": bot.mt5_connected,
-        "active_symbol": Config.SYMBOL,
+        "active_symbol": getattr(bot, "active_symbol", "XAUUSD"),
+        "active_pairs": getattr(bot, "active_pairs", ["XAUUSD"]),
         "supervisor_state": bot.supervisor.state,
         "performance": {
             "win_rate": win_rate,
@@ -130,6 +135,10 @@ async def get_state():
         },
         "market_regime": getattr(bot.executor, 'current_market_regime', {"adx": 0.0, "regime": "UNKNOWN"}),
         "latest_probabilities": getattr(bot.executor, 'latest_probs', {}),
+        "online_learning": {
+            "enabled": getattr(Config, 'ENABLE_ONLINE_LEARNING', True),
+            "last_retrain": getattr(bot.executor, 'last_micro_retrain_time', None)
+        },
         "next_high_impact_news": next_high_impact_news
     }
 
@@ -189,10 +198,10 @@ async def emergency_stop():
     closed_orders = 0
     if bot.mt5_connected:
         try:
-            positions = await asyncio.to_thread(mt5.positions_get, symbol=Config.SYMBOL)
+            positions = await asyncio.to_thread(mt5.positions_get)
             if positions:
                 for p in positions:
-                    bot.executor.order_router.execute_full_close(p.ticket, "EMERGENCY_STOP", Config.SYMBOL)
+                    bot.executor.order_router.execute_full_close(p.ticket, "EMERGENCY_STOP", p.symbol)
                     closed_orders += 1
         except Exception as e:
             logging.error(f"Error during emergency liquidations: {e}")

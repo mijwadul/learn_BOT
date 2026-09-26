@@ -12,6 +12,7 @@ from .models.macro import EconomicEvent
 from .migrations import ensure_schema_migrations
 
 from .repositories.market_repo import (
+    get_market_table_name,
     get_db_size,
     get_db_date_range,
     fetch_historical_data_chunks,
@@ -72,6 +73,7 @@ __all__ = [
     "EconomicEvent",
     "init_db",
     "ensure_schema_migrations",
+    "get_market_table_name",
     "get_db_size",
     "get_db_date_range",
     "fetch_historical_data_chunks",

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Settings2, RotateCcw, Loader2 } from "lucide-react";
+import { Settings2, RotateCcw, Loader2, Brain, Layers, FolderCheck } from "lucide-react";
 import { getApiBaseUrl } from "@/config";
 import { useToast } from "@/components/ui/Toast";
 import { RiskManagementCard } from "@/components/strategies/RiskManagementCard";
@@ -15,25 +15,54 @@ export default function StrategiesPage() {
   const [loading, setLoading] = useState(false);
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
   const [portfolioEquity, setPortfolioEquity] = useState(1000);
+  const [pairs, setPairs] = useState<any[]>([{ symbol: "XAUUSD" }]);
+  const [selectedPair, setSelectedPair] = useState<string>("XAUUSD");
   const [modelsStatus, setModelsStatus] = useState({
-    normal: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0 },
-    runner: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0 },
+    normal: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0, last_trained: null },
+    runner: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0, last_trained: null },
   });
 
+  // Fetch list of registered pairs
+  const fetchPairs = async () => {
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/pairs`);
+      const data = await res.json();
+      if (data.status === "success" && data.pairs) {
+        setPairs(data.pairs);
+      }
+    } catch (err) {
+      console.error("Failed to fetch pairs in strategies", err);
+    }
+  };
+
+  const fetchStrategyStatus = async (sym = selectedPair) => {
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/strategies/status?symbol=${sym}`);
+      const data = await res.json();
+      if (data.status === "success" && data.models_status) {
+        setModelsStatus(data.models_status);
+      }
+    } catch (err) {
+      console.error("Failed to fetch strategy status", err);
+    }
+  };
+
   useEffect(() => {
-    const fetchStatus = () => {
-      fetch(`${getApiBaseUrl()}/api/state`)
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.models_status) setModelsStatus(data.models_status);
-          if (data.portfolio?.equity) setPortfolioEquity(data.portfolio.equity);
-        })
-        .catch((err) => console.error(err));
-    };
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 3000);
-    return () => clearInterval(interval);
+    fetchPairs();
+    // Ambil equity portfolio
+    fetch(`${getApiBaseUrl()}/api/state`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.portfolio?.equity) setPortfolioEquity(data.portfolio.equity);
+      })
+      .catch((err) => console.error(err));
   }, []);
+
+  useEffect(() => {
+    fetchStrategyStatus(selectedPair);
+    const interval = setInterval(() => fetchStrategyStatus(selectedPair), 3000);
+    return () => clearInterval(interval);
+  }, [selectedPair]);
 
   const handleForceMode = async (mode: string, action: "force_live" | "quarantine") => {
     setLoading(true);
@@ -59,10 +88,10 @@ export default function StrategiesPage() {
       const res = await fetch(`${getApiBaseUrl()}/api/strategies/train`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, type }),
+        body: JSON.stringify({ mode, type, symbol: selectedPair }),
       });
       const data = await res.json();
-      toast.success(data.message, `${type.toUpperCase()} Training`);
+      toast.success(data.message || `Pelatihan ${mode} untuk ${selectedPair} dimulai.`, `${type.toUpperCase()} Training (${selectedPair})`);
     } catch {
       toast.error("Gagal memicu pelatihan model.", "Error");
     } finally {
@@ -75,19 +104,22 @@ export default function StrategiesPage() {
     try {
       const res = await fetch(`${getApiBaseUrl()}/api/strategies/reset-models`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: selectedPair })
       });
       const data = await res.json();
       toast.success(
-        data.message || "Seluruh model lama, metadata, dan hard_negatives berhasil di-reset.",
-        "Model Baseline Reset"
+        data.message || `Seluruh model lama di models/${selectedPair}/ berhasil di-reset.`,
+        `Reset Otak ${selectedPair}`
       );
       setModelsStatus({
-        normal: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0 },
-        runner: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0 },
+        normal: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0, last_trained: null },
+        runner: { trained: false, status: "IDLE/QUARANTINE", is_training: false, last_accuracy: 0.0, last_trained: null },
       });
       setIsResetModalOpen(false);
+      fetchPairs();
     } catch {
-      toast.error("Gagal mereset model ke baseline baru.", "Error");
+      toast.error(`Gagal mereset model ${selectedPair}.`, "Error");
     } finally {
       setLoading(false);
     }
@@ -96,29 +128,70 @@ export default function StrategiesPage() {
   return (
     <div className="p-4 sm:p-6 md:p-8 flex flex-col min-h-full">
       {/* Page Header */}
-      <div className="mb-6 shrink-0 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="mb-4 shrink-0 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight flex items-center gap-3">
             <Settings2 className="text-brand-green w-7 h-7" />
             Strategies &amp; AI Incubator
           </h1>
           <p className="text-xs sm:text-sm text-white/50 mt-1">
-            Manajemen risiko transaksi, pelatihan mandiri LightGBM, dan validasi kurasi RLHF
+            Manajemen risiko transaksi, pelatihan mandiri LightGBM (Isolated Brain per Pair), dan validasi kurasi RLHF.
           </p>
         </div>
         <button
           onClick={() => setIsResetModalOpen(true)}
           disabled={loading}
           className="self-start sm:self-auto px-4 py-2.5 rounded-xl text-xs font-bold text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
-          title="Hapus file .pkl lama, bersihkan hard_negatives, dan reset model ke baseline baru"
+          title={`Hapus file .pkl di models/${selectedPair}/ dan reset otak ${selectedPair}`}
         >
           {loading ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
           ) : (
             <RotateCcw className="w-3.5 h-3.5" />
           )}
-          {loading ? "Mereset..." : "Reset Models & Baseline"}
+          {loading ? "Mereset..." : `Reset Otak (${selectedPair})`}
         </button>
+      </div>
+
+      {/* Brain Pair Selector Bar */}
+      <div className="mb-6 p-3.5 rounded-2xl bg-black/40 border border-white/10 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 overflow-x-auto py-1">
+          <span className="text-xs font-semibold text-white/50 uppercase tracking-wider mr-1 flex items-center gap-1.5">
+            <Brain size={16} className="text-brand-green" /> Pilih Otak Pair:
+          </span>
+          {(pairs.length > 0 ? pairs.map(p => p.symbol) : ["XAUUSD"]).map((sym) => {
+            const isSelected = selectedPair === sym;
+            const pairData = pairs.find(p => p.symbol === sym);
+            const isTrained = pairData?.has_normal_model || pairData?.has_runner_model;
+            return (
+              <button
+                key={sym}
+                onClick={() => setSelectedPair(sym)}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                  isSelected
+                    ? "bg-brand-green text-black shadow-lg shadow-brand-green/30 border border-brand-green"
+                    : "bg-white/5 hover:bg-white/10 text-white/70 border border-white/5"
+                }`}
+              >
+                <span>{sym}</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-semibold ${
+                  isSelected 
+                    ? "bg-black/20 text-black font-bold" 
+                    : isTrained 
+                    ? "bg-brand-green/20 text-brand-green border border-brand-green/40" 
+                    : "bg-white/10 text-white/40"
+                }`}>
+                  {isTrained ? "Trained" : "Untrained"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center gap-2 text-xs text-white/40">
+          <FolderCheck size={14} className="text-brand-green" />
+          <span>Folder Otak: <strong className="text-white/80 font-mono">models/{selectedPair}/</strong></span>
+        </div>
       </div>
 
       {/* 1. Risk Management Card Component */}
@@ -128,14 +201,21 @@ export default function StrategiesPage() {
       <AiEntryThresholdCard />
 
       {/* 3. Model Status & Control Grid Component */}
-      <ModelStatusGrid
-        modelsStatus={modelsStatus}
-        loading={loading}
-        onTrain={handleTrainMode}
-        onForceMode={handleForceMode}
-      />
+      <div className="mb-2">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <Brain size={16} className="text-brand-green" /> Status &amp; Kontrol Pelatihan Otak ({selectedPair})
+          </h2>
+        </div>
+        <ModelStatusGrid
+          modelsStatus={modelsStatus}
+          loading={loading}
+          onTrain={handleTrainMode}
+          onForceMode={handleForceMode}
+        />
+      </div>
 
-      {/* 3. RLHF Review Queue Component */}
+      {/* 4. RLHF Review Queue Component */}
       <RlhfReviewQueue />
 
       {/* Custom Confirmation Modal */}
@@ -143,9 +223,9 @@ export default function StrategiesPage() {
         isOpen={isResetModalOpen}
         onClose={() => !loading && setIsResetModalOpen(false)}
         onConfirm={handleConfirmResetModels}
-        title="Konfirmasi Reset Model & Baseline"
-        description="Tindakan ini akan menghapus file model LightGBM (.pkl), membersihkan seluruh tabel hard_negatives, dan mengembalikan model ke status baseline baru (Untrained/Clean). Lanjutkan?"
-        confirmText="Reset Baseline"
+        title={`Konfirmasi Reset Otak ${selectedPair}`}
+        description={`Tindakan ini hanya akan menghapus file model LightGBM (.pkl) di dalam subfolder models/${selectedPair}/ dan membersihkan hard_negatives. Otak pair lainnya (seperti XAUUSD atau pair lain) TIDAK AKAN terhapus. Lanjutkan?`}
+        confirmText={`Reset Otak ${selectedPair}`}
         cancelText="Batal"
         variant="warning"
         isLoading={loading}

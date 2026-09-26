@@ -49,48 +49,73 @@ def check_spread(symbol):
 def shutdown_mt5():
     mt5.shutdown()
 
-def detect_gold_symbol(preferred_symbol="AUTO"):
-    """
-    Cerdas mendeteksi symbol Gold yang aktif/tersedia di broker MT5.
-    Mendukung XAUUSD, XAUUSDm, XAUUSDc, GOLD, XAUUSD.a, dsb.
-    """
-    # 1. Jika user menetapkan symbol spesifik selain "AUTO"
-    if preferred_symbol and str(preferred_symbol).upper() != "AUTO":
-        info = mt5.symbol_info(preferred_symbol)
-        if info is not None:
-            mt5.symbol_select(preferred_symbol, True)
-            return preferred_symbol
+import re
 
-    # 2. Prioritas pengecekan kandidat umum di berbagai broker (Exness, IC Markets, XM, dsb)
-    candidates = [
-        "XAUUSD", "XAUUSDm", "XAUUSDc", "XAUUSD.a", "XAUUSD+", "XAUUSD.pro", 
-        "GOLD", "GOLDm", "GOLDc", "XAUUSDmicro"
-    ]
-    for sym in candidates:
-        info = mt5.symbol_info(sym)
-        if info is not None:
-            mt5.symbol_select(sym, True)
-            return sym
+# Kamus alias umum broker
+SYMBOL_ALIASES = {
+    "XAUUSD": ["XAUUSD", "GOLD"],
+    "XAGUSD": ["XAGUSD", "SILVER"],
+    "BTCUSD": ["BTCUSD", "BTCUSDT", "BITCOIN"],
+    "ETHUSD": ["ETHUSD", "ETHUSDT", "ETHEREUM"],
+}
 
-    # 3. Cari dari seluruh katalog simbol di MT5 yang mengandung kata XAUUSD atau GOLD
+def resolve_broker_symbol(canonical_symbol="XAUUSD"):
+    """
+    Universal Smart Symbol Resolver:
+    Menerima Canonical Symbol (misal: 'XAUUSD', 'EURUSD', 'GBPUSD')
+    dan otomatis mencari simbol broker di MT5 terlepas dari akhiran/suffix
+    (misal: XAUUSDm, XAUUSDc, XAUUSD.pro, XAUUSD+, XAUUSDmicro, dsb).
+    """
+    if not canonical_symbol or str(canonical_symbol).upper() == "AUTO":
+        canonical_symbol = "XAUUSD"
+
+    clean_target = str(canonical_symbol).upper().strip()
+
+    # 1. Exact match langsung di MT5
+    info = mt5.symbol_info(clean_target)
+    if info is not None:
+        mt5.symbol_select(clean_target, True)
+        return clean_target
+
+    # 2. Cari alias jika ada
+    search_roots = SYMBOL_ALIASES.get(clean_target, [clean_target])
+
+    # 3. Pindai katalog MT5
     try:
         all_symbols = mt5.symbols_get()
         if all_symbols:
+            candidates = []
             for s in all_symbols:
-                name_upper = s.name.upper()
-                if "XAUUSD" in name_upper:
-                    mt5.symbol_select(s.name, True)
-                    return s.name
-            for s in all_symbols:
-                name_upper = s.name.upper()
-                if "GOLD" in name_upper and not any(m in name_upper for m in ["MAR", "JUN", "SEP", "DEC"]):
-                    mt5.symbol_select(s.name, True)
-                    return s.name
-    except Exception as e:
-        print(f"[detect_gold_symbol] Gagal memindai katalog MT5: {e}")
+                s_name = s.name
+                s_upper = s_name.upper()
 
-    # Fallback aman
-    return "XAUUSD"
+                for root in search_roots:
+                    pattern = rf"^{root}([._\+a-zA-Z0-9]*)$"
+                    match = re.match(pattern, s_upper)
+                    if match:
+                        suffix = match.group(1)
+                        if root == "GOLD" and any(m in suffix for m in ["MAR", "JUN", "SEP", "DEC", "24", "25", "26"]):
+                            continue
+                        candidates.append({
+                            "name": s_name,
+                            "trade_mode": getattr(s, "trade_mode", 0),
+                            "visible": getattr(s, "visible", False)
+                        })
+
+            if candidates:
+                tradeable = [c for c in candidates if c["trade_mode"] != getattr(mt5, 'SYMBOL_TRADE_MODE_DISABLED', 0)]
+                chosen = tradeable[0]["name"] if tradeable else candidates[0]["name"]
+                mt5.symbol_select(chosen, True)
+                return chosen
+    except Exception as e:
+        print(f"[resolve_broker_symbol] Gagal memindai katalog MT5: {e}")
+
+    return clean_target
+
+def detect_gold_symbol(preferred_symbol="AUTO"):
+    """Backward compatibility wrapper untuk deteksi instrumen Gold."""
+    return resolve_broker_symbol(preferred_symbol if preferred_symbol != "AUTO" else "XAUUSD")
+
 
 def get_symbol_filling_mode(symbol):
     """
@@ -114,16 +139,19 @@ def get_symbol_filling_mode(symbol):
 
 def is_cent_account(symbol=None):
     """
-    Mendeteksi apakah akun atau instrumen merupakan akun Cent (USC / XAUUSDc).
+    Mendeteksi apakah akun atau instrumen merupakan akun Cent (USC / EUC / XAUUSDc).
+    Mencegah false positive pada mata uang dengan huruf 'c' seperti CAD dan CHF.
     """
     if symbol and str(symbol).lower().endswith("c"):
         return True
     try:
         acc = mt5.account_info()
         if acc and acc.currency:
-            curr = str(acc.currency).lower()
-            if "c" in curr or "cent" in curr:
+            curr = str(acc.currency).lower().strip()
+            # Hanya cocokkan kode mata uang sen standar (USC, EUC, GBC) atau yang berakhiran 'cent'/'c'
+            if curr in ["usc", "euc", "gbc"] or curr.endswith("cent") or curr == "cent":
                 return True
     except Exception:
         pass
     return False
+

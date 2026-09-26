@@ -94,13 +94,17 @@ async def get_journal(limit: int = 200, mode: str = None):
         return {"status": "error", "open_positions": [], "journal": [], "trade_logs": [], "performance": {}, "live_feedback": {}}
 
 @router.get("/api/market/candles")
-async def get_market_candles(timeframe: str = "M1", count: int = 200):
+async def get_market_candles(symbol: str = "XAUUSD", timeframe: str = "M1", count: int = 200):
     tf_upper = timeframe.upper()
     tf_const = TIMEFRAME_MAP.get(tf_upper, mt5.TIMEFRAME_M1)
     
+    from utils.mt5_utils import resolve_broker_symbol
+    clean_sym = symbol.strip().upper() if symbol else "XAUUSD"
+    broker_sym = resolve_broker_symbol(clean_sym)
+
     if bot.mt5_connected:
         try:
-            rates = await asyncio.to_thread(mt5.copy_rates_from_pos, Config.SYMBOL, tf_const, 0, count)
+            rates = await asyncio.to_thread(mt5.copy_rates_from_pos, broker_sym, tf_const, 0, count)
             if rates is not None and len(rates) > 0:
                 candles = [
                     {
@@ -112,27 +116,27 @@ async def get_market_candles(timeframe: str = "M1", count: int = 200):
                     }
                     for c in rates
                 ]
-                return {"status": "success", "timeframe": tf_upper, "candles": candles}
+                return {"status": "success", "symbol": clean_sym, "broker_symbol": broker_sym, "timeframe": tf_upper, "candles": candles}
         except Exception as e:
-            logging.warning(f"Failed to fetch MT5 rates for tf {tf_upper}: {e}")
+            logging.warning(f"Failed to fetch MT5 rates for {broker_sym} tf {tf_upper}: {e}")
 
     # Fallback / mock data
     sec = TF_SECONDS.get(tf_upper, 60)
     mock_candles = []
     base_time = int(datetime.now().timestamp()) - (count * sec)
-    base_price = 4028.75
+    base_price = 1.0850 if "EUR" in clean_sym else (65000.0 if "BTC" in clean_sym else 4028.75)
     for i in range(count):
-        chg = random.uniform(-1.5, 1.5)
+        chg = random.uniform(-0.0005, 0.0005) if base_price < 10 else random.uniform(-1.5, 1.5)
         o = base_price
         c = base_price + chg
-        h = max(o, c) + random.uniform(0, 0.5)
-        lo = min(o, c) - random.uniform(0, 0.5)
+        h = max(o, c) + (random.uniform(0, 0.0002) if base_price < 10 else random.uniform(0, 0.5))
+        lo = min(o, c) - (random.uniform(0, 0.0002) if base_price < 10 else random.uniform(0, 0.5))
         mock_candles.append({
             "time": base_time + i * sec,
-            "open": round(o, 2),
-            "high": round(h, 2),
-            "low": round(lo, 2),
-            "close": round(c, 2)
+            "open": round(o, 5 if base_price < 10 else 2),
+            "high": round(h, 5 if base_price < 10 else 2),
+            "low": round(lo, 5 if base_price < 10 else 2),
+            "close": round(c, 5 if base_price < 10 else 2)
         })
         base_price = c
-    return {"status": "success", "timeframe": tf_upper, "candles": mock_candles}
+    return {"status": "success", "symbol": clean_sym, "timeframe": tf_upper, "candles": mock_candles}

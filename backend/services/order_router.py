@@ -84,11 +84,13 @@ class OrderRouter:
                     f"Mencoba smart retry {attempt + 1}/{max_retries} dengan refresh tick..."
                 )
                 tick = mt5.symbol_info_tick(symbol)
+                sym_info = mt5.symbol_info(symbol)
+                digits = sym_info.digits if sym_info and sym_info.digits else 2
                 if tick:
                     diff_price = (tick.ask - current_price) if action == mt5.ORDER_TYPE_BUY else (tick.bid - current_price)
                     current_price = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
-                    current_sl = round(current_sl + diff_price, 2)
-                    current_tp = round(current_tp + diff_price, 2)
+                    current_sl = round(current_sl + diff_price, digits)
+                    current_tp = round(current_tp + diff_price, digits)
                 time.sleep(0.15)
                 continue
             else:
@@ -116,7 +118,8 @@ class OrderRouter:
         spread = sym_info.spread if sym_info and sym_info.spread else 20
         
         spread_dist = spread * point
-        buffer_raw = max(0.30, round(spread_dist * 2.0, digits))
+        min_buffer = 30 * point if point > 0 else 0.0003
+        buffer_raw = max(min_buffer, round(spread_dist * 2.0, digits))
         buffer_pts = buffer_raw if pos.type == mt5.ORDER_TYPE_BUY else -buffer_raw
         new_sl = round(entry_price + buffer_pts, digits)
         

@@ -54,6 +54,7 @@ def ensure_schema_migrations():
                 pass
 
         # 7. Koreksi Otomatis Tiket Posisi, Action BUY/SELL, dan Mode pada closed deals MT5
+
         try:
             import re
             with Session(sync_engine) as session:
