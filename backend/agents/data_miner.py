@@ -543,22 +543,28 @@ class DataMinerAgent:
             def chunk_generator():
                 for offset in range(0, train_limit, chunk_size):
                     limit = min(chunk_size, train_limit - offset)
+                    is_last_chunk = (offset + limit >= train_limit)
                     query = f'SELECT * FROM "{self.table_name}" ORDER BY time ASC LIMIT {limit} OFFSET {offset}'
                     df = pd.read_sql(query, con=sync_engine, index_col='time')
                     df.index = pd.to_datetime(df.index)
+
+                    if is_last_chunk:
+                        # 1. Injeksi Hard Negatives & OOS RLHF jika ada
+                        hn_df = self.load_hard_negatives_and_rlhf(mode=mode)
+                        if not hn_df.empty:
+                            logging.info(f"Menginjeksi {len(hn_df)} baris Hard Negatives & OOS RLHF ({mode.upper()}) ke chunk terakhir!")
+                            df = pd.concat([df, hn_df])
+                            df = df[~df.index.duplicated(keep='last')].sort_index()
+
+                        # 2. Injeksi Live Closed Decisions ke atribut chunk terakhir agar diproses bersamaan
+                        live_df = self.load_live_decision_chunk(mode=mode)
+                        if not live_df.empty:
+                            logging.info(f"Menyiapkan {len(live_df)} baris Live Closed Decisions ({mode.upper()}) untuk diinjeksi pada chunk terakhir!")
+                            df.attrs['live_feedback'] = live_df
+
                     yield df
                     
-                hn_df = self.load_hard_negatives_and_rlhf(mode=mode)
-                if not hn_df.empty:
-                    logging.info(f"Menginjeksi {len(hn_df)} baris Hard Negatives & OOS RLHF ({mode.upper()}) sebagai chunk tambahan!")
-                    yield hn_df
-
-                live_df = self.load_live_decision_chunk(mode=mode)
-                if not live_df.empty:
-                    logging.info(f"Menginjeksi {len(live_df)} baris Live Closed Decisions ({mode.upper()}) sebagai chunk feedback!")
-                    yield live_df
-                    
-            return total_chunks + 2, chunk_generator()
+            return total_chunks, chunk_generator()
         except Exception as e:
             logging.error(f"Gagal memuat train chunks dari {self.table_name}: {e}")
             return 0, None

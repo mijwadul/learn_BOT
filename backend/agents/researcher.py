@@ -210,6 +210,8 @@ class ResearcherAgent:
                 'reg_alpha': trial.suggest_float('reg_alpha', 1e-3, 5.0, log=True),
                 'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 5.0, log=True),
                 'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 0.5),
+                'objective': 'multiclass',
+                'num_class': 3,
                 'class_weight': 'balanced',
                 'random_state': 42,
                 'verbose': -1
@@ -372,6 +374,39 @@ class ResearcherAgent:
                     regime_weights = np.where(df['adx'] < 25.0, 1.25, 0.85)
                     sample_weights *= regime_weights
 
+            # Injeksi live trade feedback bila disematkan pada batch data ini
+            live_fb = getattr(df, 'attrs', {}).get('live_feedback')
+            if live_fb is not None and not live_fb.empty:
+                logging.info(f"[Normal Mode] Menginjeksi Real-Trade Live Feedback ({len(live_fb)} sampel tertutup) ke batch data...")
+                fb_df = live_fb.copy()
+                for col in self.features:
+                    if col not in fb_df.columns:
+                        fb_df[col] = 0.0
+                    elif not (pd.api.types.is_numeric_dtype(fb_df[col]) or pd.api.types.is_bool_dtype(fb_df[col])):
+                        fb_df[col] = pd.to_numeric(fb_df[col], errors='coerce').fillna(0.0)
+
+                if 'Target_Normal' in fb_df.columns:
+                    X_fb = fb_df[self.features]
+                    y_fb = fb_df['Target_Normal']
+                    sw_fb = fb_df['_sample_weight'].to_numpy(dtype=float) if '_sample_weight' in fb_df.columns else np.ones(len(fb_df)) * 2.5
+                    X = pd.concat([X, X_fb], ignore_index=True)
+                    y_normal = pd.concat([y_normal, y_fb], ignore_index=True)
+                    sample_weights = np.concatenate([sample_weights, sw_fb])
+
+            # Multiclass Integrity Guard: cegah crash LightGBM "Number of classes must be 1" bila kelas target tidak lengkap
+            unique_classes = np.unique(y_normal)
+            if len(unique_classes) < 3 or len(X) < 30:
+                logging.warning(
+                    f"[Normal Mode] Chunk {chunk_idx}/{total_chunks} dilewati: data tidak memenuhi syarat multiclass 3-kelas "
+                    f"({len(X)} baris, kelas target: {unique_classes})."
+                )
+                if progress_callback:
+                    progress_callback(chunk_idx, total_chunks)
+                chunk_idx += 1
+                del df, X, y_normal, sample_weights
+                gc.collect()
+                continue
+
             if chunk_idx == 1 and len(X) > 100:
                 best_params_normal = self.optimize_hyperparameters(X, y_normal, sample_weights, mode="normal", n_trials=25)
                 
@@ -379,6 +414,8 @@ class ResearcherAgent:
                 'n_estimators': 150, 'learning_rate': 0.03, 'max_depth': 5, 'num_leaves': 31,
                 'min_child_samples': 30, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
             }
+            params_n['objective'] = 'multiclass'
+            params_n['num_class'] = 3
             params_n['class_weight'] = 'balanced'
             params_n['verbose'] = -1
             params_n['random_state'] = 42
@@ -395,11 +432,11 @@ class ResearcherAgent:
                 curr_trees = getattr(self.model_normal, 'n_estimators', 80) or 80
                 new_trees = min(curr_trees + tree_step, max_trees_cap)
                 if new_trees > curr_trees:
-                    self.model_normal.set_params(n_estimators=new_trees, verbose=-1)
+                    self.model_normal.set_params(n_estimators=new_trees, objective='multiclass', num_class=3, verbose=-1)
                     booster = getattr(self.model_normal, 'booster_', None)
                     self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=booster)
                 else:
-                    self.model_normal.set_params(n_estimators=curr_trees + 1, verbose=-1)
+                    self.model_normal.set_params(n_estimators=curr_trees + 1, objective='multiclass', num_class=3, verbose=-1)
                     booster = getattr(self.model_normal, 'booster_', None)
                     self.model_normal.fit(X, y_normal, sample_weight=sample_weights, init_model=booster)
                 
@@ -523,6 +560,39 @@ class ResearcherAgent:
                     regime_weights = np.where(df['adx'] >= 25.0, 1.35, 0.75)
                     sample_weights *= regime_weights
 
+            # Injeksi live trade feedback bila disematkan pada batch data ini
+            live_fb = getattr(df, 'attrs', {}).get('live_feedback')
+            if live_fb is not None and not live_fb.empty:
+                logging.info(f"[Runner Mode] Menginjeksi Real-Trade Live Feedback ({len(live_fb)} sampel tertutup) ke batch data...")
+                fb_df = live_fb.copy()
+                for col in self.features:
+                    if col not in fb_df.columns:
+                        fb_df[col] = 0.0
+                    elif not (pd.api.types.is_numeric_dtype(fb_df[col]) or pd.api.types.is_bool_dtype(fb_df[col])):
+                        fb_df[col] = pd.to_numeric(fb_df[col], errors='coerce').fillna(0.0)
+
+                if 'Target_Runner' in fb_df.columns:
+                    X_fb = fb_df[self.features]
+                    y_fb = fb_df['Target_Runner']
+                    sw_fb = fb_df['_sample_weight'].to_numpy(dtype=float) if '_sample_weight' in fb_df.columns else np.ones(len(fb_df)) * 2.5
+                    X = pd.concat([X, X_fb], ignore_index=True)
+                    y_runner = pd.concat([y_runner, y_fb], ignore_index=True)
+                    sample_weights = np.concatenate([sample_weights, sw_fb])
+
+            # Multiclass Integrity Guard: cegah crash LightGBM "Number of classes must be 1" bila kelas target tidak lengkap
+            unique_classes = np.unique(y_runner)
+            if len(unique_classes) < 3 or len(X) < 30:
+                logging.warning(
+                    f"[Runner Mode] Chunk {chunk_idx}/{total_chunks} dilewati: data tidak memenuhi syarat multiclass 3-kelas "
+                    f"({len(X)} baris, kelas target: {unique_classes})."
+                )
+                if progress_callback:
+                    progress_callback(chunk_idx, total_chunks)
+                chunk_idx += 1
+                del df, X, y_runner, sample_weights
+                gc.collect()
+                continue
+
             if chunk_idx == 1 and len(X) > 100:
                 best_params_runner = self.optimize_hyperparameters(X, y_runner, sample_weights, mode="runner", n_trials=25)
                 
@@ -530,6 +600,8 @@ class ResearcherAgent:
                 'n_estimators': 150, 'learning_rate': 0.03, 'max_depth': 5, 'num_leaves': 31,
                 'min_child_samples': 30, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
             }
+            params_r['objective'] = 'multiclass'
+            params_r['num_class'] = 3
             params_r['class_weight'] = 'balanced'
             params_r['verbose'] = -1
             params_r['random_state'] = 42
@@ -546,11 +618,11 @@ class ResearcherAgent:
                 curr_trees = getattr(self.model_runner, 'n_estimators', 100) or 100
                 new_trees = min(curr_trees + tree_step, max_trees_cap)
                 if new_trees > curr_trees:
-                    self.model_runner.set_params(n_estimators=new_trees, verbose=-1)
+                    self.model_runner.set_params(n_estimators=new_trees, objective='multiclass', num_class=3, verbose=-1)
                     booster = getattr(self.model_runner, 'booster_', None)
                     self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=booster)
                 else:
-                    self.model_runner.set_params(n_estimators=curr_trees + 1, verbose=-1)
+                    self.model_runner.set_params(n_estimators=curr_trees + 1, objective='multiclass', num_class=3, verbose=-1)
                     booster = getattr(self.model_runner, 'booster_', None)
                     self.model_runner.fit(X, y_runner, sample_weight=sample_weights, init_model=booster)
                 
@@ -655,10 +727,16 @@ class ResearcherAgent:
                     y = pd.concat([y, y_fb], ignore_index=True)
                     sample_weights = np.concatenate([sample_weights, sw_fb])
 
+            # Validasi kelengkapan kelas sebelum warm-start fit
+            unique_classes = np.unique(y)
+            if len(unique_classes) < 3 or len(X) < 30:
+                logging.warning(f"[MICRO-RETRAIN] Sampel atau kelas tidak lengkap ({len(X)} baris, kelas: {unique_classes}) untuk {mode_str.upper()}. Lewati.")
+                return False
+
             # 3. Incremental Warm-Start Fit (Ringan: n_estimators bertambah 15 pohon)
             current_n_est = getattr(current_model, 'n_estimators', 100) or 100
             new_n_est = current_n_est + 15
-            current_model.set_params(n_estimators=new_n_est, verbose=-1)
+            current_model.set_params(n_estimators=new_n_est, objective='multiclass', num_class=3, verbose=-1)
             current_model.fit(X, y, sample_weight=sample_weights, init_model=current_model)
 
             logging.info(f"[MICRO-RETRAIN] ✅ Berhasil update model {mode_str.upper()} secara inkremental ({len(X)} sampel, total pohon: {new_n_est}).")
