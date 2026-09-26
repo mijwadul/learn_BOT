@@ -33,8 +33,11 @@ def get_rates(symbol, timeframe_constant, n_candles=1000, start_pos=0):
     timeframe_constant: e.g. mt5.TIMEFRAME_M1
     """
     rates = mt5.copy_rates_from_pos(symbol, timeframe_constant, start_pos, n_candles)
-    if rates is None:
-        return None
+    if rates is None or len(rates) == 0:
+        mt5.symbol_select(symbol, True)
+        rates = mt5.copy_rates_from_pos(symbol, timeframe_constant, start_pos, n_candles)
+        if rates is None or len(rates) == 0:
+            return None
     
     df = pd.DataFrame(rates)
     df['time'] = pd.to_datetime(df['time'], unit='s')
@@ -62,18 +65,18 @@ SYMBOL_ALIASES = {
 def resolve_broker_symbol(canonical_symbol="XAUUSD"):
     """
     Universal Smart Symbol Resolver:
-    Menerima Canonical Symbol (misal: 'XAUUSD', 'EURUSD', 'GBPUSD')
+    Menerima Canonical Symbol (misal: 'XAUUSD', 'EURUSD', 'GBPUSD', 'BTCUSD')
     dan otomatis mencari simbol broker di MT5 terlepas dari akhiran/suffix
-    (misal: XAUUSDm, XAUUSDc, XAUUSD.pro, XAUUSD+, XAUUSDmicro, dsb).
+    (misal: BTCUSDc, XAUUSDc, XAUUSDm, BTCUSD.pro, dsb).
     """
     if not canonical_symbol or str(canonical_symbol).upper() == "AUTO":
         canonical_symbol = "XAUUSD"
 
     clean_target = str(canonical_symbol).upper().strip()
 
-    # 1. Exact match langsung di MT5
+    # 1. Exact match langsung di MT5 (hanya jika ada dan tradeable)
     info = mt5.symbol_info(clean_target)
-    if info is not None:
+    if info is not None and getattr(info, 'trade_mode', 0) != getattr(mt5, 'SYMBOL_TRADE_MODE_DISABLED', 0):
         mt5.symbol_select(clean_target, True)
         return clean_target
 
@@ -83,6 +86,9 @@ def resolve_broker_symbol(canonical_symbol="XAUUSD"):
     # 3. Pindai katalog MT5
     try:
         all_symbols = mt5.symbols_get()
+        if not all_symbols:
+            all_symbols = mt5.symbols_get(f"*{clean_target}*")
+
         if all_symbols:
             candidates = []
             for s in all_symbols:
@@ -104,7 +110,9 @@ def resolve_broker_symbol(canonical_symbol="XAUUSD"):
 
             if candidates:
                 tradeable = [c for c in candidates if c["trade_mode"] != getattr(mt5, 'SYMBOL_TRADE_MODE_DISABLED', 0)]
-                chosen = tradeable[0]["name"] if tradeable else candidates[0]["name"]
+                # Prioritaskan yang visible / sudah dipilih di Market Watch jika ada
+                visible_tradeable = [c for c in tradeable if c["visible"]]
+                chosen = visible_tradeable[0]["name"] if visible_tradeable else (tradeable[0]["name"] if tradeable else candidates[0]["name"])
                 mt5.symbol_select(chosen, True)
                 return chosen
     except Exception as e:

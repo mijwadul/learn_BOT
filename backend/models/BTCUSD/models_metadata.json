@@ -1,0 +1,13 @@
+{
+  "symbol": "BTCUSD",
+  "normal": {
+    "last_accuracy": 0.0,
+    "last_trained_at": null,
+    "trained": false
+  },
+  "runner": {
+    "last_accuracy": 0.0,
+    "last_trained_at": null,
+    "trained": false
+  }
+}

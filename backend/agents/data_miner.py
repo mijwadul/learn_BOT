@@ -31,6 +31,7 @@ class DataMinerAgent:
         else:
             self.canonical_symbol = str(symbol).upper()
         self.broker_symbol = resolve_broker_symbol(self.canonical_symbol)
+        mt5.symbol_select(self.broker_symbol, True)
         self.symbol = self.broker_symbol
         self.table_name = get_market_table_name(self.canonical_symbol)
         logging.info(f"[DATA MINER] Target pair set: Canonical={self.canonical_symbol} | Broker={self.broker_symbol} | Table={self.table_name}")
@@ -432,6 +433,19 @@ class DataMinerAgent:
             logging.info(f"Found existing data up to {last_time}. Fetching ~{candles_to_fetch} new candles.")
             if_exists = 'append'
 
+        # Probe kapasitas riil history broker agar tidak mencoba jutaan candle kosong di masa lalu
+        if pd.isna(last_time) or candles_to_fetch > 100000:
+            try:
+                mt5.symbol_select(self.broker_symbol, True)
+                probe_rates = mt5.copy_rates_from_pos(self.broker_symbol, mt5.TIMEFRAME_M1, 0, candles_to_fetch)
+                if probe_rates is not None and len(probe_rates) > 0:
+                    real_available = len(probe_rates)
+                    if real_available < candles_to_fetch:
+                        logging.info(f"[{self.canonical_symbol}] MT5 trade server memiliki {real_available:,} candle M1 (permintaan awal: {candles_to_fetch:,}). Menyesuaikan...")
+                        candles_to_fetch = real_available
+            except Exception as e:
+                logging.debug(f"Probing candle limit skipped: {e}")
+
         # Ensure we don't fetch more than total_candles if missing is huge
         candles_to_fetch = min(candles_to_fetch, total_candles)
         
@@ -451,6 +465,7 @@ class DataMinerAgent:
             df = self.fetch_and_merge_data(n_candles=current_chunk_size, start_pos=start_pos)
             
             if df is None or df.empty:
+                logging.warning(f"Batch {batch_idx+1}/{total_mt5_batches} (pos {start_pos}, count {current_chunk_size}) mengembalikan data kosong. Melanjutkan...")
                 continue
                 
             # Handle new column schema alterations only on the first batch if sample_df exists
