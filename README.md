@@ -6,7 +6,7 @@ Sistem *algorithmic trading* otonom berbasis *Agentic Workflow* dan *Tree-Based 
 
 *   **Agent 0: The Supervisor (Orchestrator & State Machine)**
     *   Mengatur transisi fase operasional (Ingesti Data, Riset, Evaluasi, Live).
-    *   **[SEKRING] The Friday Liquidator:** Protokol absolut aktif setiap Jumat pukul 23:00 waktu server. Memaksa Agent 4 menutup seluruh posisi terbuka dan mematikan fungsi *trading* hingga Senin pagi.
+    *   **[SEKRING] The Friday Liquidator:** Protokol penutup posisi terbuka otomatis tepat 1x setiap Sabtu pukul 00:00 WIB untuk instrumen non-crypto (Forex/Gold) guna mengeliminasi risiko gap akhir pekan. Instrumen crypto (BTCUSD) dikecualikan dan fungsi trading tetap berjalan normal selama akhir pekan.
     *   **[SEKRING] Max Drawdown Reset:** Mengembalikan sistem ke mode Riset (Karantina) secara otomatis JIKA kerugian akumulatif menembus batas mutlak **30% dari total ekuitas**.
 
 *   **Agent 1: Data Miner (Database & Feature Engineer)**
@@ -43,9 +43,9 @@ Sistem *algorithmic trading* otonom berbasis *Agentic Workflow* dan *Tree-Based 
 4.  **[LIVE TRADING]** Evaluasi probabilitas M1, validasi sekring (*Spread* < 400), hitung Lot mutlak, eksekusi order.
 5.  **[SELF-CORRECTION]** Jika *drawdown* harian menyentuh -30%, kembalikan sistem ke tahap [INCUBATOR].
 
-## 🖥️ Command Center (Streamlit UI)
-*   **Master Controls:** Start, Emergency Stop, Force Data Backfill.
-*   **Risk Setup:** Input toleransi batas rugi per transaksi ($).
-*   **System Health:** Ping MT5, Status Database.
-*   **Live Metrics:** Backtest vs Live Win Rate, Capital Growth, Active Fuses.
-*   **Terminal Log:** Jendela transparan untuk komunikasi antar-agen dan laporan pemblokiran (misal: *"Eksekusi ditolak: Spread 410 poin"*).
+## 🖥️ Command Center (Next.js & FastAPI Institutional UI)
+*   **Master Controls:** Start, Emergency Stop, Multi-Pair Activation, Otak (Brain) Switcher.
+*   **Risk Setup:** Input toleransi batas rugi per transaksi ($), dynamic lot sizing.
+*   **System Health:** Ping MT5, Status Database PostgreSQL, Multi-Pair Health.
+*   **Live Metrics:** Dual-Target Probabilities, Market Regime (ADX), Capital Growth, Active Fuses.
+*   **Terminal Log:** Streaming WebSocket real-time untuk komunikasi antar-agen dan laporan pemblokiran (misal: *"Eksekusi ditolak: Spread 410 poin"*).

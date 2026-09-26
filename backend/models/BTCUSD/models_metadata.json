@@ -6,9 +6,9 @@
     "trained": true
   },
   "runner": {
-    "last_accuracy": 0.0,
-    "last_trained_at": null,
-    "trained": false,
+    "last_accuracy": 0.15796809663930617,
+    "last_trained_at": "2026-09-26 17:28:13",
+    "trained": true,
     "max_runner_rr": 5.0
   }
 }

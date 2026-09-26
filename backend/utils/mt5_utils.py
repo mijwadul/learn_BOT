@@ -163,3 +163,16 @@ def is_cent_account(symbol=None):
         pass
     return False
 
+def is_crypto_symbol(symbol=None):
+    """
+    Mendeteksi apakah sebuah instrumen merupakan aset kripto (BTC, ETH, SOL, dsb)
+    yang pasarnya buka 24/7 di akhir pekan (tidak memiliki jam penutupan pasar / risiko gap akhir pekan).
+    """
+    if not symbol:
+        return False
+    s = str(symbol).upper().strip()
+    crypto_keywords = [
+        "BTC", "ETH", "SOL", "XRP", "DOGE", "LTC", "ADA", "BNB", "DOT",
+        "AVAX", "LINK", "MATIC", "BITCOIN", "ETHEREUM", "CRYPTO"
+    ]
+    return any(k in s for k in crypto_keywords)

@@ -15,6 +15,16 @@ from pathlib import Path
 
 class ModeRequest(BaseModel):
     mode: str
+    symbol: Optional[str] = "XAUUSD"
+
+class ToggleBrainRequest(BaseModel):
+    mode: str = "all" # 'normal', 'runner', or 'all'
+    active: bool = True
+    symbol: Optional[str] = "XAUUSD"
+
+class ToggleAllBrainsRequest(BaseModel):
+    active: bool = True
+    symbol: Optional[str] = "XAUUSD"
 
 class TrainRequest(BaseModel):
     type: str # 'full' or 'incremental'
@@ -57,20 +67,28 @@ async def get_strategy_model_status(symbol: Optional[str] = "XAUUSD"):
     normal_trained = (bot.researcher.model_normal is not None if is_same_pair else (norm_pkl.exists() or norm_meta.get("trained", False)))
     runner_trained = (bot.researcher.model_runner is not None if is_same_pair else (run_pkl.exists() or run_meta.get("trained", False)))
 
+    is_normal_active = bot.supervisor.is_normal_valid(sym)
+    is_runner_active = bot.supervisor.is_runner_valid(sym)
+
     return {
         "status": "success",
         "symbol": sym,
+        "is_normal_active": is_normal_active,
+        "is_runner_active": is_runner_active,
+        "all_brains_active": is_normal_active and is_runner_active,
         "models_status": {
             "normal": {
                 "trained": normal_trained,
-                "status": "LIVE/LAYAK" if last_acc_normal >= 0.50 else "IDLE/QUARANTINE",
+                "is_active": is_normal_active,
+                "status": "LIVE/LAYAK" if is_normal_active else "IDLE/QUARANTINE",
                 "is_training": bot.researcher.is_training_normal if is_same_pair else False,
                 "last_accuracy": last_acc_normal,
                 "last_trained": last_train_normal
             },
             "runner": {
                 "trained": runner_trained,
-                "status": "LIVE/LAYAK" if last_acc_runner >= 0.25 else "IDLE/QUARANTINE",
+                "is_active": is_runner_active,
+                "status": "LIVE/LAYAK" if is_runner_active else "IDLE/QUARANTINE",
                 "is_training": bot.researcher.is_training_runner if is_same_pair else False,
                 "last_accuracy": last_acc_runner,
                 "last_trained": last_train_runner
@@ -78,17 +96,73 @@ async def get_strategy_model_status(symbol: Optional[str] = "XAUUSD"):
         }
     }
 
+@router.post("/api/strategies/toggle-brain")
+async def toggle_brain(req: ToggleBrainRequest):
+    """Mengaktifkan atau menonaktifkan salah satu otak ('normal', 'runner') atau semua ('all') untuk pair spesifik."""
+    target = (req.mode or "all").lower()
+    sym = (req.symbol or "XAUUSD").upper()
+    bot.supervisor.set_brain_active(target, req.active, symbol=sym)
+    if req.active and bot.supervisor.state == 'live':
+        bot.is_live = True
+    return {
+        "status": "success",
+        "symbol": sym,
+        "mode": target,
+        "active": req.active,
+        "is_normal_active": bot.supervisor.is_normal_valid(sym),
+        "is_runner_active": bot.supervisor.is_runner_valid(sym),
+        "all_brains_active": bot.supervisor.is_normal_valid(sym) and bot.supervisor.is_runner_valid(sym),
+        "state": bot.supervisor.state,
+        "message": f"Otak {target.upper()} ({sym}) berhasil {'DIAKTIFKAN (LIVE)' if req.active else 'DINONAKTIFKAN (QUARANTINE)'}."
+    }
+
+@router.post("/api/strategies/toggle-all-brains")
+async def toggle_all_brains(req: ToggleAllBrainsRequest):
+    """Mengaktifkan atau menonaktifkan SEMUA otak sekaligus (Scalp + Runner) untuk pair spesifik."""
+    sym = (req.symbol or "XAUUSD").upper()
+    bot.supervisor.set_brain_active("all", req.active, symbol=sym)
+    if req.active and bot.supervisor.state == 'live':
+        bot.is_live = True
+    return {
+        "status": "success",
+        "symbol": sym,
+        "active": req.active,
+        "is_normal_active": bot.supervisor.is_normal_valid(sym),
+        "is_runner_active": bot.supervisor.is_runner_valid(sym),
+        "all_brains_active": req.active,
+        "state": bot.supervisor.state,
+        "message": f"Semua otak ({sym} Scalp & Runner) berhasil {'DIAKTIFKAN (LIVE)' if req.active else 'DINONAKTIFKAN (QUARANTINE)'}."
+    }
+
 @router.post("/api/strategies/force_live")
 async def force_live(req: ModeRequest):
-    bot.supervisor.force_live_mode(req.mode)
+    sym = (getattr(req, "symbol", None) or "XAUUSD").upper()
+    bot.supervisor.force_live_mode(req.mode, symbol=sym)
     if bot.supervisor.state == 'live':
         bot.is_live = True
-    return {"status": "success", "mode": req.mode, "action": "force_live", "state": bot.supervisor.state}
+    return {
+        "status": "success",
+        "symbol": sym,
+        "mode": req.mode,
+        "action": "force_live",
+        "state": bot.supervisor.state,
+        "is_normal_active": bot.supervisor.is_normal_valid(sym),
+        "is_runner_active": bot.supervisor.is_runner_valid(sym)
+    }
 
 @router.post("/api/strategies/quarantine")
 async def quarantine(req: ModeRequest):
-    bot.supervisor.isolate_quarantine(req.mode)
-    return {"status": "success", "mode": req.mode, "action": "quarantine", "state": bot.supervisor.state}
+    sym = (getattr(req, "symbol", None) or "XAUUSD").upper()
+    bot.supervisor.isolate_quarantine(req.mode, symbol=sym)
+    return {
+        "status": "success",
+        "symbol": sym,
+        "mode": req.mode,
+        "action": "quarantine",
+        "state": bot.supervisor.state,
+        "is_normal_active": bot.supervisor.is_normal_valid(sym),
+        "is_runner_active": bot.supervisor.is_runner_valid(sym)
+    }
 
 @router.post("/api/strategies/train")
 async def train_model(req: TrainRequest):

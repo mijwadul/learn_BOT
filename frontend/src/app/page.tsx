@@ -24,7 +24,8 @@ import {
   Sliders,
   CheckCircle2,
   AlertTriangle,
-  Info
+  Info,
+  Brain
 } from "lucide-react";
 import { getApiBaseUrl, getWsBaseUrl } from "@/config";
 import { useToast } from "@/components/ui/Toast";
@@ -39,6 +40,12 @@ export default function Home() {
   const [showAddPairModal, setShowAddPairModal] = useState(false);
   const [newPairInput, setNewPairInput] = useState("");
   const [isAddingPair, setIsAddingPair] = useState(false);
+
+  // States for Strategy Otak (Brain) activation
+  const [isNormalActive, setIsNormalActive] = useState(false);
+  const [isRunnerActive, setIsRunnerActive] = useState(false);
+  const [allBrainsActive, setAllBrainsActive] = useState(false);
+  const [isTogglingBrain, setIsTogglingBrain] = useState(false);
 
   const [marketRegime, setMarketRegime] = useState<{ adx: number; regime: string }>({ adx: 0, regime: "DETECTING..." });
   const [onlineLearning, setOnlineLearning] = useState<{ enabled: boolean; last_retrain: string | null }>({ enabled: true, last_retrain: null });
@@ -160,10 +167,38 @@ export default function Home() {
     }
   };
 
-  // Poll state every 3 seconds
-  const fetchState = async () => {
+  const handleToggleBrain = async (mode: "normal" | "runner" | "all", active: boolean) => {
+    setIsTogglingBrain(true);
     try {
-      const res = await fetch(`${getApiBaseUrl()}/api/state`);
+      const endpoint = mode === "all" ? "/api/strategies/toggle-all-brains" : "/api/strategies/toggle-brain";
+      const body = mode === "all" ? { active, symbol: activeSymbol } : { mode, active, symbol: activeSymbol };
+      const res = await fetch(`${getApiBaseUrl()}${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        toast.success(data.message, "Saklar Otak AI");
+        if (data.is_normal_active !== undefined) setIsNormalActive(data.is_normal_active);
+        if (data.is_runner_active !== undefined) setIsRunnerActive(data.is_runner_active);
+        if (data.all_active !== undefined) setAllBrainsActive(data.all_active);
+        fetchState();
+      } else {
+        toast.warning(data.message || "Gagal mengubah status otak.", "Perhatian");
+      }
+    } catch {
+      toast.error("Gagal terhubung ke backend server.", "Error");
+    } finally {
+      setIsTogglingBrain(false);
+    }
+  };
+
+  // Poll state every 3 seconds
+  const fetchState = async (sym?: string) => {
+    const targetSym = sym || activeSymbol || "XAUUSD";
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/state?symbol=${targetSym}`);
       if (!res.ok) return;
       const data = await res.json();
       setIsLive(data.is_live);
@@ -174,20 +209,41 @@ export default function Home() {
       if (data.open_positions) setOpenPositions(data.open_positions);
       if (data.portfolio) setPortfolio(data.portfolio);
       if (data.latest_probabilities) setLatestProbs(data.latest_probabilities);
+
+      // Parse brain activation statuses for the target symbol
+      if (data.is_normal_active !== undefined) {
+        setIsNormalActive(data.is_normal_active);
+      } else if (data.models_status?.normal) {
+        setIsNormalActive(data.models_status.normal.is_active ?? data.models_status.normal.status?.includes("LIVE"));
+      }
+
+      if (data.is_runner_active !== undefined) {
+        setIsRunnerActive(data.is_runner_active);
+      } else if (data.models_status?.runner) {
+        setIsRunnerActive(data.models_status.runner.is_active ?? data.models_status.runner.status?.includes("LIVE"));
+      }
+
+      if (data.all_brains_active !== undefined) {
+        setAllBrainsActive(data.all_brains_active);
+      } else {
+        const norm = data.is_normal_active ?? (data.models_status?.normal?.status?.includes("LIVE") || false);
+        const run = data.is_runner_active ?? (data.models_status?.runner?.status?.includes("LIVE") || false);
+        setAllBrainsActive(norm && run);
+      }
     } catch {
       // Backend offline or polling delay
     }
   };
 
   useEffect(() => {
-    fetchState();
+    fetchState(activeSymbol);
     fetchPairs();
     const interval = setInterval(() => {
-      fetchState();
+      fetchState(activeSymbol);
       fetchPairs();
     }, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [activeSymbol]);
 
   // Connect to live WebSocket logs for the blotter
   useEffect(() => {
@@ -305,15 +361,15 @@ export default function Home() {
   const dominantDirection = bestBuy > bestSell ? (bestBuy >= 60 ? "BUY" : "NEUTRAL") : (bestSell >= 60 ? "SELL" : "NEUTRAL");
 
   return (
-    <div className="flex flex-col h-screen w-full overflow-hidden bg-[#070b0a] text-white select-none">
+    <div className="flex flex-col min-h-full lg:h-screen w-full overflow-y-auto lg:overflow-hidden bg-[#070b0a] text-white select-none">
       
       {/* ========================================================================= */}
       {/* 1. TOP QUANT COMMAND RIBBON: Multi-Pair Bar, Portfolio & Bot Master Control */}
       {/* ========================================================================= */}
-      <header className="px-4 py-2.5 border-b border-white/10 bg-black/60 backdrop-blur-md flex flex-wrap items-center justify-between shrink-0 gap-4">
+      <header className="px-3 sm:px-4 py-2 sm:py-2.5 border-b border-white/10 bg-black/60 backdrop-blur-md flex flex-wrap items-center justify-between shrink-0 gap-3 sm:gap-4">
         
         {/* Left: Multi-Pair Badges & Dynamic Switcher */}
-        <div className="flex items-center gap-2 overflow-x-auto py-0.5 custom-scrollbar">
+        <div className="flex items-center gap-2 overflow-x-auto py-0.5 max-w-full custom-scrollbar">
           <span className="text-[11px] font-bold text-white/40 uppercase tracking-wider flex items-center gap-1.5 shrink-0 mr-1">
             <Sliders size={13} className="text-cyan-400" /> Pairs:
           </span>
@@ -382,7 +438,7 @@ export default function Home() {
         </div>
 
         {/* Center: Real Financial Telemetry */}
-        <div className="flex items-center gap-3 sm:gap-5 text-xs font-mono tabular-nums shrink-0">
+        <div className="flex items-center gap-3 sm:gap-5 text-xs font-mono tabular-nums overflow-x-auto py-0.5 custom-scrollbar shrink-0">
           <div className="flex flex-col">
             <span className="text-[10px] text-white/40 uppercase font-semibold">Balance</span>
             <span className="font-bold text-white text-sm">${balance.toLocaleString("en-US", { minimumFractionDigits: 2 })}</span>
@@ -406,7 +462,7 @@ export default function Home() {
 
           <div className="h-6 w-px bg-white/10 hidden sm:block" />
 
-          <div className="hidden sm:flex flex-col">
+          <div className="flex flex-col">
             <span className="text-[10px] text-white/40 uppercase font-semibold">Sekring DD</span>
             <span className={`font-bold text-xs ${currentDrawdown > 15 ? "text-amber-400" : "text-emerald-400"}`}>
               {currentDrawdown.toFixed(1)}% <span className="text-white/40">/ 30%</span>
@@ -414,23 +470,44 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Right: Master Bot Switch */}
-        <div className="flex items-center gap-2.5 shrink-0">
-          {!isLive && (
-            <select 
-              value={selectedMode} 
-              onChange={(e) => setSelectedMode(e.target.value)}
-              className="bg-black/60 border border-white/15 text-white/80 text-xs rounded-xl px-2.5 py-1.5 focus:ring-1 focus:ring-emerald-500 outline-none font-medium cursor-pointer"
-            >
-              <option value="auto">Auto (OOS Strict)</option>
-              <option value="force_normal">Force Scalp</option>
-              <option value="force_runner">Force Runner</option>
-            </select>
-          )}
+        {/* Right: Master Bot & Otak Switch */}
+        <div className="flex items-center gap-2 sm:gap-2.5 shrink-0 flex-wrap sm:flex-nowrap">
+          {/* Quick Master Otak Selector */}
+          <select 
+            value={
+              isNormalActive && isRunnerActive
+                ? "all"
+                : isNormalActive
+                ? "normal"
+                : isRunnerActive
+                ? "runner"
+                : "none"
+            } 
+            onChange={(e) => {
+              const val = e.target.value;
+              if (val === "all") handleToggleBrain("all", true);
+              else if (val === "none") handleToggleBrain("all", false);
+              else if (val === "normal") {
+                handleToggleBrain("normal", true);
+                handleToggleBrain("runner", false);
+              } else if (val === "runner") {
+                handleToggleBrain("runner", true);
+                handleToggleBrain("normal", false);
+              }
+            }}
+            disabled={isTogglingBrain}
+            className="bg-black/60 border border-white/15 text-white/80 text-xs rounded-xl px-2.5 py-1.5 focus:ring-1 focus:ring-emerald-500 outline-none font-medium cursor-pointer"
+            title="Pilih mode otak AI aktif"
+          >
+            <option value="all">🧠 Semua Otak (Scalp + Trend)</option>
+            <option value="normal">⚡ Hanya Otak Scalp</option>
+            <option value="runner">🚀 Hanya Otak Trend</option>
+            <option value="none">🛑 Matikan Semua Otak</option>
+          </select>
 
           <button 
             onClick={toggleLive}
-            className={`flex items-center justify-center gap-2 py-2 px-4 rounded-xl transition-all duration-300 font-black text-xs sm:text-sm tracking-wider cursor-pointer shadow-lg ${
+            className={`flex items-center justify-center gap-2 py-2 px-3.5 sm:px-4 rounded-xl transition-all duration-300 font-black text-xs sm:text-sm tracking-wider cursor-pointer shadow-lg ${
               isLive 
                 ? 'bg-rose-500/20 text-rose-300 border border-rose-500/50 hover:bg-rose-500/30 shadow-rose-500/10' 
                 : 'bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold shadow-emerald-500/25'
@@ -445,27 +522,56 @@ export default function Home() {
       {/* ========================================================================= */}
       {/* 2. MAIN WORKSPACE: Upper Quant Intelligence Grid + Lower Docked Blotter */}
       {/* ========================================================================= */}
-      <main className="flex-1 flex flex-col p-4 gap-4 overflow-hidden">
+      <main className="flex-1 flex flex-col p-3 sm:p-4 gap-4 overflow-y-auto lg:overflow-hidden">
         
         {/* UPPER SECTION: 4 High-Density Quant Intelligence Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 shrink-0">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4 shrink-0">
           
-          {/* Card 1: AI Confidence Radar (Dual-Target LightGBM) */}
+          {/* Card 1: AI Confidence Radar (Dual-Target LightGBM) with Brain Controls */}
           <div className="rounded-2xl border border-white/10 bg-[#090e0c]/90 backdrop-blur-md p-4 flex flex-col justify-between shadow-xl">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold uppercase tracking-wider text-white/50 flex items-center gap-1.5">
-                <Sparkles size={14} className="text-cyan-400" /> AI Confidence
+                <Sparkles size={14} className="text-cyan-400" /> AI Confidence &amp; Otak
               </span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 font-bold">
-                {activeSymbol}
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 font-bold">
+                  {activeSymbol}
+                </span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                  allBrainsActive 
+                    ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30" 
+                    : (isNormalActive || isRunnerActive)
+                    ? "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                    : "bg-rose-500/20 text-rose-400 border-rose-500/30"
+                }`}>
+                  {allBrainsActive ? "ALL ON" : (isNormalActive || isRunnerActive) ? "PARTIAL" : "ALL OFF"}
+                </span>
+              </div>
             </div>
 
             <div className="space-y-2.5 font-mono tabular-nums">
-              {/* Scalp Normal Confidence */}
-              <div className="bg-black/40 p-2.5 rounded-xl border border-white/5">
-                <div className="flex justify-between items-center text-xs mb-1">
-                  <span className="font-sans font-bold text-white/70">Normal Scalp</span>
+              {/* Scalp Normal Confidence + Otak Toggle */}
+              <div className={`p-2.5 rounded-xl border transition-all ${
+                isNormalActive ? "bg-black/60 border-emerald-500/30" : "bg-black/40 border-white/5 opacity-70"
+              }`}>
+                <div className="flex justify-between items-center text-xs mb-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="font-sans font-bold text-white/90">Normal Scalp</span>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleBrain("normal", !isNormalActive)}
+                      disabled={isTogglingBrain}
+                      title={isNormalActive ? "Otak Scalp LIVE. Klik untuk nonaktifkan." : "Otak Scalp OFF. Klik untuk aktifkan."}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider transition-all cursor-pointer flex items-center gap-1 ${
+                        isNormalActive
+                          ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 shadow-sm shadow-emerald-500/20 hover:bg-emerald-500/30"
+                          : "bg-white/10 text-white/40 border border-white/10 hover:text-white hover:bg-white/20"
+                      }`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${isNormalActive ? "bg-emerald-400 animate-pulse" : "bg-white/30"}`} />
+                      <span>{isNormalActive ? "LIVE" : "OFF"}</span>
+                    </button>
+                  </div>
                   <span className="text-cyan-300 font-bold">{Math.max(normalBuyProb, normalSellProb)}%</span>
                 </div>
                 <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden flex">
@@ -486,10 +592,28 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Trend Runner Confidence */}
-              <div className="bg-black/40 p-2.5 rounded-xl border border-white/5">
-                <div className="flex justify-between items-center text-xs mb-1">
-                  <span className="font-sans font-bold text-white/70">Runner Trend</span>
+              {/* Trend Runner Confidence + Otak Toggle */}
+              <div className={`p-2.5 rounded-xl border transition-all ${
+                isRunnerActive ? "bg-black/60 border-purple-500/30" : "bg-black/40 border-white/5 opacity-70"
+              }`}>
+                <div className="flex justify-between items-center text-xs mb-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="font-sans font-bold text-white/90">Runner Trend</span>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleBrain("runner", !isRunnerActive)}
+                      disabled={isTogglingBrain}
+                      title={isRunnerActive ? "Otak Trend LIVE. Klik untuk nonaktifkan." : "Otak Trend OFF. Klik untuk aktifkan."}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider transition-all cursor-pointer flex items-center gap-1 ${
+                        isRunnerActive
+                          ? "bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm shadow-purple-500/20 hover:bg-purple-500/30"
+                          : "bg-white/10 text-white/40 border border-white/10 hover:text-white hover:bg-white/20"
+                      }`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${isRunnerActive ? "bg-purple-400 animate-pulse" : "bg-white/30"}`} />
+                      <span>{isRunnerActive ? "LIVE" : "OFF"}</span>
+                    </button>
+                  </div>
                   <span className="text-purple-300 font-bold">{Math.max(runnerBuyProb, runnerSellProb)}%</span>
                 </div>
                 <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden flex">
@@ -511,15 +635,45 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="mt-2.5 pt-2 border-t border-white/5 flex items-center justify-between text-[11px]">
-              <span className="text-white/40">AI Consensus:</span>
-              <span className={`font-bold px-2 py-0.5 rounded text-[10px] tracking-wider ${
-                dominantDirection === "BUY" ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" :
-                dominantDirection === "SELL" ? "bg-rose-500/20 text-rose-400 border border-rose-500/30" :
-                "bg-white/5 text-white/50 border border-white/10"
-              }`}>
-                {dominantDirection}
-              </span>
+            {/* AI Consensus & Master Brain Quick Controls */}
+            <div className="mt-2.5 pt-2 border-t border-white/5 flex flex-col gap-2">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-white/40">AI Consensus:</span>
+                <span className={`font-bold px-2 py-0.5 rounded text-[10px] tracking-wider ${
+                  dominantDirection === "BUY" ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" :
+                  dominantDirection === "SELL" ? "bg-rose-500/20 text-rose-400 border border-rose-500/30" :
+                  "bg-white/5 text-white/50 border border-white/10"
+                }`}>
+                  {dominantDirection}
+                </span>
+              </div>
+
+              {/* Master Brain Toggle Buttons */}
+              <div className="flex items-center justify-between pt-1 border-t border-white/5 text-[11px]">
+                <span className="text-white/40 text-[10px] uppercase font-bold flex items-center gap-1">
+                  <Brain size={12} className="text-brand-green" /> Saklar Otak:
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleToggleBrain("all", true)}
+                    disabled={isTogglingBrain}
+                    title="Aktifkan seluruh otak (Scalp 1:2 &amp; Trend 1:5)"
+                    className="px-2 py-0.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold transition-all cursor-pointer"
+                  >
+                    Semua ON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleToggleBrain("all", false)}
+                    disabled={isTogglingBrain}
+                    title="Nonaktifkan seluruh otak (Quarantine)"
+                    className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-400 border border-rose-500/30 text-[10px] font-bold transition-all cursor-pointer"
+                  >
+                    Semua OFF
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -604,7 +758,7 @@ export default function Home() {
               </div>
               <div className="bg-black/40 p-2.5 rounded-xl border border-white/5 flex justify-between items-center">
                 <span className="text-white/60">Friday Liquidator</span>
-                <span className="font-mono font-semibold text-white/80">Sabtu 00:00 WIB</span>
+                <span className="font-mono font-semibold text-white/80">Sabtu 00:00 WIB (1x)</span>
               </div>
             </div>
 
@@ -617,11 +771,11 @@ export default function Home() {
         </div>
 
         {/* LOWER SECTION: Expanded Full-Width Institutional Docked Blotter */}
-        <div className="flex-1 flex flex-col rounded-2xl border border-white/10 bg-[#090e0c]/95 overflow-hidden shadow-2xl">
+        <div className="flex-1 min-h-[420px] lg:min-h-0 flex flex-col rounded-2xl border border-white/10 bg-[#090e0c]/95 overflow-hidden shadow-2xl">
           
           {/* Blotter Navigation Header */}
-          <div className="px-4 py-2 border-b border-white/10 bg-black/50 flex items-center justify-between text-xs shrink-0">
-            <div className="flex items-center gap-2">
+          <div className="px-3 sm:px-4 py-2 border-b border-white/10 bg-black/50 flex items-center justify-between text-xs shrink-0 overflow-x-auto scrollbar-none gap-2">
+            <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setBlotterTab("positions")}
                 className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
@@ -674,7 +828,7 @@ export default function Home() {
               </button>
             </div>
 
-            <div className="flex items-center gap-3 text-white/40 text-[11px] font-mono">
+            <div className="flex items-center gap-3 text-white/40 text-[11px] font-mono shrink-0">
               <span className="flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-emerald-400" /> MT5 Live Bridge
               </span>
@@ -684,7 +838,7 @@ export default function Home() {
           {/* Blotter Content Viewport */}
           <div className="flex-1 overflow-hidden relative">
             
-            {/* TAB 1: Live Open Positions Table */}
+            {/* TAB 1: Live Open Positions Table & Mobile Cards */}
             {blotterTab === "positions" && (
               <div className="w-full h-full overflow-y-auto custom-scrollbar">
                 {openPositions.length === 0 ? (
@@ -698,93 +852,169 @@ export default function Home() {
                     </span>
                   </div>
                 ) : (
-                  <table className="w-full text-left text-xs font-mono tabular-nums">
-                    <thead className="sticky top-0 bg-[#070b0a] border-b border-white/10 text-white/40 uppercase text-[10px] tracking-wider z-10">
-                      <tr>
-                        <th className="py-3 px-4">Ticket</th>
-                        <th className="py-3 px-4">Symbol</th>
-                        <th className="py-3 px-4">Type</th>
-                        <th className="py-3 px-4">Volume</th>
-                        <th className="py-3 px-4">Open Price</th>
-                        <th className="py-3 px-4">Current Price</th>
-                        <th className="py-3 px-4">SL / TP</th>
-                        <th className="py-3 px-4 text-right">Profit / Loss</th>
-                        <th className="py-3 px-4 text-center">Fast Action Guard</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/5">
+                  <>
+                    {/* Mobile Card Layout for Open Positions */}
+                    <div className="block md:hidden p-3 space-y-3">
                       {openPositions.map((pos) => {
                         const isBuy = pos.type === "BUY";
                         const isProfit = pos.profit >= 0;
                         const isLoading = !!actionLoadingTicket[pos.ticket];
 
                         return (
-                          <tr key={pos.ticket} className="hover:bg-white/[0.03] transition-colors">
-                            <td className="py-3 px-4 text-white/40">#{pos.ticket}</td>
-                            <td className="py-3 px-4 font-mono font-bold text-white/90">
-                              <span className="px-2 py-0.5 rounded-lg bg-white/5 border border-white/10 text-xs">
-                                {pos.symbol || activeSymbol}
-                              </span>
-                            </td>
-                            <td className="py-3 px-4">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                isBuy ? "bg-emerald-500/20 text-emerald-400" : "bg-rose-500/20 text-rose-400"
-                              }`}>
-                                {pos.type}
-                              </span>
-                            </td>
-
-                            <td className="py-3 px-4 text-white/80 font-bold">{(pos.volume || 0).toFixed(2)}</td>
-                            <td className="py-3 px-4 text-white/80">{(pos.open_price || 0).toFixed((pos.open_price || 0) > 100 ? 2 : 5)}</td>
-                            <td className="py-3 px-4 font-bold text-white">{(pos.current_price || 0).toFixed((pos.current_price || 0) > 100 ? 2 : 5)}</td>
-                            <td className="py-3 px-4 text-white/60">
-                              {pos.sl ? Number(pos.sl).toFixed((pos.sl || 0) > 100 ? 2 : 5) : "-"} / {pos.tp ? Number(pos.tp).toFixed((pos.tp || 0) > 100 ? 2 : 5) : "-"}
-                            </td>
-                            <td className={`py-3 px-4 text-right font-black text-sm ${
-                              isProfit ? "text-emerald-400" : "text-rose-400"
-                            }`}>
-                              {isProfit ? "+" : ""}${pos.profit.toFixed(2)}
-                            </td>
-                            <td className="py-3 px-4">
-                              <div className="flex items-center justify-center gap-1.5">
-                                <button
-                                  onClick={() => handlePositionAction(pos.ticket, "break-even", pos.symbol)}
-                                  disabled={isLoading}
-                                  title="Geser SL ke Break-Even (BE)"
-                                  className="px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold flex items-center gap-1 transition-all disabled:opacity-40 cursor-pointer"
-                                >
-                                  <ShieldCheck size={12} /> BE
-                                </button>
-                                <button
-                                  onClick={() => handlePositionAction(pos.ticket, "partial-close", pos.symbol)}
-                                  disabled={isLoading}
-                                  title="Tutup 50% Volume"
-                                  className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold flex items-center gap-1 transition-all disabled:opacity-40 cursor-pointer"
-                                >
-                                  <Scissors size={12} /> 50%
-                                </button>
-                                <button
-                                  onClick={() => handlePositionAction(pos.ticket, "close", pos.symbol)}
-                                  disabled={isLoading}
-                                  title="Tutup Posisi Penuh"
-                                  className="px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-bold flex items-center gap-1 transition-all disabled:opacity-40 cursor-pointer"
-                                >
-                                  <XCircle size={12} /> Close
-                                </button>
+                          <div key={pos.ticket} className="bg-black/50 border border-white/10 rounded-xl p-3 flex flex-col gap-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-xs text-white/40 font-mono">#{pos.ticket}</span>
+                                <span className="font-bold text-xs text-white font-mono">{pos.symbol || activeSymbol}</span>
+                                <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                                  isBuy ? "bg-emerald-500/20 text-emerald-400" : "bg-rose-500/20 text-rose-400"
+                                }`}>
+                                  {pos.type}
+                                </span>
                               </div>
-                            </td>
-                          </tr>
+                              <span className={`text-xs font-bold font-mono ${isProfit ? "text-emerald-400" : "text-rose-400"}`}>
+                                {isProfit ? "+" : ""}${pos.profit.toFixed(2)}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-4 gap-1.5 text-[10px] pt-1.5 border-t border-white/5 font-mono text-white/60">
+                              <div>
+                                <span className="text-white/30 block">Vol</span>
+                                <span className="text-white/80 font-bold">{(pos.volume || 0).toFixed(2)}</span>
+                              </div>
+                              <div>
+                                <span className="text-white/30 block">Entry</span>
+                                <span className="text-white/80">{(pos.open_price || 0).toFixed((pos.open_price || 0) > 100 ? 2 : 5)}</span>
+                              </div>
+                              <div>
+                                <span className="text-white/30 block">Current</span>
+                                <span className="text-white/90 font-bold">{(pos.current_price || 0).toFixed((pos.current_price || 0) > 100 ? 2 : 5)}</span>
+                              </div>
+                              <div>
+                                <span className="text-white/30 block">SL/TP</span>
+                                <span className="text-white/60">{pos.sl ? Number(pos.sl).toFixed(1) : "-"}</span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 pt-1.5 border-t border-white/5">
+                              <button
+                                onClick={() => handlePositionAction(pos.ticket, "break-even", pos.symbol)}
+                                disabled={isLoading}
+                                className="flex-1 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 cursor-pointer"
+                              >
+                                <ShieldCheck size={11} /> BE
+                              </button>
+                              <button
+                                onClick={() => handlePositionAction(pos.ticket, "partial-close", pos.symbol)}
+                                disabled={isLoading}
+                                className="flex-1 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 cursor-pointer"
+                              >
+                                <Scissors size={11} /> 50%
+                              </button>
+                              <button
+                                onClick={() => handlePositionAction(pos.ticket, "close", pos.symbol)}
+                                disabled={isLoading}
+                                className="flex-1 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 cursor-pointer"
+                              >
+                                <XCircle size={11} /> Close
+                              </button>
+                            </div>
+                          </div>
                         );
                       })}
-                    </tbody>
-                  </table>
+                    </div>
+
+                    {/* Desktop Table View */}
+                    <div className="hidden md:block">
+                      <table className="w-full text-left text-xs font-mono tabular-nums">
+                        <thead className="sticky top-0 bg-[#070b0a] border-b border-white/10 text-white/40 uppercase text-[10px] tracking-wider z-10">
+                          <tr>
+                            <th className="py-3 px-4">Ticket</th>
+                            <th className="py-3 px-4">Symbol</th>
+                            <th className="py-3 px-4">Type</th>
+                            <th className="py-3 px-4">Volume</th>
+                            <th className="py-3 px-4">Open Price</th>
+                            <th className="py-3 px-4">Current Price</th>
+                            <th className="py-3 px-4">SL / TP</th>
+                            <th className="py-3 px-4 text-right">Profit / Loss</th>
+                            <th className="py-3 px-4 text-center">Fast Action Guard</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/5">
+                          {openPositions.map((pos) => {
+                            const isBuy = pos.type === "BUY";
+                            const isProfit = pos.profit >= 0;
+                            const isLoading = !!actionLoadingTicket[pos.ticket];
+
+                            return (
+                              <tr key={pos.ticket} className="hover:bg-white/[0.03] transition-colors">
+                                <td className="py-3 px-4 text-white/40">#{pos.ticket}</td>
+                                <td className="py-3 px-4 font-mono font-bold text-white/90">
+                                  <span className="px-2 py-0.5 rounded-lg bg-white/5 border border-white/10 text-xs">
+                                    {pos.symbol || activeSymbol}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                    isBuy ? "bg-emerald-500/20 text-emerald-400" : "bg-rose-500/20 text-rose-400"
+                                  }`}>
+                                    {pos.type}
+                                  </span>
+                                </td>
+
+                                <td className="py-3 px-4 text-white/80 font-bold">{(pos.volume || 0).toFixed(2)}</td>
+                                <td className="py-3 px-4 text-white/80">{(pos.open_price || 0).toFixed((pos.open_price || 0) > 100 ? 2 : 5)}</td>
+                                <td className="py-3 px-4 font-bold text-white">{(pos.current_price || 0).toFixed((pos.current_price || 0) > 100 ? 2 : 5)}</td>
+                                <td className="py-3 px-4 text-white/60">
+                                  {pos.sl ? Number(pos.sl).toFixed((pos.sl || 0) > 100 ? 2 : 5) : "-"} / {pos.tp ? Number(pos.tp).toFixed((pos.tp || 0) > 100 ? 2 : 5) : "-"}
+                                </td>
+                                <td className={`py-3 px-4 text-right font-black text-sm ${
+                                  isProfit ? "text-emerald-400" : "text-rose-400"
+                                }`}>
+                                  {isProfit ? "+" : ""}${pos.profit.toFixed(2)}
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="flex items-center justify-center gap-1.5">
+                                    <button
+                                      onClick={() => handlePositionAction(pos.ticket, "break-even", pos.symbol)}
+                                      disabled={isLoading}
+                                      title="Geser SL ke Break-Even (BE)"
+                                      className="px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold flex items-center gap-1 transition-all disabled:opacity-40 cursor-pointer"
+                                    >
+                                      <ShieldCheck size={12} /> BE
+                                    </button>
+                                    <button
+                                      onClick={() => handlePositionAction(pos.ticket, "partial-close", pos.symbol)}
+                                      disabled={isLoading}
+                                      title="Tutup 50% Volume"
+                                      className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold flex items-center gap-1 transition-all disabled:opacity-40 cursor-pointer"
+                                    >
+                                      <Scissors size={12} /> 50%
+                                    </button>
+                                    <button
+                                      onClick={() => handlePositionAction(pos.ticket, "close", pos.symbol)}
+                                      disabled={isLoading}
+                                      title="Tutup Posisi Penuh"
+                                      className="px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-bold flex items-center gap-1 transition-all disabled:opacity-40 cursor-pointer"
+                                    >
+                                      <XCircle size={12} /> Close
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
                 )}
               </div>
             )}
 
             {/* TAB 2: Account Telemetry */}
             {blotterTab === "telemetry" && (
-              <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4 h-full overflow-y-auto custom-scrollbar font-mono tabular-nums">
+              <div className="p-4 sm:p-6 grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 h-full overflow-y-auto custom-scrollbar font-mono tabular-nums">
                 <div className="bg-black/40 border border-white/5 rounded-2xl p-4 flex flex-col justify-between">
                   <span className="text-[10px] uppercase font-bold text-white/40">Balance Modal</span>
                   <span className="text-xl font-black text-white">${balance.toFixed(2)}</span>
@@ -814,6 +1044,7 @@ export default function Home() {
                 </div>
               </div>
             )}
+
 
             {/* TAB 3: Live Event Terminal Log Feed */}
             {blotterTab === "logs" && (

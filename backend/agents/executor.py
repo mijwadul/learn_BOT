@@ -75,7 +75,7 @@ class ExecutorAgent:
 
         self.running = True
         logging.info("Executor Agent started monitoring market...")
-        logging.info(f"Circuit Breakers Active [SpreadLimit: Dynamic (Base {Config.SPREAD_LIMIT_POINTS}), MaxDD: {Config.MAX_DRAWDOWN_PERCENT}%, FridayLiquidator: Sabtu 00:00 WIB, NewsBlackout: +/- {Config.NEWS_BLACKOUT_MINUTES}m]")
+        logging.info(f"Circuit Breakers Active [SpreadLimit: Dynamic (Base {Config.SPREAD_LIMIT_POINTS}), MaxDD: {Config.MAX_DRAWDOWN_PERCENT}%, FridayLiquidator: Sabtu 00:00 WIB (1x Non-Crypto), NewsBlackout: +/- {Config.NEWS_BLACKOUT_MINUTES}m]")
         
         # P2-3: Startup Position Reconciliation (Orphan Trade Guard Lintas Pair)
         self.position_tracker.reconcile_positions_on_startup()
@@ -276,12 +276,14 @@ class ExecutorAgent:
                                         trade_mode = "RUNNER"
                                         used_prob = p_buy_r if action_type == mt5.ORDER_TYPE_BUY else p_sell_r
 
-                                    # Partial Live check
+                                    # Partial Live check (Pair-aware Brain Activation)
                                     allow_execution = True
-                                    if trade_mode == "RUNNER" and not self.supervisor.is_runner_valid():
+                                    if trade_mode == "RUNNER" and not self.supervisor.is_runner_valid(clean_pair):
                                         allow_execution = False
-                                    elif trade_mode == "HIT_RUN" and not self.supervisor.is_normal_valid():
+                                        logging.info(f"[{clean_pair}] Sinyal RUNNER dibatalkan karena Otak Runner untuk {clean_pair} nonaktif/quarantine.")
+                                    elif trade_mode == "HIT_RUN" and not self.supervisor.is_normal_valid(clean_pair):
                                         allow_execution = False
+                                        logging.info(f"[{clean_pair}] Sinyal HIT_RUN dibatalkan karena Otak Normal untuk {clean_pair} nonaktif/quarantine.")
 
                                     # Filter BBMA Re-entry LWMA Zone & Zon Zero Loss (Slide 20, 21, 33, 51-56)
                                     lwma_5_h = row_data.get('LWMA_5_High', 0)

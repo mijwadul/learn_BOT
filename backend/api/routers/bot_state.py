@@ -21,14 +21,16 @@ class PositionActionRequest(BaseModel):
     symbol: Optional[str] = None
 
 @router.get("/api/state")
-async def get_state():
+async def get_state(symbol: Optional[str] = None):
     """
     P0-1: Non-Blocking Async Event Loop di FastAPI.
     Semua pemanggilan blocking I/O (Database & MT5) dibungkus asyncio.to_thread
     untuk mencegah drop connection pada WebSocket dan polling frontend.
+    Mendukung filter telemetri & status otak per-pair.
     """
     win_rate, total_trades, avg_profit, max_drawdown = 0.0, 0, 0.0, 0.0
     mode_performance = {}
+    cur_sym = (symbol or getattr(bot, "active_symbol", "XAUUSD")).upper()
     
     # 1. Non-blocking Database Query via asyncio.to_thread
     try:
@@ -73,7 +75,7 @@ async def get_state():
             pass
 
     # Sinkronisasi metadata akurasi persisten jika perlu
-    target_sym = getattr(bot.researcher, "symbol", "XAUUSD")
+    target_sym = cur_sym
     meta_path = f"models/{target_sym}/models_metadata.json"
     if not os.path.exists(meta_path):
         meta_path = "models/models_metadata.json"
@@ -98,11 +100,34 @@ async def get_state():
     except Exception as e:
         logging.debug(f"Gagal mengambil next high impact news: {e}")
 
+    # Telemetri & Status Otak per Pair
+    is_norm_active = bot.supervisor.is_normal_valid(cur_sym)
+    is_run_active = bot.supervisor.is_runner_valid(cur_sym)
+
+    latest_probs = {}
+    if hasattr(bot.executor, 'latest_probs_by_pair') and cur_sym in bot.executor.latest_probs_by_pair:
+        latest_probs = bot.executor.latest_probs_by_pair[cur_sym]
+    else:
+        latest_probs = getattr(bot.executor, 'latest_probs', {})
+
+    current_regime = getattr(bot.executor, 'current_market_regime', {"adx": 0.0, "regime": "UNKNOWN"})
+    if isinstance(current_regime, dict) and current_regime.get("symbol") != cur_sym and hasattr(bot.executor, 'latest_dfs_by_pair'):
+        pair_df = bot.executor.latest_dfs_by_pair.get(cur_sym)
+        if pair_df is not None and not pair_df.empty and 'adx' in pair_df.columns:
+            last_adx = float(pair_df['adx'].iloc[-1])
+            reg_name = "TRENDING" if last_adx >= Config.ADX_TREND_THRESHOLD else ("RANGING/CHOPPY" if last_adx < Config.ADX_RANGING_THRESHOLD else "TRANSITION")
+            current_regime = {
+                "adx": round(last_adx, 2),
+                "regime": reg_name,
+                "symbol": cur_sym,
+                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+
     return {
         "is_live": bot.is_live,
         "active_since": bot.active_since,
         "mt5_connected": bot.mt5_connected,
-        "active_symbol": getattr(bot, "active_symbol", "XAUUSD"),
+        "active_symbol": cur_sym,
         "active_pairs": getattr(bot, "active_pairs", ["XAUUSD"]),
         "supervisor_state": bot.supervisor.state,
         "performance": {
@@ -117,24 +142,29 @@ async def get_state():
             "equity": equity
         },
         "open_positions": open_positions,
+        "is_normal_active": is_norm_active,
+        "is_runner_active": is_run_active,
+        "all_brains_active": is_norm_active and is_run_active,
         "models_status": {
             "normal": {
                 "trained": bot.researcher.model_normal is not None,
-                "status": "LIVE/LAYAK" if bot.supervisor.is_normal_valid() else "IDLE/QUARANTINE",
+                "is_active": is_norm_active,
+                "status": "LIVE/LAYAK" if is_norm_active else "IDLE/QUARANTINE",
                 "is_training": bot.researcher.is_training_normal,
                 "last_accuracy": bot.researcher.last_accuracy_normal,
                 "last_trained": bot.researcher.last_trained_normal
             },
             "runner": {
                 "trained": bot.researcher.model_runner is not None,
-                "status": "LIVE/LAYAK" if bot.supervisor.is_runner_valid() else "IDLE/QUARANTINE",
+                "is_active": is_run_active,
+                "status": "LIVE/LAYAK" if is_run_active else "IDLE/QUARANTINE",
                 "is_training": bot.researcher.is_training_runner,
                 "last_accuracy": bot.researcher.last_accuracy_runner,
                 "last_trained": bot.researcher.last_trained_runner
             }
         },
-        "market_regime": getattr(bot.executor, 'current_market_regime', {"adx": 0.0, "regime": "UNKNOWN"}),
-        "latest_probabilities": getattr(bot.executor, 'latest_probs', {}),
+        "market_regime": current_regime,
+        "latest_probabilities": latest_probs,
         "online_learning": {
             "enabled": getattr(Config, 'ENABLE_ONLINE_LEARNING', True),
             "last_retrain": getattr(bot.executor, 'last_micro_retrain_time', None)
@@ -149,6 +179,10 @@ async def toggle_state(req: Optional[ToggleStateRequest] = None):
         bot.is_live = True
         bot.active_since = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         bot.supervisor.state = 'live'
+        
+        # Jika belum ada otak yang aktif saat live distart, aktifkan semua otak
+        if not bot.supervisor.is_any_model_valid():
+            bot.supervisor.force_live_mode("all")
         
         if not bot.mt5_connected:
             bot.connect_mt5()
@@ -166,7 +200,14 @@ async def toggle_state(req: Optional[ToggleStateRequest] = None):
             bot.executor_task.cancel()
         logging.info("Trading Bot DEACTIVATED (Idle Mode)")
         
-    return {"status": "success", "is_live": bot.is_live, "active_since": bot.active_since}
+    return {
+        "status": "success", 
+        "is_live": bot.is_live, 
+        "active_since": bot.active_since,
+        "is_normal_active": bot.supervisor.is_normal_valid(),
+        "is_runner_active": bot.supervisor.is_runner_valid(),
+        "all_brains_active": bot.supervisor.is_normal_valid() and bot.supervisor.is_runner_valid()
+    }
 
 @router.post("/api/positions/break-even")
 async def position_break_even(req: PositionActionRequest):

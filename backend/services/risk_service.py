@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import MetaTrader5 as mt5
 from config import Config
-from utils.mt5_utils import check_spread, is_cent_account
+from utils.mt5_utils import check_spread, is_cent_account, is_crypto_symbol
 
 class RiskService:
     """
@@ -20,6 +20,8 @@ class RiskService:
     def __init__(self, supervisor):
         self.supervisor = supervisor
         self.max_pyramiding = 3
+        # Tracking eksekusi Friday Liquidator agar hanya berjalan 1x per hari Sabtu per simbol
+        self._liquidated_dates_by_symbol = {}
 
     def calculate_lot_size(self, symbol: str, sl_distance: float) -> float:
         """
@@ -109,19 +111,38 @@ class RiskService:
 
     def check_friday_liquidator(self, symbol: str) -> bool:
         """
-        Cek apakah hari Sabtu mulai jam 00:00 WIB (setelah candle penutupan Jumat).
-        Jika ya, likuidasi semua posisi aktif untuk mencegah risiko gap akhir pekan.
+        Cek apakah hari Sabtu pas jam 00:00 WIB (setelah candle penutupan Jumat).
+        Hanya berjalan tepat 1x pas pukul 00:00 WIB untuk pair non-crypto (Forex/Komoditas)
+        guna mencegah risiko gap akhir pekan.
+        Pasar Crypto (BTCUSD, dsb) yang berjalan 24/7 dikecualikan (tidak ditutup).
+        Setelah lewat pukul 00:00 WIB, semua sistem berjalan normal seperti biasa.
         """
-        tick_data = mt5.symbol_info_tick(symbol)
-        if tick_data is not None:
-            wib_tz = datetime.timezone(datetime.timedelta(hours=7))
-            now_wib = datetime.datetime.fromtimestamp(tick_data.time, tz=wib_tz)
-            
-            # Hari Sabtu (weekday == 5) jam 00:00 WIB ke atas atau hari Minggu (weekday == 6)
-            if (now_wib.weekday() == 5 and now_wib.hour >= 0) or now_wib.weekday() == 6:
-                logging.warning(f"[SEKRING] Friday Liquidator Active (Sabtu {now_wib.strftime('%H:%M')} WIB)! Closing all positions.")
-                self.supervisor.trigger_friday_liquidator()
-                return True
+        # 1. Pasar Crypto buka 24/7 di akhir pekan tanpa penutupan pasar, dikecualikan
+        if is_crypto_symbol(symbol):
+            return False
+
+        # 2. Cek waktu aktual dalam zona WIB (UTC+7)
+        wib_tz = datetime.timezone(datetime.timedelta(hours=7))
+        now_wib = datetime.datetime.now(tz=wib_tz)
+
+        # 3. Hanya aktif tepat di hari Sabtu (weekday == 5) pukul 00:00 WIB (window toleransi 00:00 - 00:04 WIB)
+        if now_wib.weekday() == 5 and now_wib.hour == 0 and now_wib.minute < 5:
+            date_str = now_wib.strftime("%Y-%m-%d")
+            # Pastikan hanya berjalan 1x dalam hari Sabtu tersebut untuk simbol ini
+            if date_str in self._liquidated_dates_by_symbol.get(symbol, set()):
+                return False
+
+            if symbol not in self._liquidated_dates_by_symbol:
+                self._liquidated_dates_by_symbol[symbol] = set()
+            self._liquidated_dates_by_symbol[symbol].add(date_str)
+
+            logging.warning(
+                f"[SEKRING] Friday Liquidator Active 1x ({symbol}, Sabtu {now_wib.strftime('%H:%M:%S')} WIB)! "
+                f"Melikuidasi posisi terbuka non-crypto untuk mengamankan gap akhir pekan."
+            )
+            self.supervisor.trigger_friday_liquidator()
+            return True
+
         return False
 
     def check_news_blackout(self) -> tuple[bool, str]:

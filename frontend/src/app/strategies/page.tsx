@@ -64,6 +64,30 @@ export default function StrategiesPage() {
     return () => clearInterval(interval);
   }, [selectedPair]);
 
+  const handleToggleBrain = async (mode: "normal" | "runner" | "all", active: boolean) => {
+    setLoading(true);
+    try {
+      const endpoint = mode === "all" ? "/api/strategies/toggle-all-brains" : "/api/strategies/toggle-brain";
+      const body = mode === "all" ? { active, symbol: selectedPair } : { mode, active, symbol: selectedPair };
+      const res = await fetch(`${getApiBaseUrl()}${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        toast.success(data.message, "Saklar Otak AI");
+        fetchStrategyStatus(selectedPair);
+      } else {
+        toast.warning(data.message || "Gagal mengubah status otak.", "Perhatian");
+      }
+    } catch {
+      toast.error("Gagal terhubung ke backend server.", "Error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleForceMode = async (mode: string, action: "force_live" | "quarantine") => {
     setLoading(true);
     try {
@@ -75,6 +99,7 @@ export default function StrategiesPage() {
       });
       const data = await res.json();
       toast.info(`[${action.toUpperCase()}] diterapkan ke ${mode.toUpperCase()}. State: ${data.state}`, "Status Mode");
+      fetchStrategyStatus(selectedPair);
     } catch {
       toast.error("Gagal terhubung ke backend server.", "Error");
     } finally {
@@ -212,6 +237,7 @@ export default function StrategiesPage() {
           loading={loading}
           onTrain={handleTrainMode}
           onForceMode={handleForceMode}
+          onToggleBrain={handleToggleBrain}
         />
       </div>
 
