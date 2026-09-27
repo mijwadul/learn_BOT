@@ -64,21 +64,23 @@ class BotState:
         self.is_live = False
         self.active_since = None
         self.mt5_connected = False
-        self.active_symbol = "XAUUSD"
-        self.active_pairs = ["XAUUSD"]
+        self.active_symbol = "BTCUSD"
+        self.active_pairs = ["BTCUSD", "XAUUSD"]
         try:
             if os.path.exists("registered_pairs.json"):
                 with open("registered_pairs.json", "r") as f:
                     reg = json.load(f)
                     if isinstance(reg, list) and reg:
                         self.active_pairs = [str(p).upper() for p in reg if str(p).strip()]
+                        if self.active_pairs:
+                            self.active_symbol = self.active_pairs[0]
         except Exception:
             pass
         
         # Initialize Agents
         self.supervisor = SupervisorAgent()
-        self.data_miner = DataMinerAgent(symbol=Config.SYMBOL)
-        self.researcher = ResearcherAgent(symbol="XAUUSD")
+        self.data_miner = DataMinerAgent(symbol=self.active_symbol)
+        self.researcher = ResearcherAgent(symbol=self.active_symbol)
         self.gatekeeper = GatekeeperAgent(self.researcher)
         self.executor = ExecutorAgent(
             self.supervisor,

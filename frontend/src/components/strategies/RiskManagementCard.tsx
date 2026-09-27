@@ -119,7 +119,6 @@ export function RiskManagementCard({ portfolioEquity = 1000 }: RiskManagementCar
                 </span>
               )}
             </div>
-            <p className="text-xs text-white/50">Pilih model perhitungan ukuran lot dan batas risiko per transaksi</p>
           </div>
         </div>
 
@@ -184,7 +183,6 @@ export function RiskManagementCard({ portfolioEquity = 1000 }: RiskManagementCar
               />
               <span className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 text-xs font-mono">LOT</span>
             </div>
-            <p className="text-[10px] text-white/40 mt-1">Setiap OP menggunakan lot ini tanpa kalkulasi dinamis.</p>
           </div>
         )}
 
@@ -204,7 +202,6 @@ export function RiskManagementCard({ portfolioEquity = 1000 }: RiskManagementCar
                 className="w-full bg-black/40 border border-white/10 rounded-lg py-2 pl-8 pr-3 text-white font-mono font-bold text-sm focus:outline-none focus:border-brand-green"
               />
             </div>
-            <p className="text-[10px] text-white/40 mt-1">Lot dihitung agar kerugian menyentuh SL = nominal ini.</p>
           </div>
         )}
 
@@ -225,7 +222,6 @@ export function RiskManagementCard({ portfolioEquity = 1000 }: RiskManagementCar
               />
               <span className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 font-bold">%</span>
             </div>
-            <p className="text-[10px] text-white/40 mt-1">Lot dihitung adaptif berdasarkan persentase ekuitas akun.</p>
           </div>
         )}
 
@@ -235,7 +231,6 @@ export function RiskManagementCard({ portfolioEquity = 1000 }: RiskManagementCar
             <label className="text-[11px] font-bold text-amber-400 uppercase flex items-center gap-1">
               <ShieldCheck size={13} /> Max Lot Safety Cap
             </label>
-            <span className="text-[10px] text-white/40">Fat-Finger Protection</span>
           </div>
           <div className="relative">
             <input
@@ -249,7 +244,6 @@ export function RiskManagementCard({ portfolioEquity = 1000 }: RiskManagementCar
             />
             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 text-xs font-mono">MAX LOT</span>
           </div>
-          <p className="text-[10px] text-white/40 mt-1">Batas plafon mutlak agar bot tidak pernah membuka lot lebih besar dari ini.</p>
         </div>
 
         {/* Summary Telemetry */}
@@ -272,16 +266,6 @@ export function RiskManagementCard({ portfolioEquity = 1000 }: RiskManagementCar
           </div>
         </div>
       </div>
-
-      {/* Note for Cent Account */}
-      {isCentAccount && (
-        <div className="mb-4 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center gap-2 text-xs text-amber-300">
-          <AlertCircle size={15} className="shrink-0" />
-          <span>
-            <strong>Informasi Akun Cent:</strong> Simbol <code>{activeSymbol}</code> bertransaksi dalam satuan Cent (USC). Nilai 100 USC setara dengan $1.00 USD. Penggunaan <strong>Lot Tetap 0.01</strong> sangat disarankan untuk stabilitas modal kecil.
-          </span>
-        </div>
-      )}
 
       {/* Save Button */}
       <div className="flex justify-end pt-2 border-t border-white/5">

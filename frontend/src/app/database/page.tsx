@@ -229,7 +229,7 @@ export default function DatabasePage() {
         </div>
       </div>
 
-      {/* Info Deteksi Simbol Broker & Tabel */}
+      {/* Info Deteksi Simbol Broker */}
       <div className="mb-4 sm:mb-6 px-4 py-2.5 rounded-xl bg-brand-blue/10 border border-brand-blue/20 flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="flex items-center gap-2">
           <span className="text-white/60">Pair Terpilih:</span>
@@ -237,12 +237,6 @@ export default function DatabasePage() {
           <ChevronRight size={14} className="text-white/30" />
           <span className="text-white/60">Simbol Broker MT5:</span>
           <span className="font-bold text-brand-green font-mono text-sm">{health?.broker_symbol || "Resolving..."}</span>
-        </div>
-        <div className="flex items-center gap-2 text-white/50">
-          <span>Tabel Database Terisolasi:</span>
-          <span className="font-mono text-white/80 font-semibold bg-black/40 px-2 py-0.5 rounded border border-white/5">
-            {health?.table_name || `market_data_${selectedPair.toLowerCase()}`}
-          </span>
         </div>
       </div>
 
@@ -337,7 +331,7 @@ export default function DatabasePage() {
             </div>
             
             <p className="text-xs sm:text-sm text-white/60 mb-5 leading-relaxed">
-              Tarik data histori dan candle terkini khusus pair <strong className="text-white">{selectedPair}</strong> ({health?.broker_symbol || selectedPair}). Data disimpan ke tabel terisolasi tanpa mempengaruhi pair lainnya.
+              Tarik data histori dan candle M1 terkini langsung dari broker MT5 untuk pair <strong className="text-white">{selectedPair}</strong> ({health?.broker_symbol || selectedPair}).
             </p>
 
             {/* Tombol Utama: SYNC DATA TERBARU */}
@@ -346,7 +340,6 @@ export default function DatabasePage() {
                 <span className="text-xs font-bold uppercase tracking-wider text-brand-blue flex items-center gap-1.5">
                   <Zap size={14} /> Quick Incremental Sync ({selectedPair})
                 </span>
-                <span className="text-[10px] text-white/40">Tabel: {health?.table_name}</span>
               </div>
               <p className="text-xs text-white/60 mb-4">
                 Mengecek candle baru dari MT5 untuk {health?.broker_symbol || selectedPair} sejak record terakhir ({health?.max_date ? new Date(health.max_date).toLocaleTimeString([], { hour12: false }) : "DB"}) dan menyambungkannya ke database.

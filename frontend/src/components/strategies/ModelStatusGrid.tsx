@@ -56,9 +56,6 @@ export function ModelStatusGrid({
               {isAllActive ? "SEMUA OTAK AKTIF" : isNoneActive ? "SEMUA OTAK NONAKTIF" : "SEBAGIAN AKTIF"}
             </span>
           </div>
-          <p className="text-xs text-white/50 mt-1">
-            Nyalakan atau matikan salah satu atau kedua otak (Scalp 1:2 &amp; Trend Runner 1:5) secara instan.
-          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
@@ -126,17 +123,10 @@ export function ModelStatusGrid({
               </div>
             </div>
 
-            <p className="text-xs sm:text-sm text-white/50 mb-3">
-              Intraday scalping BBMA Re-entry berpedoman pada RR pas 1:2 dengan pelindung BE pada 1R.
-            </p>
-
             {/* Quick Toggle Switch for Normal Brain */}
             <div className="my-3 p-3 rounded-xl bg-black/40 border border-white/5 flex items-center justify-between">
               <div>
                 <span className="text-xs font-bold text-white block">Status Eksekusi Live</span>
-                <span className="text-[11px] text-white/40">
-                  {isNormalActive ? "Otak ini sedang mengeksekusi order scalp" : "Otak sedang diistirahatkan (Quarantine)"}
-                </span>
               </div>
 
               <button
@@ -153,7 +143,7 @@ export function ModelStatusGrid({
                 }`}
               >
                 {isNormalActive ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
-                <span>{isNormalActive ? "AKTIF (KLIK UNTUK OFF)" : "NONAKTIF (KLIK UNTUK AKTIF)"}</span>
+                <span>{isNormalActive ? "AKTIF" : "OFF"}</span>
               </button>
             </div>
 
@@ -251,17 +241,10 @@ export function ModelStatusGrid({
               </div>
             </div>
 
-            <p className="text-xs sm:text-sm text-white/50 mb-3">
-              Trend-following dinamis dengan milestone partial close 50% di 2R dan target hingga 5R.
-            </p>
-
             {/* Quick Toggle Switch for Runner Brain */}
             <div className="my-3 p-3 rounded-xl bg-black/40 border border-white/5 flex items-center justify-between">
               <div>
                 <span className="text-xs font-bold text-white block">Status Eksekusi Live</span>
-                <span className="text-[11px] text-white/40">
-                  {isRunnerActive ? "Otak ini sedang mengeksekusi order trend runner" : "Otak sedang diistirahatkan (Quarantine)"}
-                </span>
               </div>
 
               <button
@@ -278,7 +261,7 @@ export function ModelStatusGrid({
                 }`}
               >
                 {isRunnerActive ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
-                <span>{isRunnerActive ? "AKTIF (KLIK UNTUK OFF)" : "NONAKTIF (KLIK UNTUK AKTIF)"}</span>
+                <span>{isRunnerActive ? "AKTIF" : "OFF"}</span>
               </button>
             </div>
 

@@ -49,10 +49,12 @@ def clean_records(records):
     return cleaned
 
 @router.get("/api/journal")
-async def get_journal(limit: int = 200, mode: str = None):
+async def get_journal(limit: int = 200, mode: str = None, symbol: str = None):
     """
-    P0-1: Async journal fetching without blocking the event loop.
+    P0-1: Async journal fetching without blocking the event loop (multi-pair aware).
     """
+    target_sym = symbol.upper() if symbol and symbol.strip() else None
+
     def _fetch_journal():
         from database import (
             sync_mt5_closed_deals_to_db,
@@ -69,17 +71,21 @@ async def get_journal(limit: int = 200, mode: str = None):
             logging.debug(f"[Journal MT5 Sync] {e_sync}")
 
         open_positions = get_mt5_open_positions()
-        journal_df = get_trade_journal_entries(limit=limit)
+        if target_sym:
+            open_positions = [p for p in open_positions if str(p.get("symbol", "")).upper() == target_sym]
+
+        journal_df = get_trade_journal_entries(limit=limit, symbol=target_sym)
         journal_data = clean_records(journal_df.to_dict(orient="records")) if not journal_df.empty else []
         
-        trade_logs = get_recent_trade_logs(limit=limit, mode=mode)
+        trade_logs = get_recent_trade_logs(limit=limit, mode=mode, symbol=target_sym)
         trade_data = clean_records(trade_logs.to_dict(orient="records")) if not trade_logs.empty else []
         
-        perf_summary = get_trade_performance_summary()
-        live_feedback_summary = get_live_decision_summary()
+        perf_summary = get_trade_performance_summary(symbol=target_sym)
+        live_feedback_summary = get_live_decision_summary(symbol=target_sym)
 
         return {
             "status": "success",
+            "symbol": target_sym,
             "open_positions": open_positions,
             "journal": journal_data,
             "trade_logs": trade_data,

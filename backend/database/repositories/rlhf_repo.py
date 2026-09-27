@@ -1,7 +1,7 @@
 import datetime
 import logging
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import text, func
 from sqlalchemy.orm import Session
 from ..connection import sync_engine
 from ..models.rlhf import ApprovedSetup, RejectedSetup, IgnoredSetup, HardNegative
@@ -35,15 +35,17 @@ def save_approved_setup(setup_id: str, symbol: str = "XAUUSD", action: str = "BU
         logging.error(f"Failed to save approved setup: {e}")
         return False
 
-def get_approved_setup_ids(mode: str = None):
-    """Ambil himpunan ID setup yang telah di-approve manusia untuk pembobotan LightGBM (opsional per mode)."""
+def get_approved_setup_ids(mode: str = None, symbol: str = None):
+    """Ambil himpunan ID setup yang telah di-approve manusia untuk pembobotan LightGBM (opsional per mode & symbol)."""
     try:
         ensure_schema_migrations()
         with Session(sync_engine) as session:
+            query = session.query(ApprovedSetup.setup_id)
             if mode:
-                rows = session.query(ApprovedSetup.setup_id).filter(ApprovedSetup.mode == mode.lower()).all()
-            else:
-                rows = session.query(ApprovedSetup.setup_id).all()
+                query = query.filter(ApprovedSetup.mode == mode.lower())
+            if symbol:
+                query = query.filter(func.upper(ApprovedSetup.symbol) == symbol.upper())
+            rows = query.all()
             return {r[0] for r in rows}
     except Exception as e:
         logging.error(f"Failed to get approved setup IDs: {e}")
@@ -89,15 +91,17 @@ def save_rejected_setup(setup_id: str, symbol: str = "XAUUSD", action: str = "BU
         logging.error(f"Failed to save rejected setup: {e}")
         return False
 
-def get_rejected_setup_ids(mode: str = None):
-    """Ambil himpunan ID setup yang telah di-reject manusia untuk penalty LightGBM (opsional per mode)."""
+def get_rejected_setup_ids(mode: str = None, symbol: str = None):
+    """Ambil himpunan ID setup yang telah di-reject manusia untuk penalty LightGBM (opsional per mode & symbol)."""
     try:
         ensure_schema_migrations()
         with Session(sync_engine) as session:
+            query = session.query(RejectedSetup.setup_id)
             if mode:
-                rows = session.query(RejectedSetup.setup_id).filter(RejectedSetup.mode == mode.lower()).all()
-            else:
-                rows = session.query(RejectedSetup.setup_id).all()
+                query = query.filter(RejectedSetup.mode == mode.lower())
+            if symbol:
+                query = query.filter(func.upper(RejectedSetup.symbol) == symbol.upper())
+            rows = query.all()
             return {r[0] for r in rows}
     except Exception as e:
         logging.error(f"Failed to get rejected setup IDs: {e}")
@@ -131,26 +135,28 @@ def save_ignored_setup(setup_id: str, symbol: str = "XAUUSD", action: str = "BUY
         logging.error(f"Failed to save ignored setup: {e}")
         return False
 
-def get_ignored_setup_ids(mode: str = None):
-    """Ambil himpunan ID setup yang sengaja diabaikan trader (opsional per mode)."""
+def get_ignored_setup_ids(mode: str = None, symbol: str = None):
+    """Ambil himpunan ID setup yang sengaja diabaikan trader (opsional per mode & symbol)."""
     try:
         ensure_schema_migrations()
         with Session(sync_engine) as session:
+            query = session.query(IgnoredSetup.setup_id)
             if mode:
-                rows = session.query(IgnoredSetup.setup_id).filter(IgnoredSetup.mode == mode.lower()).all()
-            else:
-                rows = session.query(IgnoredSetup.setup_id).all()
+                query = query.filter(IgnoredSetup.mode == mode.lower())
+            if symbol:
+                query = query.filter(func.upper(IgnoredSetup.symbol) == symbol.upper())
+            rows = query.all()
             return {r[0] for r in rows}
     except Exception as e:
         logging.error(f"Failed to get ignored setup IDs: {e}")
         return set()
 
-def add_hard_negative(setup_id: str, failed_mode: str = "Normal"):
+def add_hard_negative(setup_id: str, failed_mode: str = "Normal", symbol: str = "XAUUSD"):
     try:
         with Session(sync_engine) as session:
             existing = session.query(HardNegative).filter_by(setup_id=setup_id).first()
             if not existing:
-                new_hn = HardNegative(setup_id=setup_id, failed_mode=failed_mode)
+                new_hn = HardNegative(setup_id=setup_id, failed_mode=failed_mode, symbol=str(symbol).upper())
                 session.add(new_hn)
                 session.commit()
                 return True
@@ -159,7 +165,7 @@ def add_hard_negative(setup_id: str, failed_mode: str = "Normal"):
     return False
 
 def bulk_add_hard_negatives(records: list):
-    """records adalah list of dict: [{'setup_id': '...', 'failed_mode': '...'}, ...]"""
+    """records adalah list of dict: [{'setup_id': '...', 'failed_mode': '...', 'symbol': '...'}, ...]"""
     try:
         with Session(sync_engine) as session:
             with sync_engine.connect() as conn:
@@ -169,7 +175,8 @@ def bulk_add_hard_negatives(records: list):
             new_objects = []
             for r in records:
                 if r['setup_id'] not in existing_ids:
-                    new_objects.append(HardNegative(setup_id=r['setup_id'], failed_mode=r['failed_mode']))
+                    sym = str(r.get('symbol', 'XAUUSD')).upper()
+                    new_objects.append(HardNegative(setup_id=r['setup_id'], failed_mode=r['failed_mode'], symbol=sym))
                     existing_ids.add(r['setup_id'])
             
             if new_objects:
@@ -181,13 +188,16 @@ def bulk_add_hard_negatives(records: list):
         logging.error(f"Gagal menyimpan Hard Negatives (Bulk): {e}")
         return 0
 
-def get_hard_negative_ids(mode: str = None):
+def get_hard_negative_ids(mode: str = None, symbol: str = None):
     try:
         ensure_schema_migrations()
+        conditions = []
         if mode:
-            query = f"SELECT setup_id FROM hard_negatives WHERE LOWER(failed_mode) = '{mode.lower()}'"
-        else:
-            query = "SELECT setup_id FROM hard_negatives"
+            conditions.append(f"LOWER(failed_mode) = '{mode.lower()}'")
+        if symbol:
+            conditions.append(f"UPPER(symbol) = '{symbol.upper()}'")
+        where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        query = f"SELECT setup_id FROM hard_negatives {where_sql}"
         with sync_engine.connect() as conn:
             df = pd.read_sql(text(query), con=conn)
         return df['setup_id'].tolist() if not df.empty else []

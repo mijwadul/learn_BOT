@@ -14,19 +14,23 @@ def ensure_schema_migrations():
     try:
         Base.metadata.create_all(sync_engine)
         with sync_engine.begin() as conn:
-            # 1. trade_logs: tambah mode, ticket, dan setup_id
+            # 1. trade_logs: tambah mode, ticket, setup_id, dan symbol
             conn.execute(text("ALTER TABLE trade_logs ADD COLUMN IF NOT EXISTS mode VARCHAR DEFAULT 'NORMAL'"))
             conn.execute(text("ALTER TABLE trade_logs ADD COLUMN IF NOT EXISTS ticket BIGINT"))
             conn.execute(text("ALTER TABLE trade_logs ADD COLUMN IF NOT EXISTS setup_id VARCHAR"))
+            conn.execute(text("ALTER TABLE trade_logs ADD COLUMN IF NOT EXISTS symbol VARCHAR DEFAULT 'XAUUSD'"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trade_logs_mode ON trade_logs (mode)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trade_logs_ticket ON trade_logs (ticket)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trade_logs_setup_id ON trade_logs (setup_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trade_logs_symbol ON trade_logs (symbol)"))
 
-            # 2. live_decision_samples: ubah ticket ke BIGINT (MT5 ticket bisa > 2.14 milyar)
+            # 2. live_decision_samples: ubah ticket ke BIGINT dan tambah symbol
             try:
                 conn.execute(text("ALTER TABLE live_decision_samples ALTER COLUMN ticket TYPE BIGINT"))
             except Exception:
                 pass
+            conn.execute(text("ALTER TABLE live_decision_samples ADD COLUMN IF NOT EXISTS symbol VARCHAR DEFAULT 'XAUUSD'"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_live_decision_samples_symbol ON live_decision_samples (symbol)"))
 
             # 3. approved_setups: tambah mode
             conn.execute(text("ALTER TABLE approved_setups ADD COLUMN IF NOT EXISTS mode VARCHAR DEFAULT 'normal'"))
@@ -47,11 +51,19 @@ def ensure_schema_migrations():
                 except Exception:
                     pass
 
-            # 6. trade_journal: ubah tiket ke BIGINT (tiket MT5 bernilai > 2.1 Milyar)
+            # 6. trade_journal: ubah tiket ke BIGINT dan tambah symbol
             try:
                 conn.execute(text("ALTER TABLE trade_journal ALTER COLUMN tiket TYPE BIGINT"))
             except Exception:
                 pass
+            conn.execute(text("ALTER TABLE trade_journal ADD COLUMN IF NOT EXISTS symbol VARCHAR DEFAULT 'XAUUSD'"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trade_journal_symbol ON trade_journal (symbol)"))
+
+            # 7. Pastikan index symbol pada tabel RLHF & Hard Negatives
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_hard_negatives_symbol ON hard_negatives (symbol)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_approved_setups_symbol ON approved_setups (symbol)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rejected_setups_symbol ON rejected_setups (symbol)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ignored_setups_symbol ON ignored_setups (symbol)"))
 
         # 7. Koreksi Otomatis Tiket Posisi, Action BUY/SELL, dan Mode pada closed deals MT5
 

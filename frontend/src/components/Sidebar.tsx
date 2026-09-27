@@ -7,7 +7,6 @@ import Image from "next/image";
 import LogoImg from "./Logo.png";
 import { 
   LayoutDashboard, 
-  Wallet, 
   LineChart, 
   Settings2, 
   BookOpen, 
@@ -115,7 +114,6 @@ export default function Sidebar() {
         {/* Navigation Items */}
         <nav className="flex-1 w-full space-y-1.5 md:space-y-2 overflow-y-auto overflow-x-hidden pr-0.5 scrollbar-none">
           <NavItem href="/" icon={<LayoutDashboard size={22} />} label="Dashboard" active={pathname === "/"} isCollapsed={isCollapsed} onClick={closeSidebar} />
-          <NavItem href="/portfolio" icon={<Wallet size={22} />} label="Portfolio" active={pathname === "/portfolio"} isCollapsed={isCollapsed} onClick={closeSidebar} />
           <NavItem href="/markets" icon={<LineChart size={22} />} label="Markets" active={pathname === "/markets"} isCollapsed={isCollapsed} onClick={closeSidebar} />
           <NavItem href="/strategies" icon={<Settings2 size={22} />} label="Strategies" active={pathname === "/strategies"} isCollapsed={isCollapsed} onClick={closeSidebar} />
           <NavItem href="/database" icon={<Database size={22} />} label="Database" active={pathname === "/database"} isCollapsed={isCollapsed} onClick={closeSidebar} />

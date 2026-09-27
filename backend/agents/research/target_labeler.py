@@ -116,66 +116,124 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0) -> pd.DataFra
         raw_sl_sell = (resist_level - entry_sell) + (0.2 * atr_i)
         sl_dist_sell = max(min_sl, min(max_sl, raw_sl_sell))
         
-        # Target Normal: Tetap RR murni 1:2
-        tp_buy_normal = entry_buy + (sl_dist_buy * 2.0)
-        sl_buy_normal = entry_buy - sl_dist_buy
-        tp_sell_normal = entry_sell - (sl_dist_sell * 2.0)
-        sl_sell_normal = entry_sell + sl_dist_sell
-        
-        # Target Runner: RR dinamis
-        runner_rr = max_runner_rr
-        tp_buy_runner = entry_buy + (sl_dist_buy * runner_rr)
-        sl_buy_runner = entry_buy - sl_dist_buy
-        tp_sell_runner = entry_sell - (sl_dist_sell * runner_rr)
-        sl_sell_runner = entry_sell + sl_dist_sell
+        # ---------------------------------------------------------------------------------
+        # INSTITUTIONAL TWO-TIER TARGET SPECIFICATION:
+        # Normal Mode: TP1 = 1.0R (De-risking & Breakeven), TP2 = 2.0R (Target Akhir)
+        # Runner Mode: TP1 = 1.5R (De-risking), TP2 = Dynamic Runner RR (up to max_runner_rr)
+        # ---------------------------------------------------------------------------------
+        tp1_buy_n = entry_buy + (sl_dist_buy * 1.0)
+        tp2_buy_n = entry_buy + (sl_dist_buy * 2.0)
+        sl_buy_n = entry_buy - sl_dist_buy
 
-        # 1. Evaluasi Setup BUY (Triple Barrier Method Murni)
+        tp1_sell_n = entry_sell - (sl_dist_sell * 1.0)
+        tp2_sell_n = entry_sell - (sl_dist_sell * 2.0)
+        sl_sell_n = entry_sell + sl_dist_sell
+
+        runner_rr = max_runner_rr
+        tp1_buy_r = entry_buy + (sl_dist_buy * 1.5)
+        tp2_buy_r = entry_buy + (sl_dist_buy * runner_rr)
+
+        tp1_sell_r = entry_sell - (sl_dist_sell * 1.5)
+        tp2_sell_r = entry_sell - (sl_dist_sell * runner_rr)
+
+        # 1. Evaluasi Setup BUY (Institutional Two-Tier Barrier Simulation)
         if eval_buy:
-            buy_success_n = False
+            hit_tp1_n = False
+            hit_sl_n = False
             horizon_n = min(i + 121, n)
             for j in range(i + 1, horizon_n):
-                if lows[j] <= sl_buy_normal:
-                    break
-                elif highs[j] >= tp_buy_normal:
-                    buy_success_n = True
-                    break
-            if buy_success_n:
-                labels_normal[i] = 1
+                if not hit_tp1_n:
+                    if lows[j] <= sl_buy_n:
+                        hit_sl_n = True
+                        break
+                    elif highs[j] >= tp1_buy_n:
+                        hit_tp1_n = True
+                else:
+                    # Posisi sudah secure di TP1 (SL trailing ke Breakeven / entry)
+                    if highs[j] >= tp2_buy_n:
+                        break
+                    elif lows[j] <= entry_buy:
+                        break
 
-            buy_success_r = False
+            # Setup Normal BUY menang (1) jika:
+            # - Menembus TP1 tanpa mengenai SL awal (profit terkunci & risiko nol)
+            # - Atau pada timeout harga terapung dengan gain signifikan >= +0.75R
+            if hit_tp1_n and not hit_sl_n:
+                labels_normal[i] = 1
+            elif not hit_sl_n and horizon_n > i + 1:
+                final_close = closes[horizon_n - 1]
+                if final_close >= entry_buy + (0.75 * sl_dist_buy):
+                    labels_normal[i] = 1
+
+            # Evaluasi Runner BUY
+            hit_tp1_r = False
+            hit_sl_r = False
+            hit_tp2_r = False
             horizon_r = min(i + 301, n)
             for j in range(i + 1, horizon_r):
-                if lows[j] <= sl_buy_runner:
-                    break
-                elif highs[j] >= tp_buy_runner:
-                    buy_success_r = True
-                    break
-            if buy_success_r:
+                if not hit_tp1_r:
+                    if lows[j] <= sl_buy_n:
+                        hit_sl_r = True
+                        break
+                    elif highs[j] >= tp1_buy_r:
+                        hit_tp1_r = True
+                else:
+                    if highs[j] >= tp2_buy_r:
+                        hit_tp2_r = True
+                        break
+                    elif lows[j] <= entry_buy:
+                        break
+
+            if hit_tp2_r or (hit_tp1_r and not hit_sl_r):
                 labels_runner[i] = 1
 
-        # 2. Evaluasi Setup SELL (Triple Barrier Method Murni)
+        # 2. Evaluasi Setup SELL (Institutional Two-Tier Barrier Simulation)
         if eval_sell:
-            sell_success_n = False
+            hit_tp1_n = False
+            hit_sl_n = False
             horizon_n = min(i + 121, n)
             for j in range(i + 1, horizon_n):
-                if highs[j] >= sl_sell_normal:
-                    break
-                elif lows[j] <= tp_sell_normal:
-                    sell_success_n = True
-                    break
-            if sell_success_n:
-                labels_normal[i] = 2
+                if not hit_tp1_n:
+                    if highs[j] >= sl_sell_n:
+                        hit_sl_n = True
+                        break
+                    elif lows[j] <= tp1_sell_n:
+                        hit_tp1_n = True
+                else:
+                    # Posisi sudah secure di TP1 (SL trailing ke Breakeven / entry)
+                    if lows[j] <= tp2_sell_n:
+                        break
+                    elif highs[j] >= entry_sell:
+                        break
 
-            sell_success_r = False
+            if hit_tp1_n and not hit_sl_n:
+                labels_normal[i] = 1
+            elif not hit_sl_n and horizon_n > i + 1:
+                final_close = closes[horizon_n - 1]
+                if final_close <= entry_sell - (0.75 * sl_dist_sell):
+                    labels_normal[i] = 1
+
+            # Evaluasi Runner SELL
+            hit_tp1_r = False
+            hit_sl_r = False
+            hit_tp2_r = False
             horizon_r = min(i + 301, n)
             for j in range(i + 1, horizon_r):
-                if highs[j] >= sl_sell_runner:
-                    break
-                elif lows[j] <= tp_sell_runner:
-                    sell_success_r = True
-                    break
-            if sell_success_r:
-                labels_runner[i] = 2
+                if not hit_tp1_r:
+                    if highs[j] >= sl_sell_n:
+                        hit_sl_r = True
+                        break
+                    elif lows[j] <= tp1_sell_r:
+                        hit_tp1_r = True
+                else:
+                    if lows[j] <= tp2_sell_r:
+                        hit_tp2_r = True
+                        break
+                    elif highs[j] >= entry_sell:
+                        break
+
+            if hit_tp2_r or (hit_tp1_r and not hit_sl_r):
+                labels_runner[i] = 1
                     
     df['Target_Normal'] = labels_normal
     df['Target_Runner'] = labels_runner

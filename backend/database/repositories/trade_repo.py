@@ -10,7 +10,7 @@ from ..connection import sync_engine, Base
 from ..models.trade import TradeLog, LiveDecisionSample, TradeJournal
 from ..migrations import ensure_schema_migrations
 
-def log_trade_record(action: str, volume: float, price: float, sl: float, tp: float, profit: float = 0.0, comment: str = "", mode: str = "NORMAL", ticket: int = None, setup_id: str = None):
+def log_trade_record(action: str, volume: float, price: float, sl: float, tp: float, profit: float = 0.0, comment: str = "", mode: str = "NORMAL", ticket: int = None, setup_id: str = None, symbol: str = "XAUUSD"):
     """Simpan catatan transaksi ke database (trade_logs)."""
     try:
         ensure_schema_migrations()
@@ -19,6 +19,7 @@ def log_trade_record(action: str, volume: float, price: float, sl: float, tp: fl
                 time=datetime.datetime.now(),
                 ticket=ticket,
                 setup_id=setup_id,
+                symbol=str(symbol).upper() if symbol else "XAUUSD",
                 action=action,
                 mode=mode.upper() if mode else "NORMAL",
                 volume=volume,
@@ -33,7 +34,7 @@ def log_trade_record(action: str, volume: float, price: float, sl: float, tp: fl
     except Exception as e:
         logging.error(f"Failed to log trade to DB: {e}")
 
-def save_live_decision_sample(ticket: int, setup_id: str, mode: str, action: str, probability: float, entry_price: float, sl: float, tp: float, feature_vector: dict):
+def save_live_decision_sample(ticket: int, setup_id: str, mode: str, action: str, probability: float, entry_price: float, sl: float, tp: float, feature_vector: dict, symbol: str = "XAUUSD"):
     """Simpan snapshot feature vector numerik saat AI melakukan eksekusi di live market."""
     try:
         ensure_schema_migrations()
@@ -56,6 +57,7 @@ def save_live_decision_sample(ticket: int, setup_id: str, mode: str, action: str
             sample = LiveDecisionSample(
                 ticket=ticket,
                 setup_id=setup_id,
+                symbol=str(symbol).upper() if symbol else "XAUUSD",
                 timestamp=datetime.datetime.now(),
                 mode=mode.upper() if mode else "NORMAL",
                 action=action.upper(),
@@ -69,7 +71,7 @@ def save_live_decision_sample(ticket: int, setup_id: str, mode: str, action: str
             )
             session.add(sample)
             session.commit()
-            logging.info(f"[Live Feedback] Decision sample {setup_id} (Ticket #{ticket}) berhasil disimpan.")
+            logging.info(f"[Live Feedback] Decision sample {setup_id} [{symbol}] (Ticket #{ticket}) berhasil disimpan.")
     except Exception as e:
         logging.error(f"Failed to save live decision sample: {e}")
 
@@ -109,20 +111,24 @@ def update_live_decision_outcome(ticket: int, exit_price: float, profit: float):
         logging.error(f"Failed to update live decision outcome: {e}")
     return False
 
-def get_live_decision_samples_for_training(mode: str = "normal"):
+def get_live_decision_samples_for_training(mode: str = "normal", symbol: str = None):
     """
     Mengambil data live decision yang sudah tertutup (WIN dan LOSS)
     dan mengonversinya kembali menjadi DataFrame lengkap dengan Target dan Sample Weight.
+    Diisolasi per pair / symbol untuk mencegah kontaminasi silang.
     """
     try:
         ensure_schema_migrations()
         mode_val = mode.upper() if mode else "NORMAL"
         with Session(sync_engine) as session:
-            samples = session.query(LiveDecisionSample).filter(
+            query = session.query(LiveDecisionSample).filter(
                 (func.upper(LiveDecisionSample.mode) == mode_val) &
                 (LiveDecisionSample.outcome.in_(["WIN", "LOSS"])) &
                 (LiveDecisionSample.rlhf_label != "IGNORED")
-            ).all()
+            )
+            if symbol:
+                query = query.filter(func.upper(LiveDecisionSample.symbol) == str(symbol).upper())
+            samples = query.all()
 
             if not samples:
                 return pd.DataFrame()
@@ -138,7 +144,7 @@ def get_live_decision_samples_for_training(mode: str = "normal"):
                 is_win = (s.outcome == "WIN")
 
                 if is_win:
-                    target_label = 1 if is_buy else 2
+                    target_label = 1
                     weight = 2.5
                 else:
                     target_label = 0
@@ -146,6 +152,7 @@ def get_live_decision_samples_for_training(mode: str = "normal"):
 
                 target_col = "Target_Normal" if mode_val == "NORMAL" else "Target_Runner"
                 f_dict[target_col] = target_label
+                f_dict["setup_dir"] = 1 if is_buy else 2
                 f_dict["_sample_weight"] = weight
                 f_dict["_timestamp"] = s.timestamp
                 rows.append(f_dict)
@@ -162,8 +169,8 @@ def get_live_decision_samples_for_training(mode: str = "normal"):
         logging.error(f"Failed to load live decision samples for training: {e}")
         return pd.DataFrame()
 
-def get_recent_trade_logs(limit: int = 100, mode: str = None, only_closed: bool = True):
-    """Ambil riwayat transaksi terbaru dari tabel trade_logs (opsional difilter per mode)."""
+def get_recent_trade_logs(limit: int = 100, mode: str = None, symbol: str = None, only_closed: bool = True):
+    """Ambil riwayat transaksi terbaru dari tabel trade_logs (opsional difilter per mode dan symbol)."""
     try:
         ensure_schema_migrations()
         where_clauses = []
@@ -174,8 +181,10 @@ def get_recent_trade_logs(limit: int = 100, mode: str = None, only_closed: bool 
                 where_clauses.append("UPPER(mode) LIKE '%RUNNER%'")
             else:
                 where_clauses.append("(UPPER(mode) NOT LIKE '%RUNNER%' OR mode IS NULL)")
+        if symbol:
+            where_clauses.append(f"UPPER(symbol) = '{symbol.upper()}'")
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        query = f"SELECT id, ticket, setup_id, time, action, mode, volume, price, sl, tp, profit, comment FROM trade_logs {where_sql} ORDER BY time DESC LIMIT {limit}"
+        query = f"SELECT id, ticket, setup_id, symbol, time, action, mode, volume, price, sl, tp, profit, comment FROM trade_logs {where_sql} ORDER BY time DESC LIMIT {limit}"
         with sync_engine.connect() as conn:
             df = pd.read_sql(text(query), con=conn)
         if not df.empty:
@@ -183,6 +192,8 @@ def get_recent_trade_logs(limit: int = 100, mode: str = None, only_closed: bool 
                 df['time'] = pd.to_datetime(df['time'])
             if 'setup_id' in df.columns:
                 df['setup_id'] = df['setup_id'].fillna('-')
+            if 'symbol' in df.columns:
+                df['symbol'] = df['symbol'].fillna('XAUUSD')
             if 'comment' in df.columns:
                 df['comment'] = df['comment'].fillna('')
             df = df.where(pd.notnull(df), None)
@@ -191,16 +202,19 @@ def get_recent_trade_logs(limit: int = 100, mode: str = None, only_closed: bool 
         logging.error(f"Failed to read trade logs from DB: {e}")
         return pd.DataFrame()
 
-def get_live_decision_summary():
-    """Mengembalikan statistik ringkas live decision samples (Open, Win, Loss per mode)."""
+def get_live_decision_summary(symbol: str = None):
+    """Mengembalikan statistik ringkas live decision samples (Open, Win, Loss per mode, opsional per symbol)."""
     try:
         ensure_schema_migrations()
         with Session(sync_engine) as session:
-            rows = session.query(
+            q = session.query(
                 LiveDecisionSample.mode,
                 LiveDecisionSample.outcome,
                 func.count(LiveDecisionSample.id)
-            ).group_by(LiveDecisionSample.mode, LiveDecisionSample.outcome).all()
+            )
+            if symbol:
+                q = q.filter(func.upper(LiveDecisionSample.symbol) == symbol.upper())
+            rows = q.group_by(LiveDecisionSample.mode, LiveDecisionSample.outcome).all()
             
             summary = {
                 "NORMAL": {"OPEN": 0, "WIN": 0, "LOSS": 0, "BE": 0, "TOTAL": 0},
@@ -218,18 +232,20 @@ def get_live_decision_summary():
         logging.error(f"Failed to get live decision summary: {e}")
         return {}
 
-def get_historical_pnl_feedback(mode: str = None):
-    """Ambil riwayat transaksi lengkap untuk PnL Feedback Loop pada AI Researcher."""
+def get_historical_pnl_feedback(mode: str = None, symbol: str = None):
+    """Ambil riwayat transaksi lengkap untuk PnL Feedback Loop pada AI Researcher terisolasi per pair."""
     try:
         ensure_schema_migrations()
+        where_clauses = ["action IN ('BUY', 'SELL', 'CLOSE', 'PARTIAL_CLOSE')", "profit != 0.0"]
         if mode:
             if "RUNNER" in mode.upper():
-                where_mode = "AND UPPER(mode) LIKE '%RUNNER%'"
+                where_clauses.append("UPPER(mode) LIKE '%RUNNER%'")
             else:
-                where_mode = "AND (UPPER(mode) NOT LIKE '%RUNNER%' OR mode IS NULL)"
-        else:
-            where_mode = ""
-        query = f"SELECT time, profit, action, mode FROM trade_logs WHERE action IN ('BUY', 'SELL', 'CLOSE', 'PARTIAL_CLOSE') AND profit != 0.0 {where_mode} ORDER BY time DESC LIMIT 10000"
+                where_clauses.append("(UPPER(mode) NOT LIKE '%RUNNER%' OR mode IS NULL)")
+        if symbol:
+            where_clauses.append(f"UPPER(symbol) = '{symbol.upper()}'")
+        where_sql = "WHERE " + " AND ".join(where_clauses)
+        query = f"SELECT time, profit, action, mode, symbol FROM trade_logs {where_sql} ORDER BY time DESC LIMIT 10000"
         with sync_engine.connect() as conn:
             df = pd.read_sql(text(query), con=conn)
         if not df.empty and 'time' in df.columns:
@@ -239,14 +255,15 @@ def get_historical_pnl_feedback(mode: str = None):
         logging.error(f"Failed to fetch historical PnL feedback: {e}")
         return pd.DataFrame()
 
-def get_trade_performance_summary():
+def get_trade_performance_summary(symbol: str = None):
     """
     Menghitung statistik trading terpisah untuk Mode Normal dan Mode Runner:
-    Total trades, Win rate, Total Realized Profit/Loss, Wins, Losses.
+    Total trades, Win rate, Total Realized Profit/Loss, Wins, Losses (opsional per symbol).
     """
     try:
         ensure_schema_migrations()
-        query = "SELECT mode, profit FROM trade_logs WHERE action IN ('CLOSE', 'PARTIAL_CLOSE', 'BUY', 'SELL') AND profit != 0.0"
+        where_sql = f"AND UPPER(symbol) = '{symbol.upper()}'" if symbol else ""
+        query = f"SELECT mode, profit, symbol FROM trade_logs WHERE action IN ('CLOSE', 'PARTIAL_CLOSE', 'BUY', 'SELL') AND profit != 0.0 {where_sql}"
         with sync_engine.connect() as conn:
             df = pd.read_sql(text(query), con=conn)
         
@@ -398,10 +415,15 @@ def sync_mt5_closed_deals_to_db(days_back: int = 90):
                         mode = "NORMAL"
 
                     net_profit = float(deal.profit) + float(deal.swap) + float(deal.commission)
+                    deal_sym = getattr(deal, 'symbol', None)
+                    if not deal_sym and pos_log and pos_log.symbol:
+                        deal_sym = pos_log.symbol
+                    deal_sym = (deal_sym or "XAUUSD").upper()
 
                     close_entry = TradeLog(
                         ticket=pos_id if pos_id else deal_ticket,
                         setup_id=pos_setup_id or f"SETUP_LIVE_{mode}_{pos_id}",
+                        symbol=deal_sym,
                         time=datetime.datetime.fromtimestamp(deal.time),
                         action=action,
                         mode=mode,
@@ -433,7 +455,7 @@ def sync_mt5_closed_deals_to_db(days_back: int = 90):
         logging.error(f"Failed to sync MT5 deals: {e}")
         return 0
 
-def log_trade_journal(tiket: int, event_type: str, harga: float, alasan: str, chart_snapshot: str):
+def log_trade_journal(tiket: int, event_type: str, harga: float, alasan: str, chart_snapshot: str, symbol: str = "XAUUSD"):
     """
     Catat event transaksi (ENTRY, SL_MODIFY, EXIT) beserta 50 candle M1 snapshot dan alasan AI.
     """
@@ -442,6 +464,7 @@ def log_trade_journal(tiket: int, event_type: str, harga: float, alasan: str, ch
         with Session(sync_engine) as session:
             entry = TradeJournal(
                 tiket=int(tiket),
+                symbol=str(symbol).upper() if symbol else "XAUUSD",
                 timestamp=datetime.datetime.now(),
                 event_type=str(event_type),
                 harga=float(harga),
@@ -455,11 +478,12 @@ def log_trade_journal(tiket: int, event_type: str, harga: float, alasan: str, ch
         logging.error(f"Failed to log trade journal: {e}")
         return False
 
-def get_trade_journal_entries(limit: int = 100):
-    """Ambil catatan trade_journal terbaru untuk analisis Black Box."""
+def get_trade_journal_entries(limit: int = 100, symbol: str = None):
+    """Ambil catatan trade_journal terbaru untuk analisis Black Box (opsional per symbol)."""
     try:
         Base.metadata.create_all(sync_engine)
-        query = f"SELECT id, tiket, timestamp, event_type, harga, alasan, chart_snapshot FROM trade_journal ORDER BY timestamp DESC LIMIT {limit}"
+        where_sql = f"WHERE UPPER(symbol) = '{symbol.upper()}'" if symbol else ""
+        query = f"SELECT id, tiket, symbol, timestamp, event_type, harga, alasan, chart_snapshot FROM trade_journal {where_sql} ORDER BY timestamp DESC LIMIT {limit}"
         with sync_engine.connect() as conn:
             df = pd.read_sql(text(query), con=conn)
         if not df.empty and 'timestamp' in df.columns:

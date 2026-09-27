@@ -45,6 +45,7 @@ class GatekeeperAgent:
             if test_chunk_idx == 1 and len(df_test) > 150:
                 df_test = df_test.iloc[100:].copy()
             df_test = self.researcher.generate_targets(df_test)
+            df_test = self.researcher.add_normalized_features(df_test)
             
             # Filter spesifik zona Re-entry BBMA LWMA & Zon Zero Loss (Slide 33 & 51-56)
             lwma_low_zone = np.maximum(df_test['LWMA_5_Low'].values, df_test['LWMA_10_Low'].values)
@@ -80,15 +81,16 @@ class GatekeeperAgent:
             from dotenv import load_dotenv
             load_dotenv(override=True)
             if mode == 'runner':
-                entry_thresh = float(os.getenv("AI_RUNNER_ENTRY_THRESHOLD", getattr(Config, 'AI_RUNNER_ENTRY_THRESHOLD', 55.0))) / 100.0
+                default_th = float(os.getenv("AI_RUNNER_ENTRY_THRESHOLD", getattr(Config, 'AI_RUNNER_ENTRY_THRESHOLD', 55.0))) / 100.0
+                entry_thresh = getattr(self.researcher, 'optimal_threshold_runner', None) or default_th
             else:
-                entry_thresh = float(os.getenv("AI_NORMAL_ENTRY_THRESHOLD", getattr(Config, 'AI_NORMAL_ENTRY_THRESHOLD', 60.0))) / 100.0
+                default_th = float(os.getenv("AI_NORMAL_ENTRY_THRESHOLD", getattr(Config, 'AI_NORMAL_ENTRY_THRESHOLD', 60.0))) / 100.0
+                entry_thresh = getattr(self.researcher, 'optimal_threshold_normal', None) or default_th
             
             if hasattr(model, 'predict_proba'):
                 probs = model.predict_proba(X_test)
-                classes = list(getattr(model, 'classes_', [0, 1, 2]))
-                idx_buy = classes.index(1) if 1 in classes else -1
-                idx_sell = classes.index(2) if 2 in classes else -1
+                classes = list(getattr(model, 'classes_', [0, 1]))
+                is_binary = (len(classes) == 2 or probs.shape[1] == 2)
 
                 lwma_low_zone = np.maximum(df_test['LWMA_5_Low'].values, df_test['LWMA_10_Low'].values) if 'LWMA_5_Low' in df_test.columns else None
                 lwma_high_zone = np.minimum(df_test['LWMA_5_High'].values, df_test['LWMA_10_High'].values) if 'LWMA_5_High' in df_test.columns else None
@@ -101,20 +103,22 @@ class GatekeeperAgent:
                 bb_upper_vals = df_test['BB_Upper'].values if 'BB_Upper' in df_test.columns else close_vals
                 bb_lower_vals = df_test['BB_Lower'].values if 'BB_Lower' in df_test.columns else close_vals
 
-                preds = np.zeros(len(df_test), dtype=int)
-                for i in range(len(df_test)):
-                    p_buy = float(probs[i][idx_buy]) if idx_buy != -1 and idx_buy < len(probs[i]) else 0.0
-                    p_sell = float(probs[i][idx_sell]) if idx_sell != -1 and idx_sell < len(probs[i]) else 0.0
-                    
-                    is_valid_buy = (low_vals[i] <= lwma_low_zone[i]) and (close_vals[i] >= sma_20_vals[i]) and (close_vals[i] <= bb_upper_vals[i]) and (sma_20_vals[i] >= ema_50_vals[i]) and (close_vals[i] >= ema_50_vals[i]) and (close_vals[i] >= open_vals[i])
-                    is_valid_sell = (high_vals[i] >= lwma_high_zone[i]) and (close_vals[i] <= sma_20_vals[i]) and (close_vals[i] >= bb_lower_vals[i]) and (sma_20_vals[i] <= ema_50_vals[i]) and (close_vals[i] <= ema_50_vals[i]) and (close_vals[i] <= open_vals[i])
+                is_valid_buy = (low_vals <= lwma_low_zone) & (close_vals >= sma_20_vals) & (close_vals <= bb_upper_vals) & (sma_20_vals >= ema_50_vals) & (close_vals >= ema_50_vals) & (close_vals >= open_vals)
+                is_valid_sell = (high_vals >= lwma_high_zone) & (close_vals <= sma_20_vals) & (close_vals >= bb_lower_vals) & (sma_20_vals <= ema_50_vals) & (close_vals <= ema_50_vals) & (close_vals <= open_vals)
 
-                    if p_buy >= entry_thresh and p_buy > p_sell and is_valid_buy:
-                        preds[i] = 1
-                    elif p_sell >= entry_thresh and p_sell > p_buy and is_valid_sell:
-                        preds[i] = 2
-                    else:
-                        preds[i] = 0
+                preds = np.zeros(len(df_test), dtype=int)
+                if is_binary:
+                    idx_w = classes.index(1) if 1 in classes else 1
+                    p_win = probs[:, idx_w] if probs.shape[1] > idx_w else probs[:, -1]
+                    preds[(p_win >= entry_thresh) & is_valid_buy] = 1
+                    preds[(p_win >= entry_thresh) & is_valid_sell] = 2
+                else:
+                    idx_buy = classes.index(1) if 1 in classes else -1
+                    idx_sell = classes.index(2) if 2 in classes else -1
+                    p_buy = probs[:, idx_buy] if idx_buy != -1 else np.zeros(len(df_test))
+                    p_sell = probs[:, idx_sell] if idx_sell != -1 else np.zeros(len(df_test))
+                    preds[(p_buy >= entry_thresh) & (p_buy > p_sell) & is_valid_buy] = 1
+                    preds[(p_sell >= entry_thresh) & (p_sell > p_buy) & is_valid_sell] = 2
             else:
                 preds = model.predict(X_test)
             
@@ -137,7 +141,12 @@ class GatekeeperAgent:
         total_signals = int(trade_mask.sum())
         
         if total_signals > 0:
-            trades_correct = int((y_pred_arr[trade_mask] == y_true_arr[trade_mask]).sum())
+            is_legacy_multiclass = 2 in y_true_arr
+            if is_legacy_multiclass:
+                trades_correct = int(((y_pred_arr == 1) & (y_true_arr == 1)).sum() + ((y_pred_arr == 2) & (y_true_arr == 2)).sum())
+            else:
+                trades_correct = int((y_true_arr[trade_mask] == 1).sum())
+
             trade_win_rate = trades_correct / total_signals
             trades_lost = total_signals - trades_correct
             
@@ -145,7 +154,10 @@ class GatekeeperAgent:
             buy_mask = y_pred_arr == 1
             sell_mask = y_pred_arr == 2
             precision_buy = float((y_true_arr[buy_mask] == 1).mean()) if buy_mask.sum() > 0 else 0.0
-            precision_sell = float((y_true_arr[sell_mask] == 2).mean()) if sell_mask.sum() > 0 else 0.0
+            if is_legacy_multiclass:
+                precision_sell = float((y_true_arr[sell_mask] == 2).mean()) if sell_mask.sum() > 0 else 0.0
+            else:
+                precision_sell = float((y_true_arr[sell_mask] == 1).mean()) if sell_mask.sum() > 0 else 0.0
             
             # Asumsi Reward-to-Risk ratio: Normal mode 1:2.0 (sesuai target_labeler), Runner mode 1:5.0
             rr_ratio = 2.0 if mode == 'normal' else getattr(self.researcher, 'max_runner_rr', 5.0)
@@ -183,11 +195,16 @@ class GatekeeperAgent:
         )
         
         # Skor akhir validasi: MURNI TRADE WIN RATE (Tanpa modifikasi matematika)
-        # Kelulusan model mengacu langsung pada Trade Win Rate riil di atas batas 50%
-        if total_signals >= 10:
+        # Kelulusan model mengacu langsung pada Trade Win Rate riil di atas batas 50% (Normal) atau 25% (Runner)
+        # Menolak kelulusan semu jika sinyal terlalu sedikit (tidak memenuhi statistical significance)
+        min_required_signals = 10 if mode == 'runner' else 15
+        if total_signals >= min_required_signals:
             return float(trade_win_rate)
-        elif total_signals > 0:
-            logging.warning(f"Jumlah sinyal validasi terlalu sedikit ({total_signals} sinyal).")
+        elif mode == 'runner' and total_signals >= 5 and trade_win_rate >= 0.25 and profit_factor >= 1.5:
+            logging.info(f"✅ Runner Mode OOS lolos dengan sinyal selektif ({total_signals} sinyal, WR: {trade_win_rate*100:.1f}%, PF: {profit_factor:.2f}, Exp: {expectancy:+.2f}R).")
             return float(trade_win_rate)
+        else:
+            logging.warning(f"❌ Validasi GAGAL: Jumlah sinyal validasi terlalu sedikit ({total_signals} sinyal < {min_required_signals} sinyal minimum). Model tidak memenuhi syarat statistical significance.")
+            return 0.0
             
         return float(raw_accuracy)

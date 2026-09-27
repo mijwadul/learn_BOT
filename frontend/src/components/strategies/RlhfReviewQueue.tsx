@@ -145,9 +145,6 @@ export function RlhfReviewQueue() {
               </span>
             )}
           </h2>
-          <p className="text-xs sm:text-sm text-white/50 mt-1">
-            Kurasi sinyal Out-Of-Sample (OOS) secara terpisah untuk injeksi RLHF &amp; Hard Negatives.
-          </p>
         </div>
 
         {/* Mode Switcher Tabs */}

@@ -107,8 +107,10 @@ async def get_state(symbol: Optional[str] = None):
     latest_probs = {}
     if hasattr(bot.executor, 'latest_probs_by_pair') and cur_sym in bot.executor.latest_probs_by_pair:
         latest_probs = bot.executor.latest_probs_by_pair[cur_sym]
-    else:
+    elif cur_sym in getattr(bot, "active_pairs", []):
         latest_probs = getattr(bot.executor, 'latest_probs', {})
+    else:
+        latest_probs = {"normal_buy": 0.0, "normal_sell": 0.0, "runner_buy": 0.0, "runner_sell": 0.0}
 
     current_regime = getattr(bot.executor, 'current_market_regime', {"adx": 0.0, "regime": "UNKNOWN"})
     if isinstance(current_regime, dict) and current_regime.get("symbol") != cur_sym and hasattr(bot.executor, 'latest_dfs_by_pair'):

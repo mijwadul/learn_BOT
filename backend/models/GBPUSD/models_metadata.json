@@ -1,0 +1,16 @@
+{
+  "symbol": "GBPUSD",
+  "normal": {
+    "last_accuracy": 0.5172413793103449,
+    "last_trained_at": "2026-09-27 10:08:37",
+    "trained": true,
+    "optimal_threshold": 0.535
+  },
+  "runner": {
+    "last_accuracy": 0.4416475972540046,
+    "last_trained_at": "2026-09-27 09:55:10",
+    "trained": true,
+    "max_runner_rr": 5.0,
+    "optimal_threshold": 0.54
+  }
+}

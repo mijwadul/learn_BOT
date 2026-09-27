@@ -97,9 +97,6 @@ export function AiEntryThresholdCard() {
                 {profile.label}
               </span>
             </div>
-            <p className="text-xs text-white/50">
-              Batas minimum probabilitas model LightGBM untuk menyetujui pembukaan posisi baru
-            </p>
           </div>
         </div>
 
@@ -160,20 +157,8 @@ export function AiEntryThresholdCard() {
         </div>
       </div>
 
-      {/* Explanatory Quant Note */}
-      <div className="flex items-start gap-2.5 bg-white/[0.02] border border-white/5 rounded-xl p-3 mb-4 text-xs text-white/60 leading-relaxed">
-        <AlertCircle size={16} className="text-cyan-400 shrink-0 mt-0.5" />
-        <div>
-          <span className="text-white/80 font-bold block mb-0.5">Penjelasan Operasional Executor:</span>
-          {profile.desc} Saat AI mendeteksi probabilitas di bawah <span className="text-brand-green font-bold">{threshold}%</span>, order entry akan ditolak oleh Executor demi menjaga akurasi *Win Rate* akun.
-        </div>
-      </div>
-
       {/* Footer Save Action */}
-      <div className="flex items-center justify-between pt-2">
-        <span className="text-[11px] text-white/40">
-          Parameter ini langsung sinkron ke file <code className="text-brand-green">config.py</code> dan Executor Agent secara *real-time*.
-        </span>
+      <div className="flex items-center justify-end pt-2">
         <button
           type="button"
           onClick={handleSaveThreshold}

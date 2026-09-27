@@ -569,13 +569,72 @@ class DataMinerAgent:
             logging.error(f"Gagal memuat train chunks dari {self.table_name}: {e}")
             return 0, None
 
-    def load_live_decision_chunk(self, mode="normal"):
-        """Ambil closed live decisions (WIN & LOSS) yang sudah memiliki feature vector lengkap."""
+    def load_optuna_sample(self, mode="normal", symbol=None, total_sample_candles=60000):
+        """
+        Multi-Regime Time-Series Sampling untuk Optuna Hyperparameter Optimization:
+        Alih-alih hanya mengambil Chunk 1 (awal tahun 2022 saja), fungsi ini mengambil sampel
+        blok waktu terdistribusi merata dari rentang 2022 s.d. batas dataset train (80% awal).
+        Setiap blok mempertahankan kontinuitas candle agar kalkulasi ATR & masa depan target valid.
+        """
+        if symbol:
+            self.set_symbol(symbol)
+        try:
+            query_count = f'SELECT COUNT(*) FROM "{self.table_name}"'
+            total_rows = pd.read_sql(query_count, con=sync_engine).iloc[0, 0]
+            train_limit = int(total_rows * 0.80)
+            
+            if train_limit <= 0:
+                logging.warning(f"[OPTUNA SAMPLING] Tabel {self.table_name} kosong.")
+                return pd.DataFrame()
+                
+            if train_limit <= total_sample_candles:
+                query = f'SELECT * FROM "{self.table_name}" ORDER BY time ASC LIMIT {train_limit}'
+                df = pd.read_sql(query, con=sync_engine, index_col='time')
+                df.index = pd.to_datetime(df.index)
+                return df
+
+            # Ambil 5 blok waktu terpisah secara proporsional melintasi era 2022 - sekarang
+            num_blocks = 5
+            block_size = max(5000, total_sample_candles // num_blocks)
+            offsets = []
+            for b in range(num_blocks):
+                off = int(b * ((train_limit - block_size) / max(1, num_blocks - 1)))
+                offsets.append(off)
+
+            dfs = []
+            era_details = []
+            for b_idx, off in enumerate(offsets):
+                query = f'SELECT * FROM "{self.table_name}" ORDER BY time ASC LIMIT {block_size} OFFSET {off}'
+                df_b = pd.read_sql(query, con=sync_engine, index_col='time')
+                df_b.index = pd.to_datetime(df_b.index)
+                if not df_b.empty:
+                    dfs.append(df_b)
+                    start_str = df_b.index[0].strftime("%Y-%m-%d")
+                    end_str = df_b.index[-1].strftime("%Y-%m-%d")
+                    era_details.append(f"Era {b_idx+1}: {start_str} s.d. {end_str} ({len(df_b):,} candle)")
+
+            if not dfs:
+                return pd.DataFrame()
+
+            df_merged_sample = pd.concat(dfs)
+            df_merged_sample = df_merged_sample[~df_merged_sample.index.duplicated(keep='last')].sort_index()
+            logging.info(
+                f"[{self.canonical_symbol} OPTUNA SAMPLING] 📦 Berhasil mengekstrak {len(df_merged_sample):,} candle multi-rezim dari {len(dfs)} era pasar:\n" +
+                "\n".join([f"   • {d}" for d in era_details])
+            )
+            return df_merged_sample
+        except Exception as e:
+            logging.error(f"Gagal memuat optuna multi-regime sample dari {self.table_name}: {e}")
+            return pd.DataFrame()
+
+    def load_live_decision_chunk(self, mode="normal", symbol=None):
+        """Ambil closed live decisions (WIN & LOSS) yang sudah memiliki feature vector lengkap untuk symbol bersangkutan."""
         from database import get_live_decision_samples_for_training
         try:
-            df = get_live_decision_samples_for_training(mode=mode)
+            target_sym = (symbol or getattr(self, "canonical_symbol", "XAUUSD") or "XAUUSD").upper()
+            df = get_live_decision_samples_for_training(mode=mode, symbol=target_sym)
             if not df.empty:
-                logging.info(f"Mengambil {len(df)} live decision closed trades ({mode.upper()}) untuk diinjeksi ke retraining!")
+                logging.info(f"Mengambil {len(df)} live decision closed trades ({mode.upper()} - {target_sym}) untuk diinjeksi ke retraining!")
             return df
         except Exception as e:
             logging.error(f"Gagal memuat live decision samples: {e}")
@@ -611,16 +670,17 @@ class DataMinerAgent:
             logging.error(f"Gagal memuat test chunks dari {self.table_name}: {e}")
             return 0, None
 
-    def load_hard_negatives_and_rlhf(self, mode="normal"):
+    def load_hard_negatives_and_rlhf(self, mode="normal", symbol=None):
         """Ambil data spesifik (termasuk dari OOS) yang memiliki status Hard Negative atau direview oleh RLHF
-        spesifik untuk mode yang sedang dilatih (Normal atau Runner)."""
+        spesifik untuk mode dan pair yang sedang dilatih (Normal atau Runner)."""
         from database import get_hard_negative_ids, get_approved_setup_ids, get_rejected_setup_ids, get_ignored_setup_ids
         try:
             mode_str = mode.lower() if mode else "normal"
-            hn_ids  = list(get_hard_negative_ids(mode=mode_str))
-            app_ids = list(get_approved_setup_ids(mode=mode_str))
-            rej_ids = list(get_rejected_setup_ids(mode=mode_str))
-            ign_ids = set(get_ignored_setup_ids(mode=mode_str))
+            target_sym = (symbol or getattr(self, "canonical_symbol", "XAUUSD") or "XAUUSD").upper()
+            hn_ids  = list(get_hard_negative_ids(mode=mode_str, symbol=target_sym))
+            app_ids = list(get_approved_setup_ids(mode=mode_str, symbol=target_sym))
+            rej_ids = list(get_rejected_setup_ids(mode=mode_str, symbol=target_sym))
+            ign_ids = set(get_ignored_setup_ids(mode=mode_str, symbol=target_sym))
             MAX_HN = 500
             if len(hn_ids) > MAX_HN:
                 hn_ids = hn_ids[-MAX_HN:]

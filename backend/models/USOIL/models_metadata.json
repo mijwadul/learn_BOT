@@ -1,0 +1,16 @@
+{
+  "symbol": "USOIL",
+  "normal": {
+    "last_accuracy": 0.5142857142857142,
+    "last_trained_at": "2026-09-27 09:29:04",
+    "trained": true,
+    "optimal_threshold": 0.54
+  },
+  "runner": {
+    "last_accuracy": 0.36803874092009686,
+    "last_trained_at": "2026-09-27 09:48:10",
+    "trained": true,
+    "max_runner_rr": 5.0,
+    "optimal_threshold": 0.54
+  }
+}

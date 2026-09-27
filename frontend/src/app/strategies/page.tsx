@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Settings2, RotateCcw, Loader2, Brain, Layers, FolderCheck } from "lucide-react";
+import { Settings2, RotateCcw, Loader2, Brain, Layers } from "lucide-react";
 import { getApiBaseUrl } from "@/config";
 import { useToast } from "@/components/ui/Toast";
 import { RiskManagementCard } from "@/components/strategies/RiskManagementCard";
@@ -211,11 +211,6 @@ export default function StrategiesPage() {
               </button>
             );
           })}
-        </div>
-
-        <div className="flex items-center gap-2 text-xs text-white/40">
-          <FolderCheck size={14} className="text-brand-green" />
-          <span>Folder Otak: <strong className="text-white/80 font-mono">models/{selectedPair}/</strong></span>
         </div>
       </div>
 

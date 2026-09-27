@@ -7,6 +7,7 @@ class TradeLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     ticket = Column(BigInteger, index=True, nullable=True) # MT5 Deal/Order Ticket
     setup_id = Column(String, index=True, nullable=True) # ID Setup AI (misal: SETUP_LIVE_NORMAL_10823)
+    symbol = Column(String, default="XAUUSD", index=True) # XAUUSD / USOIL / etc
     time = Column(DateTime, index=True)
     action = Column(String) # BUY, SELL, PARTIAL_CLOSE, CLOSE
     mode = Column(String, default="NORMAL", index=True) # NORMAL / RUNNER
@@ -28,6 +29,7 @@ class LiveDecisionSample(Base):
     id = Column(Integer, primary_key=True, index=True)
     ticket = Column(BigInteger, index=True, nullable=True) # MT5 Order/Deal Ticket
     setup_id = Column(String, index=True) # Unik: SETUP_LIVE_NORMAL_10823
+    symbol = Column(String, default="XAUUSD", index=True) # XAUUSD / USOIL / etc
     timestamp = Column(DateTime, default=func.now(), index=True)
     mode = Column(String, default="NORMAL", index=True) # NORMAL / RUNNER
     action = Column(String) # BUY / SELL
@@ -46,6 +48,7 @@ class TradeJournal(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     tiket = Column(BigInteger, index=True)
+    symbol = Column(String, default="XAUUSD", index=True) # XAUUSD / USOIL / etc
     timestamp = Column(DateTime, index=True, default=func.now())
     event_type = Column(String, index=True) # ENTRY, SL_MODIFY, EXIT
     harga = Column(Float)

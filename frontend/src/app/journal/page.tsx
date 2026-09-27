@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { BookOpen, Cpu, ShieldAlert, Zap, TrendingUp, Crosshair, RefreshCw } from "lucide-react";
+import { BookOpen, Cpu, ShieldAlert, Zap, TrendingUp, Crosshair, RefreshCw, RotateCcw } from "lucide-react";
 import { getApiBaseUrl } from "@/config";
+import { FreshStartModal } from "@/components/portfolio/FreshStartModal";
 
 interface PerformanceStats {
   total_trades: number;
@@ -37,6 +38,8 @@ export default function JournalPage() {
 
   const [loading, setLoading] = useState(true);
   const [selectedFilter, setSelectedFilter] = useState<"ALL" | "NORMAL" | "RUNNER">("ALL");
+  const [selectedSymbol, setSelectedSymbol] = useState<string>("ALL");
+  const [showFreshStart, setShowFreshStart] = useState(false);
 
   const fetchJournal = () => {
     setLoading(true);
@@ -82,16 +85,54 @@ export default function JournalPage() {
     return (mode || "").toUpperCase().includes("RUNNER");
   };
 
-  const normalTradesCount = data.trade_logs.filter((t: any) => !isRunnerMode(t.mode)).length;
-  const runnerTradesCount = data.trade_logs.filter((t: any) => isRunnerMode(t.mode)).length;
+  const availablePairs = Array.from(
+    new Set([
+      "XAUUSD",
+      ...data.trade_logs.map((t: any) => (t.symbol || "").toUpperCase()).filter(Boolean),
+      ...data.open_positions.map((p: any) => (p.symbol || "").toUpperCase()).filter(Boolean),
+      ...data.journal.map((j: any) => (j.symbol || "").toUpperCase()).filter(Boolean),
+    ])
+  );
+
+  const getPairBadge = (sym: string = "XAUUSD") => {
+    const s = (sym || "XAUUSD").toUpperCase();
+    if (s.includes("XAU") || s.includes("GOLD")) {
+      return "bg-amber-500/15 text-amber-300 border-amber-500/30";
+    }
+    if (s.includes("OIL") || s.includes("WTI")) {
+      return "bg-sky-500/15 text-sky-300 border-sky-500/30";
+    }
+    return "bg-emerald-500/15 text-emerald-300 border-emerald-500/30";
+  };
 
   const filteredTrades = data.trade_logs.filter((trade: any) => {
+    if (selectedSymbol !== "ALL" && (trade.symbol || "XAUUSD").toUpperCase() !== selectedSymbol) return false;
     if (selectedFilter === "ALL") return true;
     const isRunner = isRunnerMode(trade.mode);
     if (selectedFilter === "RUNNER") return isRunner;
     if (selectedFilter === "NORMAL") return !isRunner;
     return true;
   });
+
+  const filteredJournal = data.journal.filter((j: any) => {
+    if (selectedSymbol !== "ALL" && (j.symbol || "XAUUSD").toUpperCase() !== selectedSymbol) return false;
+    return true;
+  });
+
+  const filteredOpenPositions = data.open_positions.filter((p: any) => {
+    if (selectedSymbol !== "ALL" && (p.symbol || "XAUUSD").toUpperCase() !== selectedSymbol) return false;
+    return true;
+  });
+
+  const normalTradesCount = data.trade_logs.filter((t: any) => {
+    if (selectedSymbol !== "ALL" && (t.symbol || "XAUUSD").toUpperCase() !== selectedSymbol) return false;
+    return !isRunnerMode(t.mode);
+  }).length;
+
+  const runnerTradesCount = data.trade_logs.filter((t: any) => {
+    if (selectedSymbol !== "ALL" && (t.symbol || "XAUUSD").toUpperCase() !== selectedSymbol) return false;
+    return isRunnerMode(t.mode);
+  }).length;
 
   return (
     <div className="p-3 sm:p-4 md:p-6 min-h-full flex flex-col">
@@ -101,18 +142,51 @@ export default function JournalPage() {
           <h1 className="text-2xl sm:text-3xl font-black text-white tracking-widest flex items-center gap-2 sm:gap-3">
             <BookOpen className="text-brand-green" /> TRADE JOURNAL &amp; XAI
           </h1>
-          <p className="text-white/50 text-xs sm:text-sm mt-1">
-            Pencatatan terpisah performa riil: <strong className="text-cyan-400">Normal (Hit &amp; Run)</strong> vs <strong className="text-purple-400">Runner Mode</strong>.
-          </p>
         </div>
-        <button
-          onClick={fetchJournal}
-          disabled={loading}
-          className="bg-white/5 hover:bg-white/10 text-white/70 border border-white/10 px-3 sm:px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all disabled:opacity-50"
-        >
-          <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-          Refresh
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Pair Filter Pills */}
+          <div className="flex items-center gap-1 p-1 bg-white/5 rounded-xl border border-white/10 text-xs">
+            <button
+              onClick={() => setSelectedSymbol("ALL")}
+              className={`px-3 py-1.5 rounded-lg font-bold transition-all text-xs cursor-pointer ${
+                selectedSymbol === "ALL" ? "bg-white/20 text-white shadow-sm" : "text-white/40 hover:text-white"
+              }`}
+            >
+              ALL
+            </button>
+            {availablePairs.map((p) => (
+              <button
+                key={p}
+                onClick={() => setSelectedSymbol(p)}
+                className={`px-3 py-1.5 rounded-lg font-bold font-mono transition-all text-xs cursor-pointer ${
+                  selectedSymbol === p
+                    ? p.includes("XAU")
+                      ? "bg-amber-500/25 text-amber-300 border border-amber-500/40"
+                      : "bg-sky-500/25 text-sky-300 border border-sky-500/40"
+                    : "text-white/40 hover:text-white"
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+
+          <button
+            onClick={() => setShowFreshStart(true)}
+            className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 px-3 sm:px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer"
+          >
+            <RotateCcw size={14} />
+            Fresh Start
+          </button>
+          <button
+            onClick={fetchJournal}
+            disabled={loading}
+            className="bg-white/5 hover:bg-white/10 text-white/70 border border-white/10 px-3 sm:px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all disabled:opacity-50 cursor-pointer"
+          >
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* KPI Cards: Normal vs Runner vs Total */}
@@ -197,23 +271,20 @@ export default function JournalPage() {
               <Cpu className="text-brand-blue" /> Riwayat Aksi Black Box (XAI)
             </h2>
             <span className="text-xs text-white/50 bg-white/5 px-2.5 py-1 rounded-lg border border-white/10 font-mono">
-              {data.journal.length} event
+              {filteredJournal.length} event
             </span>
           </div>
-          <p className="text-xs sm:text-sm text-white/50 shrink-0">
-            Inspeksi alasan di balik setiap keputusan eksekusi AI (Top Feature Contributions).
-          </p>
           
           {/* Scrollable list: vertikal & horizontal independen, minimal 3 item tampil */}
           <div className="flex-1 min-h-0 overflow-y-auto overflow-x-auto custom-scrollbar pr-1 sm:pr-2 space-y-3 sm:space-y-4">
             {loading && data.journal.length === 0 ? (
                <div className="text-white/30 text-sm p-4">Loading logs...</div>
-            ) : data.journal.length === 0 ? (
+            ) : filteredJournal.length === 0 ? (
                <div className="text-center p-8 border border-dashed border-white/10 rounded-xl text-white/30 text-sm">
                   Belum ada event transaksi riil.
                </div>
             ) : (
-               data.journal.map((log: any, i: number) => (
+               filteredJournal.map((log: any, i: number) => (
                  <div key={i} className="bg-white/5 border border-white/10 rounded-xl p-3 sm:p-4 hover:border-white/20 transition-all min-w-[270px]">
                    <div className="flex flex-wrap justify-between items-center gap-2 mb-1.5 sm:mb-2">
                      <div className="flex items-center gap-2">
@@ -225,6 +296,9 @@ export default function JournalPage() {
                            : 'bg-brand-red/20 text-brand-red border-brand-red/30'
                        }`}>
                          {log.event_type}
+                       </span>
+                       <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono border ${getPairBadge(log.symbol)}`}>
+                         {log.symbol || 'XAUUSD'}
                        </span>
                        <span className="text-xs font-mono text-white/60">Ticket: #{log.tiket}</span>
                      </div>
@@ -259,7 +333,7 @@ export default function JournalPage() {
               <BookOpen className="text-brand-green" /> Riwayat Transaksi (PnL)
             </h2>
             <span className="text-xs text-white/50 bg-white/5 px-2.5 py-1 rounded-lg border border-white/10 font-mono">
-              {data.trade_logs.length} trades
+              {filteredTrades.length} trades
             </span>
           </div>
 
@@ -272,7 +346,7 @@ export default function JournalPage() {
                   selectedFilter === "ALL" ? "bg-white/20 text-white shadow-sm" : "text-white/40 hover:text-white"
                 }`}
               >
-                Semua ({data.trade_logs.length})
+                Semua ({normalTradesCount + runnerTradesCount})
               </button>
               <button
                 onClick={() => setSelectedFilter("NORMAL")}
@@ -294,7 +368,7 @@ export default function JournalPage() {
           </div>
 
           {/* Active Open Positions from MT5 */}
-          {data.open_positions && data.open_positions.length > 0 && (
+          {filteredOpenPositions && filteredOpenPositions.length > 0 && (
             <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-2.5 sm:p-3 shrink-0">
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
@@ -302,15 +376,18 @@ export default function JournalPage() {
                   Posisi Terbuka MT5 (Floating)
                 </span>
                 <span className="text-[11px] font-mono text-emerald-300 font-bold">
-                  {data.open_positions.length} Posisi Aktif
+                  {filteredOpenPositions.length} Posisi Aktif
                 </span>
               </div>
               <div className="space-y-1.5 max-h-24 sm:max-h-28 overflow-y-auto custom-scrollbar pr-1">
-                {data.open_positions.map((pos: any, idx: number) => (
+                {filteredOpenPositions.map((pos: any, idx: number) => (
                   <div key={idx} className="flex items-center justify-between text-xs bg-black/40 p-2 rounded-lg border border-white/5">
                     <div className="flex items-center gap-1.5 sm:gap-2">
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-black ${pos.action === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
                         {pos.action}
+                      </span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono border ${getPairBadge(pos.symbol)}`}>
+                        {pos.symbol || 'XAUUSD'}
                       </span>
                       <span className="font-mono text-white/70">#{pos.ticket}</span>
                       <span className="text-white/40 text-[11px] hidden sm:inline">{pos.volume} lot @ {pos.price}</span>
@@ -327,14 +404,13 @@ export default function JournalPage() {
             </div>
           )}
 
-          <p className="text-xs sm:text-sm text-white/50 shrink-0">Daftar posisi tertutup dengan atribusi mode dan profit riil.</p>
-          
           {/* Scrollable table: vertikal & horizontal independen dengan sticky header */}
           <div className="flex-1 min-h-0 overflow-x-auto overflow-y-auto custom-scrollbar border border-white/5 rounded-xl bg-black/20">
-            <table className="w-full text-left min-w-[500px] sm:min-w-[560px]">
+            <table className="w-full text-left min-w-[540px] sm:min-w-[620px]">
               <thead className="sticky top-0 bg-[#161b22]/95 backdrop-blur border-b border-white/10 text-white/50 text-[11px] sm:text-xs uppercase tracking-wider z-10">
                 <tr>
                   <th className="p-2.5 sm:p-3 font-medium">Ticket</th>
+                  <th className="p-2.5 sm:p-3 font-medium">Pair</th>
                   <th className="p-2.5 sm:p-3 font-medium">Setup ID</th>
                   <th className="p-2.5 sm:p-3 font-medium">Mode</th>
                   <th className="p-2.5 sm:p-3 font-medium">Type</th>
@@ -344,10 +420,10 @@ export default function JournalPage() {
               </thead>
               <tbody className="text-xs sm:text-sm divide-y divide-white/5">
                 {loading && data.trade_logs.length === 0 ? (
-                  <tr><td colSpan={6} className="p-4 text-white/30 text-sm">Loading...</td></tr>
+                  <tr><td colSpan={7} className="p-4 text-white/30 text-sm">Loading...</td></tr>
                 ) : filteredTrades.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="p-8 text-center text-white/30">
+                    <td colSpan={7} className="p-8 text-center text-white/30">
                       Belum ada history trading untuk filter ini.
                     </td>
                   </tr>
@@ -358,6 +434,11 @@ export default function JournalPage() {
                       <tr key={i} className="hover:bg-white/5 transition-colors">
                         <td className="p-2.5 sm:p-3 font-bold text-white/70">
                           #{trade.ticket || trade.id}
+                        </td>
+                        <td className="p-2.5 sm:p-3">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono border ${getPairBadge(trade.symbol)}`}>
+                            {trade.symbol || "XAUUSD"}
+                          </span>
                         </td>
                         <td className="p-2.5 sm:p-3 text-[11px] font-mono text-white/40 truncate max-w-[130px] sm:max-w-[150px]" title={trade.setup_id || "-"}>
                           {trade.setup_id || "-"}
@@ -388,6 +469,12 @@ export default function JournalPage() {
         </div>
 
       </div>
+
+      <FreshStartModal
+        isOpen={showFreshStart}
+        onClose={() => setShowFreshStart(false)}
+        onSuccess={fetchJournal}
+      />
     </div>
   );
 }

@@ -514,7 +514,8 @@ class ExecutorAgent:
                     comment=f"Ticket #{order_ticket} | AI Bot Execute {target_symbol}",
                     mode=trade_mode,
                     ticket=order_ticket,
-                    setup_id=setup_id
+                    setup_id=setup_id,
+                    symbol=target_symbol
                 )
                 if row_data is not None:
                     feature_dict = row_data.to_dict() if hasattr(row_data, 'to_dict') else dict(row_data)
@@ -527,7 +528,8 @@ class ExecutorAgent:
                         entry_price=float(price),
                         sl=float(sl),
                         tp=float(tp),
-                        feature_vector=feature_dict
+                        feature_vector=feature_dict,
+                        symbol=target_symbol
                     )
             except Exception as e:
                 logging.error(f"[Post-Execution DB Error] {e}")
@@ -541,7 +543,8 @@ class ExecutorAgent:
                     event_type="ENTRY",
                     harga=float(price),
                     alasan=alasan,
-                    snapshot_json=snapshot_json
+                    snapshot_json=snapshot_json,
+                    symbol=target_symbol
                 )
             except Exception as e:
                 logging.error(f"[Post-Execution Journal Error] {e}")
@@ -601,11 +604,11 @@ class ExecutorAgent:
                     if self.researcher:
                         self.researcher.set_symbol(clean_p)
                         if self.researcher.model_normal is not None:
-                            fb_normal = self.data_miner.load_live_decision_chunk(mode="normal")
+                            fb_normal = self.data_miner.load_live_decision_chunk(mode="normal", symbol=clean_p)
                             self.researcher.micro_retrain("normal", df_recent, fb_normal)
 
                         if self.researcher.model_runner is not None:
-                            fb_runner = self.data_miner.load_live_decision_chunk(mode="runner")
+                            fb_runner = self.data_miner.load_live_decision_chunk(mode="runner", symbol=clean_p)
                             self.researcher.micro_retrain("runner", df_recent, fb_runner)
 
                 self.last_micro_retrain_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -629,7 +632,7 @@ def capture_m1_snapshot(symbol=None, n_candles=50):
         logging.debug(f"Gagal merekam M1 snapshot: {e}")
     return "{}"
 
-def record_journal_event_async(tiket: int, event_type: str, harga: float, alasan: str, snapshot_json: str):
+def record_journal_event_async(tiket: int, event_type: str, harga: float, alasan: str, snapshot_json: str, symbol: str = "XAUUSD"):
     import threading
     def _worker():
         try:
@@ -639,7 +642,8 @@ def record_journal_event_async(tiket: int, event_type: str, harga: float, alasan
                 event_type=str(event_type),
                 harga=float(harga),
                 alasan=str(alasan),
-                chart_snapshot=str(snapshot_json)
+                chart_snapshot=str(snapshot_json),
+                symbol=str(symbol)
             )
         except Exception as e:
             logging.error(f"[Trade Journal Error] Gagal mencatat event: {e}")

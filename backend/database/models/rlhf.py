@@ -7,7 +7,7 @@ class ApprovedSetup(Base):
     id = Column(Integer, primary_key=True, index=True)
     setup_id = Column(String, index=True)
     mode = Column(String, default="normal", index=True) # normal / runner
-    symbol = Column(String, default="XAUUSD")
+    symbol = Column(String, default="XAUUSD", index=True)
     action = Column(String, default="BUY")
     probability = Column(Float, default=0.0)
     approved_at = Column(DateTime, default=func.now())
@@ -19,7 +19,7 @@ class RejectedSetup(Base):
     id = Column(Integer, primary_key=True, index=True)
     setup_id = Column(String, index=True)
     mode = Column(String, default="normal", index=True) # normal / runner
-    symbol = Column(String, default="XAUUSD")
+    symbol = Column(String, default="XAUUSD", index=True)
     action = Column(String, default="BUY")
     probability = Column(Float, default=0.0)
     rejected_at = Column(DateTime, default=func.now())
@@ -33,7 +33,7 @@ class IgnoredSetup(Base):
     id          = Column(Integer, primary_key=True, index=True)
     setup_id    = Column(String, index=True)
     mode        = Column(String, default="normal", index=True) # normal / runner
-    symbol      = Column(String, default="XAUUSD")
+    symbol      = Column(String, default="XAUUSD", index=True)
     action      = Column(String, default="BUY")
     probability = Column(Float, default=0.0)
     ignored_at  = Column(DateTime, default=func.now())
@@ -44,7 +44,7 @@ class HardNegative(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     setup_id = Column(String, index=True)
-    symbol = Column(String, default="XAUUSD")
+    symbol = Column(String, default="XAUUSD", index=True)
     failed_mode = Column(String, index=True) # Normal / Runner
     detected_at = Column(DateTime, default=func.now())
     notes = Column(String, default="Misclassified during OOS Validation")

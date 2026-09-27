@@ -81,19 +81,30 @@ async def get_rlhf_setups(min_prob: float = 0.65, offset: int = 0, mode: str = "
             features = bot.researcher.features
             valid_cols = [c for c in features if c in df_full_oos.columns]
             if valid_cols:
-                classes = list(getattr(target_model, 'classes_', [0, 1, 2]))
+                classes = list(getattr(target_model, 'classes_', [0, 1]))
                 proba_matrix = target_model.predict_proba(df_full_oos[valid_cols])
                 
-                idx_buy = classes.index(1) if 1 in classes else (1 if proba_matrix.shape[1] > 1 else None)
-                idx_sell = classes.index(2) if 2 in classes else None
-                
-                p_buy = proba_matrix[:, idx_buy] if idx_buy is not None else np.zeros(len(df_oos))
-                p_sell = proba_matrix[:, idx_sell] if idx_sell is not None else np.zeros(len(df_oos))
-                
-                df_oos['prob_buy'] = p_buy
-                df_oos['prob_sell'] = p_sell
-                df_oos['prob'] = np.maximum(p_buy, p_sell)
-                df_oos['predicted_action'] = np.where(p_buy >= p_sell, "BUY", "SELL")
+                if len(classes) == 2 or proba_matrix.shape[1] == 2:
+                    idx_win = classes.index(1) if 1 in classes else 1
+                    p_win = proba_matrix[:, idx_win] if proba_matrix.shape[1] > idx_win else proba_matrix[:, -1]
+                    open_c = df_oos['open'].values if 'open' in df_oos.columns else df_oos['close'].values
+                    close_c = df_oos['close'].values
+                    is_bull = close_c >= open_c
+                    p_buy = np.where(is_bull, p_win, 0.0)
+                    p_sell = np.where(~is_bull, p_win, 0.0)
+                    df_oos['prob_buy'] = p_buy
+                    df_oos['prob_sell'] = p_sell
+                    df_oos['prob'] = p_win
+                    df_oos['predicted_action'] = np.where(is_bull, "BUY", "SELL")
+                else:
+                    idx_buy = classes.index(1) if 1 in classes else (1 if proba_matrix.shape[1] > 1 else None)
+                    idx_sell = classes.index(2) if 2 in classes else None
+                    p_buy = proba_matrix[:, idx_buy] if idx_buy is not None else np.zeros(len(df_oos))
+                    p_sell = proba_matrix[:, idx_sell] if idx_sell is not None else np.zeros(len(df_oos))
+                    df_oos['prob_buy'] = p_buy
+                    df_oos['prob_sell'] = p_sell
+                    df_oos['prob'] = np.maximum(p_buy, p_sell)
+                    df_oos['predicted_action'] = np.where(p_buy >= p_sell, "BUY", "SELL")
             else:
                 df_oos['prob'] = np.random.uniform(0.5, 0.99, len(df_oos))
                 df_oos['predicted_action'] = "BUY"

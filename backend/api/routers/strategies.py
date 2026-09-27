@@ -36,6 +36,7 @@ class ResetModelRequest(BaseModel):
 
 class MicroTrainRequest(BaseModel):
     mode: str = "all" # "normal", "runner", or "all"
+    symbol: Optional[str] = "XAUUSD"
 
 @router.get("/api/strategies/status")
 async def get_strategy_model_status(symbol: Optional[str] = "XAUUSD"):
@@ -195,19 +196,28 @@ async def train_model(req: TrainRequest):
             if req.mode == 'normal':
                 bot.researcher.is_training_normal = True
                 try:
-                    result = bot.researcher.train_normal_mode(data_generator, total_chunks=total_chunks)
+                    result = bot.researcher.train_normal_mode(data_generator, total_chunks=total_chunks, data_miner=bot.data_miner)
                     if result:
                         if test_generator and total_test_chunks > 0:
                             accuracy = bot.gatekeeper.validate_model('normal', test_generator, total_test_chunks)
                             bot.researcher.last_accuracy_normal = float(accuracy)
                             bot.researcher.last_trained_normal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             bot.researcher.save_metadata()
+                            norm_metrics = bot.gatekeeper.last_metrics.get('normal', {})
+                            pf = norm_metrics.get('profit_factor', 0.0)
+                            exp = norm_metrics.get('expectancy', 0.0)
+                            # Kriteria Kelulusan Normal Mode (RR 1:2.0, Breakeven 33.3%):
+                            # 1. Target Utama: Win Rate >= 50.0%
+                            # 2. Standar Kuantitatif Institusional: Win Rate >= 47.0% DENGAN Profit Factor >= 1.60 dan Expectancy >= +0.30R
                             if accuracy >= 0.50:
                                 bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
                                 logging.info(f"✅ Model Normal ({target_symbol}) lulus validasi (Win Rate: {accuracy*100:.2f}% >= 50%). Supervisor Normal Mode = VALID.")
+                            elif accuracy >= 0.47 and pf >= 1.60 and exp >= 0.30:
+                                bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
+                                logging.info(f"✅ Model Normal ({target_symbol}) lulus validasi institusional (Win Rate: {accuracy*100:.2f}%, PF: {pf:.2f} >= 1.6, Exp: {exp:+.2f}R pada RR 1:2). Supervisor Normal Mode = VALID.")
                             else:
                                 bot.supervisor.set_model_validity(False, bot.supervisor.is_runner_valid())
-                                logging.warning(f"❌ Model Normal ({target_symbol}) gagal validasi (Win Rate: {accuracy*100:.2f}% < 50%). Supervisor Normal Mode = QUARANTINE.")
+                                logging.warning(f"❌ Model Normal ({target_symbol}) gagal validasi (Win Rate: {accuracy*100:.2f}% < 50%, PF: {pf:.2f}). Supervisor Normal Mode = QUARANTINE.")
                         else:
                             bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
                             bot.researcher.last_trained_normal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -218,7 +228,7 @@ async def train_model(req: TrainRequest):
             elif req.mode == 'runner':
                 bot.researcher.is_training_runner = True
                 try:
-                    result = bot.researcher.train_runner_mode(data_generator, total_chunks=total_chunks)
+                    result = bot.researcher.train_runner_mode(data_generator, total_chunks=total_chunks, data_miner=bot.data_miner)
                     if result:
                         if test_generator and total_test_chunks > 0:
                             accuracy = bot.gatekeeper.validate_model('runner', test_generator, total_test_chunks)
@@ -251,54 +261,65 @@ async def train_model(req: TrainRequest):
 
 @router.post("/api/strategies/micro-train")
 async def trigger_micro_train(req: MicroTrainRequest = None):
-    """Memicu Online Learning Micro-Retrain secara on-demand / manual."""
+    """Memicu Online Learning Micro-Retrain secara on-demand / manual terisolasi per pair."""
     target_mode = req.mode.lower() if req and req.mode else "all"
+    target_symbol = (req.symbol if req and req.symbol else getattr(bot.researcher, "symbol", "XAUUSD")).upper()
 
     def _micro_task():
         try:
-            logging.info(f"[API MICRO-TRAIN] Memulai Micro-Retrain on-demand untuk mode: {target_mode.upper()}...")
-            if bot.data_miner and bot.mt5_connected:
-                try:
-                    logging.info("[API MICRO-TRAIN] Sinkronisasi candle MT5 terbaru ke database sebelum retrain...")
-                    bot.data_miner.sync_latest_data()
-                except Exception as e_sync:
-                    logging.warning(f"[API MICRO-TRAIN] Gagal auto-sync MT5: {e_sync}")
+            logging.info(f"[API MICRO-TRAIN] Memulai Micro-Retrain on-demand untuk {target_symbol} - mode: {target_mode.upper()}...")
+            if bot.data_miner:
+                bot.data_miner.set_symbol(target_symbol)
+                if bot.mt5_connected:
+                    try:
+                        logging.info(f"[API MICRO-TRAIN] Sinkronisasi candle MT5 terbaru ({target_symbol}) ke database...")
+                        bot.data_miner.sync_latest_data()
+                    except Exception as e_sync:
+                        logging.warning(f"[API MICRO-TRAIN] Gagal auto-sync MT5: {e_sync}")
 
             df_recent = bot.data_miner.load_recent_micro_chunk(n_candles=3000)
             if df_recent is None or df_recent.empty:
-                logging.warning("[API MICRO-TRAIN] Data candle recent kosong di database.")
+                logging.warning(f"[API MICRO-TRAIN] Data candle recent {target_symbol} kosong di database.")
                 return
 
-            if target_mode in ["normal", "all"] and bot.researcher.model_normal is not None:
-                fb_normal = bot.data_miner.load_live_decision_chunk(mode="normal")
-                bot.researcher.micro_retrain("normal", df_recent, fb_normal)
+            if bot.researcher:
+                bot.researcher.set_symbol(target_symbol)
+                if target_mode in ["normal", "all"] and bot.researcher.model_normal is not None:
+                    fb_normal = bot.data_miner.load_live_decision_chunk(mode="normal", symbol=target_symbol)
+                    bot.researcher.micro_retrain("normal", df_recent, fb_normal)
 
-            if target_mode in ["runner", "all"] and bot.researcher.model_runner is not None:
-                fb_runner = bot.data_miner.load_live_decision_chunk(mode="runner")
-                bot.researcher.micro_retrain("runner", df_recent, fb_runner)
+                if target_mode in ["runner", "all"] and bot.researcher.model_runner is not None:
+                    fb_runner = bot.data_miner.load_live_decision_chunk(mode="runner", symbol=target_symbol)
+                    bot.researcher.micro_retrain("runner", df_recent, fb_runner)
 
             bot.executor.last_micro_retrain_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            logging.info(f"✅ [API MICRO-TRAIN] Micro-Retrain selesai pada {bot.executor.last_micro_retrain_time}.")
+            logging.info(f"✅ [API MICRO-TRAIN] Micro-Retrain {target_symbol} selesai pada {bot.executor.last_micro_retrain_time}.")
         except Exception as e:
             logging.error(f"[API MICRO-TRAIN] Gagal: {e}")
 
     threading.Thread(target=_micro_task, daemon=True).start()
-    return {"status": "success", "message": f"Online Micro-Retrain ({target_mode.upper()}) started in background. Cek Logs untuk progress."}
+    return {"status": "success", "message": f"Online Micro-Retrain ({target_symbol} {target_mode.upper()}) started in background. Cek Logs untuk progress."}
 
 class ValidateRequest(BaseModel):
     mode: str = "normal" # "normal" or "runner"
+    symbol: Optional[str] = "XAUUSD"
 
 @router.post("/api/strategies/validate")
 async def trigger_validate(req: ValidateRequest = None):
     """Menjalankan validasi OOS langsung pada model tersimpan dengan parameter terbaru tanpa retraining."""
     target_mode = req.mode.lower() if req and req.mode else "normal"
+    target_symbol = (req.symbol if req and req.symbol else getattr(bot.researcher, "symbol", "XAUUSD")).upper()
     def _validate_task():
         try:
-            total_test_chunks, test_generator = bot.data_miner.load_test_chunks(chunk_size=100000)
+            if bot.data_miner:
+                bot.data_miner.set_symbol(target_symbol)
+            if bot.researcher:
+                bot.researcher.set_symbol(target_symbol)
+            total_test_chunks, test_generator = bot.data_miner.load_test_chunks(chunk_size=100000, symbol=target_symbol)
             if not test_generator or total_test_chunks == 0:
-                logging.warning(f"⚠️ [VALIDATE] Data OOS kosong untuk {target_mode}.")
+                logging.warning(f"⚠️ [VALIDATE] Data OOS kosong untuk {target_symbol} - {target_mode}.")
                 return
-            logging.info(f"Memulai validasi OOS on-demand untuk {target_mode.upper()}...")
+            logging.info(f"Memulai validasi OOS on-demand untuk {target_symbol} - {target_mode.upper()}...")
             accuracy = bot.gatekeeper.validate_model(target_mode, test_generator, total_test_chunks)
             if target_mode == 'normal':
                 bot.researcher.last_accuracy_normal = float(accuracy)
@@ -306,10 +327,10 @@ async def trigger_validate(req: ValidateRequest = None):
                 bot.researcher.save_metadata()
                 if accuracy >= 0.50:
                     bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
-                    logging.info(f"✅ Model Normal lulus validasi (Win Rate: {accuracy*100:.2f}% >= 50%). Supervisor Normal Mode = VALID.")
+                    logging.info(f"✅ Model Normal ({target_symbol}) lulus validasi (Win Rate: {accuracy*100:.2f}% >= 50%). Supervisor Normal Mode = VALID.")
                 else:
                     bot.supervisor.set_model_validity(False, bot.supervisor.is_runner_valid())
-                    logging.warning(f"❌ Model Normal gagal validasi (Win Rate: {accuracy*100:.2f}% < 50%). Supervisor Normal Mode = QUARANTINE.")
+                    logging.warning(f"❌ Model Normal ({target_symbol}) gagal validasi (Win Rate: {accuracy*100:.2f}% < 50%). Supervisor Normal Mode = QUARANTINE.")
             elif target_mode == 'runner':
                 bot.researcher.last_accuracy_runner = float(accuracy)
                 bot.researcher.last_trained_runner = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -317,15 +338,15 @@ async def trigger_validate(req: ValidateRequest = None):
                 RUNNER_MIN_WIN_RATE = 0.25
                 if accuracy >= RUNNER_MIN_WIN_RATE:
                     bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), True)
-                    logging.info(f"✅ Model Runner lulus validasi (Win Rate: {accuracy*100:.2f}% >= {RUNNER_MIN_WIN_RATE*100:.0f}% pada RR 1:5). Supervisor Runner Mode = VALID.")
+                    logging.info(f"✅ Model Runner ({target_symbol}) lulus validasi (Win Rate: {accuracy*100:.2f}% >= {RUNNER_MIN_WIN_RATE*100:.0f}% pada RR 1:5). Supervisor Runner Mode = VALID.")
                 else:
                     bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), False)
-                    logging.warning(f"❌ Model Runner gagal validasi (Win Rate: {accuracy*100:.2f}% < {RUNNER_MIN_WIN_RATE*100:.0f}%). Supervisor Runner Mode = QUARANTINE.")
+                    logging.warning(f"❌ Model Runner ({target_symbol}) gagal validasi (Win Rate: {accuracy*100:.2f}% < {RUNNER_MIN_WIN_RATE*100:.0f}%). Supervisor Runner Mode = QUARANTINE.")
         except Exception as e:
             logging.error(f"[VALIDATE] Gagal: {e}")
 
     threading.Thread(target=_validate_task, daemon=True).start()
-    return {"status": "success", "message": f"Validasi OOS {target_mode.upper()} dimulai di background. Cek Logs untuk progress."}
+    return {"status": "success", "message": f"Validasi OOS {target_symbol} - {target_mode.upper()} dimulai di background. Cek Logs untuk progress."}
 
 @router.post("/api/strategies/reset-models")
 async def reset_models(req: Optional[ResetModelRequest] = None):
