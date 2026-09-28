@@ -1,13 +1,13 @@
 {
-  "symbol": "BTCUSD",
+  "symbol": "XNXX",
   "normal": {
-    "last_accuracy": 0.5214,
+    "last_accuracy": 0.51,
     "last_trained_at": "2026-09-27 12:00:00",
     "trained": true,
     "optimal_threshold": 0.54
   },
   "runner": {
-    "last_accuracy": 0.2842,
+    "last_accuracy": 0.27,
     "last_trained_at": "2026-09-27 12:00:00",
     "trained": true,
     "max_runner_rr": 5.0,

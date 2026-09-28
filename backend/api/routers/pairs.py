@@ -155,6 +155,9 @@ async def add_pair(req: PairAddRequest):
         current_reg.append(clean_sym)
         save_registered_pairs(current_reg)
 
+    if hasattr(bot, "active_pairs") and clean_sym not in bot.active_pairs:
+        bot.active_pairs.append(clean_sym)
+
     return {
         "status": "success",
         "message": f"Pair {clean_sym} berhasil didaftarkan. Terdeteksi di broker MT5 sebagai [{broker_sym}].",
@@ -176,6 +179,8 @@ async def remove_pair(req: PairAddRequest):
     if clean_sym in current_reg:
         current_reg.remove(clean_sym)
         save_registered_pairs(current_reg)
+        if hasattr(bot, "active_pairs") and clean_sym in bot.active_pairs:
+            bot.active_pairs.remove(clean_sym)
         return {"status": "success", "message": f"Pair {clean_sym} berhasil dihapus dari daftar."}
     return {"status": "error", "message": f"Pair {clean_sym} tidak ditemukan dalam daftar."}
 

@@ -55,7 +55,8 @@ from .repositories.rlhf_repo import (
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    ensure_schema_migrations()
+    import asyncio
+    await asyncio.to_thread(ensure_schema_migrations)
 
 __all__ = [
     "engine",

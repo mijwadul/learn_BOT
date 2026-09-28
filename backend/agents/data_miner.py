@@ -673,26 +673,34 @@ class DataMinerAgent:
             logging.error(f"Gagal memuat live decision samples: {e}")
             return pd.DataFrame()
             
-    def load_test_chunks(self, chunk_size=100000, split_ratio=0.80, symbol=None):
+    def load_test_chunks(self, chunk_size=100000, split_ratio=0.80, symbol=None, max_test_samples: int = 50000):
         if symbol:
             self.set_symbol(symbol)
         try:
             query_count = f'SELECT COUNT(*) FROM "{self.table_name}"'
             total_rows = pd.read_sql(query_count, con=sync_engine).iloc[0, 0]
             train_limit = int(total_rows * split_ratio)
-            test_limit = total_rows - train_limit
+            raw_test_limit = total_rows - train_limit
             
-            if test_limit == 0:
+            if raw_test_limit == 0:
                 logging.error(f"Tidak ada data OOS/Test di database {self.table_name}.")
                 return 0, None
                 
-            total_chunks = (test_limit + chunk_size - 1) // chunk_size
-            logging.info(f"Mempersiapkan {total_chunks} chunks untuk testing/validasi OOS ({self.canonical_symbol}) (total {test_limit} baris).")
+            if max_test_samples and raw_test_limit > max_test_samples:
+                logging.info(f"⚡ [OOS GUARD] Data OOS ({raw_test_limit} baris) dipangkas ke {max_test_samples} candle terbaru ({self.canonical_symbol}) demi stabilitas CPU/RAM.")
+                start_offset = total_rows - max_test_samples
+                effective_test_limit = max_test_samples
+            else:
+                start_offset = train_limit
+                effective_test_limit = raw_test_limit
+
+            total_chunks = (effective_test_limit + chunk_size - 1) // chunk_size
+            logging.info(f"Mempersiapkan {total_chunks} chunks untuk testing/validasi OOS ({self.canonical_symbol}) (total {effective_test_limit} baris).")
             
             def chunk_generator():
-                for offset in range(0, test_limit, chunk_size):
-                    limit = min(chunk_size, test_limit - offset)
-                    db_offset = train_limit + offset
+                for offset in range(0, effective_test_limit, chunk_size):
+                    limit = min(chunk_size, effective_test_limit - offset)
+                    db_offset = start_offset + offset
                     query = f'SELECT * FROM "{self.table_name}" ORDER BY time ASC LIMIT {limit} OFFSET {db_offset}'
                     df = pd.read_sql(query, con=sync_engine, index_col='time')
                     df.index = pd.to_datetime(df.index)
