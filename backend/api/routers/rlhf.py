@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -10,6 +11,29 @@ from config import Config
 from ..dependencies import bot
 
 router = APIRouter(tags=["RLHF Human Feedback"])
+
+# ─── In-Memory Cache untuk RLHF OOS Candidates ───────────────────────────────
+# Menyimpan hasil prediksi OOS agar tidak recompute setiap request pagination.
+# Key: (symbol, mode, min_prob_rounded)  |  TTL: 5 menit
+_rlhf_cache: dict = {}
+_RLHF_CACHE_TTL = 300       # detik (5 menit)
+_MAX_OOS_ROWS   = 15_000    # Batas baris OOS yang dibaca ke RAM (cukup untuk kurasi)
+
+def _get_rlhf_cache(key: tuple):
+    entry = _rlhf_cache.get(key)
+    if entry and (time.time() - entry["ts"]) < _RLHF_CACHE_TTL:
+        return entry["data"]
+    return None
+
+def _set_rlhf_cache(key: tuple, data: dict):
+    _rlhf_cache[key] = {"ts": time.time(), "data": data}
+
+def _invalidate_rlhf_cache(symbol: str = None):
+    """Hapus cache saat ada feedback baru agar kandidat diperbarui."""
+    keys_to_del = [k for k in _rlhf_cache if symbol is None or k[0] == symbol.upper()]
+    for k in keys_to_del:
+        _rlhf_cache.pop(k, None)
+# ─────────────────────────────────────────────────────────────────────────────
 
 class RLHFRequest(BaseModel):
     setup_id: str
@@ -39,7 +63,7 @@ async def submit_rlhf(req: RLHFRequest):
         mode_val = req.mode.lower() if req.mode else "normal"
         sym = (req.symbol or "XAUUSD").upper()
         logging.info(f"Menerima RLHF Feedback: {req.decision.upper()} [{mode_val.upper()}] ({sym}) untuk {req.setup_id}")
-        
+
         if req.decision == "approve":
             await asyncio.to_thread(save_approved_setup, req.setup_id, sym, req.action_type, req.probability, req.notes, mode=mode_val)
         elif req.decision == "reject":
@@ -48,6 +72,9 @@ async def submit_rlhf(req: RLHFRequest):
             await asyncio.to_thread(save_ignored_setup, req.setup_id, sym, req.action_type, req.probability, req.notes, mode=mode_val)
         else:
             return {"status": "error", "message": f"Decision tidak valid: {req.decision}. Gunakan approve/reject/ignore."}
+
+        # Invalidasi cache agar kandidat diperbarui di request berikutnya
+        _invalidate_rlhf_cache(sym)
         return {"status": "success", "message": f"Setup {req.setup_id} marked as {req.decision} ({mode_val} - {sym})."}
     except Exception as e:
         logging.error(f"RLHF error: {e}")
@@ -58,6 +85,7 @@ async def submit_rlhf_batch(req: RLHFBatchRequest):
     try:
         from database import save_approved_setup, save_rejected_setup, save_ignored_setup
         saved_count = 0
+        affected_symbols: set = set()
         for item in req.items:
             mode_val = item.mode.lower() if item.mode else "normal"
             sym = (item.symbol or "XAUUSD").upper()
@@ -70,6 +98,11 @@ async def submit_rlhf_batch(req: RLHFBatchRequest):
             elif item.decision == "ignore":
                 await asyncio.to_thread(save_ignored_setup, item.setup_id, sym, item.action_type, item.probability, item.notes, mode=mode_val)
                 saved_count += 1
+            affected_symbols.add(sym)
+
+        # Invalidasi cache untuk semua pair yang ada feedback barunya
+        for s in affected_symbols:
+            _invalidate_rlhf_cache(s)
         return {"status": "success", "saved_count": saved_count, "message": f"Berhasil menyimpan {saved_count} keputusan feedback."}
     except Exception as e:
         logging.error(f"RLHF batch error: {e}")
@@ -242,91 +275,134 @@ async def get_rlhf_setups(
             }
 
         split_idx = int(total_rows * 0.8)
-        
-        target_model = bot.researcher.model_normal if mode_str == "normal" else bot.researcher.model_runner
-        if target_model is not None:
-            df_full_oos = pd.read_sql(
-                f'SELECT * FROM "{table_name}" ORDER BY time ASC OFFSET {split_idx}',
-                con=sync_engine, index_col='time'
-            )
-            df_full_oos.index = pd.to_datetime(df_full_oos.index)
-            df_oos = df_full_oos.copy()
 
-            df_full_oos = bot.researcher.generate_targets(df_full_oos)
-            df_full_oos = bot.researcher.add_normalized_features(df_full_oos)
-            features = []
-            if hasattr(target_model, 'feature_name_') and target_model.feature_name_ is not None:
-                features = list(target_model.feature_name_)
-            elif hasattr(target_model, 'booster_') and hasattr(target_model.booster_, 'feature_name'):
-                features = list(target_model.booster_.feature_name())
-            if not features:
-                features = bot.researcher.get_model_features(target_model, mode=mode_str)
-            
-            if features:
-                classes = list(getattr(target_model, 'classes_', [0, 1]))
-                X_oos = df_full_oos.reindex(columns=features, fill_value=0.0).copy()
-                for c in features:
-                    if not (pd.api.types.is_numeric_dtype(X_oos[c]) or pd.api.types.is_bool_dtype(X_oos[c])):
-                        X_oos[c] = pd.to_numeric(X_oos[c], errors='coerce').fillna(0.0)
-                proba_matrix = target_model.predict_proba(X_oos)
+        # ── Cache check: jika sudah ada hasil prediksi, langsung pakai ────────
+        min_prob_key = round(min_prob, 2)
+        cache_key = (sym, mode_str, min_prob_key)
+        cached = _get_rlhf_cache(cache_key)
+        if cached is not None:
+            logging.info(f"[RLHF Cache HIT] {sym} {mode_str} prob>={min_prob_key}")
+            df_oos        = cached["df_oos"]
+            candidates    = cached["candidates"]
+            processed_set = cached["processed"]
+            high_prob     = cached.get("high_prob", df_oos[df_oos['prob'] >= min_prob])
+            # Update processed set dengan feedback terbaru (bisa berubah sejak cache)
+            fresh_processed = (
+                get_approved_setup_ids(mode=mode_str, symbol=sym) |
+                get_rejected_setup_ids(mode=mode_str, symbol=sym) |
+                get_ignored_setup_ids(mode=mode_str, symbol=sym)
+            )
+            if fresh_processed != processed_set:
+                # Ada feedback baru → filter ulang candidates dari df_oos
+                high_prob  = df_oos[df_oos['prob'] >= min_prob]
+                candidates = [
+                    idx for idx in high_prob.index
+                    if (idx.strftime("%Y-%m-%d %H:%M:%S") if hasattr(idx, 'strftime') else str(idx))
+                    not in fresh_processed
+                ]
+                cached["candidates"] = candidates
+                cached["processed"]  = fresh_processed
+                cached["high_prob"]  = high_prob
+        else:
+            logging.info(f"[RLHF Cache MISS] {sym} {mode_str} — memulai komputasi OOS (max {_MAX_OOS_ROWS} baris)...")
+            target_model = bot.researcher.model_normal if mode_str == "normal" else bot.researcher.model_runner
+            if target_model is not None:
+                # ── Baca hanya N baris OOS terbaru (KRITIS: bukan semua baris!) ──
+                oos_limit = min(_MAX_OOS_ROWS, max(0, total_rows - split_idx))
+                df_full_oos = pd.read_sql(
+                    f'SELECT * FROM "{table_name}" ORDER BY time DESC LIMIT {oos_limit}',
+                    con=sync_engine, index_col='time'
+                )
+                df_full_oos.index = pd.to_datetime(df_full_oos.index)
+                df_full_oos = df_full_oos.sort_index()  # kembalikan urutan ASC
+                df_oos = df_full_oos.copy()
+
+                df_full_oos = bot.researcher.generate_targets(df_full_oos)
+                df_full_oos = bot.researcher.add_normalized_features(df_full_oos)
+                features = []
+                if hasattr(target_model, 'feature_name_') and target_model.feature_name_ is not None:
+                    features = list(target_model.feature_name_)
+                elif hasattr(target_model, 'booster_') and hasattr(target_model.booster_, 'feature_name'):
+                    features = list(target_model.booster_.feature_name())
+                if not features:
+                    features = bot.researcher.get_model_features(target_model, mode=mode_str)
+
+                if features:
+                    classes = list(getattr(target_model, 'classes_', [0, 1]))
+                    X_oos = df_full_oos.reindex(columns=features, fill_value=0.0).copy()
+                    for c in features:
+                        if not (pd.api.types.is_numeric_dtype(X_oos[c]) or pd.api.types.is_bool_dtype(X_oos[c])):
+                            X_oos[c] = pd.to_numeric(X_oos[c], errors='coerce').fillna(0.0)
+                    proba_matrix = target_model.predict_proba(X_oos)
                 
-                if len(classes) == 2 or proba_matrix.shape[1] == 2:
-                    idx_win = classes.index(1) if 1 in classes else 1
-                    p_win = proba_matrix[:, idx_win] if proba_matrix.shape[1] > idx_win else proba_matrix[:, -1]
-                    open_c = df_oos['open'].values if 'open' in df_oos.columns else df_oos['close'].values
-                    close_c = df_oos['close'].values
-                    is_bull = close_c >= open_c
-                    p_buy = np.where(is_bull, p_win, 0.0)
-                    p_sell = np.where(~is_bull, p_win, 0.0)
-                    df_oos['prob_buy'] = p_buy
-                    df_oos['prob_sell'] = p_sell
-                    df_oos['prob'] = p_win
-                    df_oos['predicted_action'] = np.where(is_bull, "BUY", "SELL")
+                    if len(classes) == 2 or proba_matrix.shape[1] == 2:
+                        idx_win = classes.index(1) if 1 in classes else 1
+                        p_win = proba_matrix[:, idx_win] if proba_matrix.shape[1] > idx_win else proba_matrix[:, -1]
+                        open_c = df_oos['open'].values if 'open' in df_oos.columns else df_oos['close'].values
+                        close_c = df_oos['close'].values
+                        is_bull = close_c >= open_c
+                        p_buy = np.where(is_bull, p_win, 0.0)
+                        p_sell = np.where(~is_bull, p_win, 0.0)
+                        df_oos['prob_buy'] = p_buy
+                        df_oos['prob_sell'] = p_sell
+                        df_oos['prob'] = p_win
+                        df_oos['predicted_action'] = np.where(is_bull, "BUY", "SELL")
+                    else:
+                        idx_buy = classes.index(1) if 1 in classes else (1 if proba_matrix.shape[1] > 1 else None)
+                        idx_sell = classes.index(2) if 2 in classes else None
+                        p_buy = proba_matrix[:, idx_buy] if idx_buy is not None else np.zeros(len(df_oos))
+                        p_sell = proba_matrix[:, idx_sell] if idx_sell is not None else np.zeros(len(df_oos))
+                        df_oos['prob_buy'] = p_buy
+                        df_oos['prob_sell'] = p_sell
+                        df_oos['prob'] = np.maximum(p_buy, p_sell)
+                        df_oos['predicted_action'] = np.where(p_buy >= p_sell, "BUY", "SELL")
                 else:
-                    idx_buy = classes.index(1) if 1 in classes else (1 if proba_matrix.shape[1] > 1 else None)
-                    idx_sell = classes.index(2) if 2 in classes else None
-                    p_buy = proba_matrix[:, idx_buy] if idx_buy is not None else np.zeros(len(df_oos))
-                    p_sell = proba_matrix[:, idx_sell] if idx_sell is not None else np.zeros(len(df_oos))
-                    df_oos['prob_buy'] = p_buy
-                    df_oos['prob_sell'] = p_sell
-                    df_oos['prob'] = np.maximum(p_buy, p_sell)
-                    df_oos['predicted_action'] = np.where(p_buy >= p_sell, "BUY", "SELL")
+                    df_oos['prob'] = np.random.uniform(0.5, 0.99, len(df_oos))
+                    df_oos['predicted_action'] = "BUY"
             else:
+                # Tidak ada model — baca saja baris OOS terbatas untuk preview
+                oos_limit = min(_MAX_OOS_ROWS, max(0, total_rows - split_idx))
+                df_oos = pd.read_sql(
+                    f'SELECT * FROM "{table_name}" ORDER BY time DESC LIMIT {oos_limit}',
+                    con=sync_engine, index_col='time'
+                )
+                df_oos.index = pd.to_datetime(df_oos.index)
+                df_oos = df_oos.sort_index()
+                np.random.seed(42 if mode_str == "normal" else 84)
                 df_oos['prob'] = np.random.uniform(0.5, 0.99, len(df_oos))
                 df_oos['predicted_action'] = "BUY"
-        else:
-            df_oos = pd.read_sql(
-                f'SELECT * FROM "{table_name}" ORDER BY time ASC OFFSET {split_idx}',
-                con=sync_engine, index_col='time'
+
+            if df_oos.empty or len(df_oos) < 50:
+                return {
+                    "status": "error",
+                    "message": f"Data OOS untuk {sym} tidak mencukupi.",
+                    "setup": None,
+                    "setups": [],
+                    "total": 0,
+                    "total_pending": 0,
+                    "stats": stats
+                }
+
+            # Filter eksklusif untuk pair bersangkutan
+            processed = (
+                get_approved_setup_ids(mode=mode_str, symbol=sym) |
+                get_rejected_setup_ids(mode=mode_str, symbol=sym) |
+                get_ignored_setup_ids(mode=mode_str, symbol=sym)
             )
-            df_oos.index = pd.to_datetime(df_oos.index)
-            np.random.seed(42 if mode_str == "normal" else 84)
-            df_oos['prob'] = np.random.uniform(0.5, 0.99, len(df_oos))
-            df_oos['predicted_action'] = "BUY"
+            high_prob  = df_oos[df_oos['prob'] >= min_prob].copy()
+            candidates = [
+                idx for idx in high_prob.index
+                if (idx.strftime("%Y-%m-%d %H:%M:%S") if hasattr(idx, 'strftime') else str(idx)) not in processed
+            ]
 
-        if df_oos.empty or len(df_oos) < 50:
-            return {
-                "status": "error", 
-                "message": f"Data OOS untuk {sym} tidak mencukupi.", 
-                "setup": None, 
-                "setups": [],
-                "total": 0, 
-                "total_pending": 0,
-                "stats": stats
-            }
-
-        # Filter eksklusif untuk pair bersangkutan
-        processed = (
-            get_approved_setup_ids(mode=mode_str, symbol=sym) |
-            get_rejected_setup_ids(mode=mode_str, symbol=sym) |
-            get_ignored_setup_ids(mode=mode_str, symbol=sym)
-        )
-        high_prob = df_oos[df_oos['prob'] >= min_prob].copy()
-
-        candidates = [
-            idx for idx in high_prob.index
-            if (idx.strftime("%Y-%m-%d %H:%M:%S") if hasattr(idx, 'strftime') else str(idx)) not in processed
-        ]
+            # ── Simpan ke cache ───────────────────────────────────────────────
+            _set_rlhf_cache(cache_key, {
+                "df_oos": df_oos,
+                "high_prob": high_prob,
+                "candidates": candidates,
+                "processed": processed
+            })
+            logging.info(f"[RLHF Cache SET] {sym} {mode_str} — {len(candidates)} kandidat dari {len(df_oos)} baris OOS")
         total_pending = len(candidates)
 
         if total_pending == 0:
@@ -366,7 +442,12 @@ async def get_rlhf_setups(
 
         setups_list = []
         for p_idx in page_indices:
-            row_p = high_prob.loc[p_idx]
+            if 'high_prob' in locals() and p_idx in high_prob.index:
+                row_p = high_prob.loc[p_idx]
+            else:
+                row_p = df_oos.loc[p_idx]
+            if isinstance(row_p, pd.DataFrame):
+                row_p = row_p.iloc[-1]
             s_id = p_idx.strftime("%Y-%m-%d %H:%M:%S") if hasattr(p_idx, 'strftime') else str(p_idx)
 
             p_act = row_p.get('predicted_action', None)

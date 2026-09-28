@@ -90,10 +90,31 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
 
   const [queueLoaded, setQueueLoaded] = useState(false);
   const [queueDone, setQueueDone] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [rlhfNotes, setRlhfNotes] = useState("");
   const notesRef = useRef<HTMLInputElement>(null);
 
+  // Lazy load — RLHF queue tidak di-fetch otomatis saat mount
+  const [queueTriggered, setQueueTriggered] = useState(false);
+
+  // Cache data candle per setupId & timeframe agar transisi setup instan tanpa reload
+  const chartCacheRef = useRef<Map<string, CandleData[]>>(new Map());
+
   const activePair = (selectedPair || "XAUUSD").toUpperCase();
+
+  // Prefetch candle chart untuk setup berikutnya di background
+  const prefetchNextChart = useCallback((setupId: string, sym: string, tf: string) => {
+    const cacheKey = `${setupId}_${tf}`;
+    if (chartCacheRef.current.has(cacheKey)) return;
+    fetch(`${getApiBaseUrl()}/api/rlhf/chart?setup_id=${encodeURIComponent(setupId)}&symbol=${sym}&timeframe=${tf}&mode=${reviewMode}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.status === "success" && data.candles) {
+          chartCacheRef.current.set(cacheKey, data.candles);
+        }
+      })
+      .catch(() => {});
+  }, [reviewMode]);
 
   // 1. Fetch 10 setup per halaman
   const fetchPage = useCallback(async (
@@ -138,8 +159,16 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
 
         // Pasang setup aktif
         const firstSetup = data.setup || data.setups[0];
+        if (firstSetup.candles && firstSetup.candles.length > 0) {
+          chartCacheRef.current.set(`${firstSetup.setup_id}_${firstSetup.tf_label || tf}`, firstSetup.candles);
+        }
         setActiveSetup(firstSetup);
         setSelectedSetupId(firstSetup.setup_id);
+
+        // Prefetch setup ke-2 di background
+        if (data.setups.length > 1) {
+          prefetchNextChart(data.setups[1].setup_id, sym, tf);
+        }
       }
       setQueueLoaded(true);
     } catch {
@@ -147,10 +176,24 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [toast, prefetchNextChart]);
 
-  // 2. Fetch candle chart khusus untuk setup tertentu & timeframe
+  // 2. Fetch candle chart khusus untuk setup tertentu & timeframe (dengan cache)
   const fetchSetupChart = useCallback(async (setupId: string, sym: string, tf: string) => {
+    const cacheKey = `${setupId}_${tf}`;
+    if (chartCacheRef.current.has(cacheKey)) {
+      const cachedCandles = chartCacheRef.current.get(cacheKey)!;
+      setActiveSetup((prev) => {
+        if (!prev || prev.setup_id !== setupId) return prev;
+        return {
+          ...prev,
+          candles: cachedCandles,
+          tf_label: tf,
+        };
+      });
+      return;
+    }
+
     setLoadingChart(true);
     try {
       const res = await fetch(
@@ -158,6 +201,7 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
       );
       const data = await res.json();
       if (data.status === "success" && data.candles) {
+        chartCacheRef.current.set(cacheKey, data.candles);
         setActiveSetup((prev) => {
           if (!prev || prev.setup_id !== setupId) return prev;
           return {
@@ -176,15 +220,16 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
     }
   }, [reviewMode, toast]);
 
-  // Reset & load saat selectedPair atau reviewMode berganti
+  // Reset & load hanya saat filter utama berubah atau tombol diklik — TIDAK reload saat feedback dikirim
   useEffect(() => {
+    if (!queueTriggered) return;
     setPage(1);
     setQueueLoaded(false);
     setQueueDone(false);
     setSetupsList([]);
     setActiveSetup(null);
     fetchPage(1, minProb, reviewMode, activePair, currentTimeframe);
-  }, [activePair, reviewMode, minProb, fetchPage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activePair, reviewMode, minProb, queueTriggered]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ganti timeframe chart aktif
   const handleTimeframeChange = (tf: string) => {
@@ -197,19 +242,26 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
   // Pilih baris setup dari tabel 10 data
   const handleSelectSetupRow = (setup: Setup) => {
     setSelectedSetupId(setup.setup_id);
-    setActiveSetup(setup);
-    // Jika setup belum punya candles untuk timeframe saat ini, fetch chart
-    if (!setup.candles || setup.candles.length === 0 || setup.tf_label !== currentTimeframe) {
+    const cacheKey = `${setup.setup_id}_${currentTimeframe}`;
+    const cachedCandles = chartCacheRef.current.get(cacheKey);
+    if (cachedCandles) {
+      setActiveSetup({ ...setup, candles: cachedCandles, tf_label: currentTimeframe });
+    } else if (setup.candles && setup.candles.length > 0) {
+      chartCacheRef.current.set(cacheKey, setup.candles);
+      setActiveSetup(setup);
+    } else {
+      setActiveSetup(setup);
       fetchSetupChart(setup.setup_id, activePair, currentTimeframe);
     }
   };
 
-  // Kirim keputusan kurasi (Approve / Reject / Ignore)
+  // Kirim keputusan kurasi (Approve / Reject / Ignore) — tanpa reload seluruh list
   const submitDecision = useCallback(async (
     targetSetup: Setup, 
     decision: "approve" | "reject" | "ignore"
   ) => {
-    if (loading) return;
+    if (loading || isSubmitting) return;
+    setIsSubmitting(true);
     try {
       const res = await fetch(`${getApiBaseUrl()}/api/rlhf/feedback`, {
         method: "POST",
@@ -240,7 +292,7 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
 
       setRlhfNotes("");
 
-      // Update daftar 10 data secara lokal
+      // Update daftar 10 data secara lokal tanpa refresh halaman
       const nextList = setupsList.filter((s) => s.setup_id !== targetSetup.setup_id);
       setSetupsList(nextList);
       setTotalPending((prev) => Math.max(0, prev - 1));
@@ -253,21 +305,33 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
       }));
 
       if (nextList.length > 0) {
-        // Pindah ke item berikutnya pada batch 10 ini
+        // Pindah ke item berikutnya pada batch 10 ini secara instan
         const nextActive = nextList[0];
+        const cacheKey = `${nextActive.setup_id}_${currentTimeframe}`;
+        const cachedCandles = chartCacheRef.current.get(cacheKey);
+
         setSelectedSetupId(nextActive.setup_id);
-        setActiveSetup(nextActive);
-        if (!nextActive.candles || nextActive.candles.length === 0) {
+        if (cachedCandles) {
+          setActiveSetup({ ...nextActive, candles: cachedCandles, tf_label: currentTimeframe });
+        } else {
+          setActiveSetup(nextActive);
           fetchSetupChart(nextActive.setup_id, activePair, currentTimeframe);
         }
+
+        // Prefetch setup ke-2 berikutnya di background
+        if (nextList.length > 1) {
+          prefetchNextChart(nextList[1].setup_id, activePair, currentTimeframe);
+        }
       } else {
-        // Jika 10 data pada halaman ini habis dikurasi, refresh page
+        // Jika 10 data pada halaman ini sudah habis dikurasi, baru muat batch 10 berikutnya
         fetchPage(page, minProb, reviewMode, activePair, currentTimeframe);
       }
     } catch {
       toast.error("Gagal mengirim feedback kurasi.", "Error");
+    } finally {
+      setIsSubmitting(false);
     }
-  }, [loading, rlhfNotes, reviewMode, activePair, setupsList, page, minProb, currentTimeframe, fetchPage, fetchSetupChart, toast]);
+  }, [loading, isSubmitting, rlhfNotes, reviewMode, activePair, setupsList, page, minProb, currentTimeframe, fetchPage, fetchSetupChart, prefetchNextChart, toast]);
 
   // Keyboard shortcuts: A / R / I
   useEffect(() => {
@@ -340,7 +404,28 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
         </div>
       </div>
 
-      {/* 2. Total Data & Curation Stats Banner (Point 4: Total Data Ditampilkan) */}
+      {/* Lazy Load Gate: tampilkan sebelum queue dimuat */}
+      {!queueTriggered && (
+        <div className="flex flex-col items-center justify-center gap-4 py-12 border border-dashed border-cyan-500/30 rounded-2xl bg-cyan-500/5">
+          <Layers className="w-10 h-10 text-cyan-400/50" />
+          <div className="text-center">
+            <p className="text-sm font-bold text-white/70">RLHF Review Queue belum dimuat</p>
+            <p className="text-xs text-white/40 mt-1">Klik tombol di bawah untuk memulai kurasi setup AI pair <span className="text-cyan-300 font-mono">{activePair}</span></p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setQueueTriggered(true)}
+            className="px-5 py-2.5 rounded-xl text-sm font-black bg-cyan-500 hover:bg-cyan-400 text-black shadow-lg shadow-cyan-500/30 transition-all flex items-center gap-2 cursor-pointer"
+          >
+            <Layers size={16} /> Muat RLHF Review Queue ({activePair})
+          </button>
+        </div>
+      )}
+
+      {/* Konten queue — hanya tampil setelah triggered */}
+      {queueTriggered && (
+        <>
+      {/* 2. Total Data & Curation Stats Banner */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {/* Total Harus Dikurasi */}
         <div className="bg-black/50 border border-cyan-500/30 rounded-xl p-3 flex flex-col justify-between">
@@ -524,7 +609,7 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
               <button
                 type="button"
                 onClick={() => submitDecision(activeSetup, "approve")}
-                disabled={loading}
+                disabled={loading || isSubmitting}
                 className="px-4 py-2.5 rounded-xl bg-brand-green/20 hover:bg-brand-green/30 text-brand-green border border-brand-green/50 text-xs font-black flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
                 title="Setujui setup (Shortcut: A)"
               >
@@ -534,7 +619,7 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
               <button
                 type="button"
                 onClick={() => submitDecision(activeSetup, "ignore")}
-                disabled={loading}
+                disabled={loading || isSubmitting}
                 className="px-4 py-2.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-black flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
                 title="Abaikan sebagai noise (Shortcut: I)"
               >
@@ -544,7 +629,7 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
               <button
                 type="button"
                 onClick={() => submitDecision(activeSetup, "reject")}
-                disabled={loading}
+                disabled={loading || isSubmitting}
                 className="px-4 py-2.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/50 text-xs font-black flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
                 title="Tolak setup (Shortcut: R)"
               >
@@ -726,6 +811,8 @@ export function RlhfReviewQueue({ selectedPair = "XAUUSD" }: RlhfReviewQueueProp
             </div>
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   );

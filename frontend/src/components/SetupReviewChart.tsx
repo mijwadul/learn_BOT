@@ -5,6 +5,7 @@ import {
   createChart,
   ColorType,
   IChartApi,
+  ISeriesApi,
   LineStyle,
   CrosshairMode,
 } from "lightweight-charts";
@@ -29,14 +30,26 @@ export interface Candle {
 interface SetupReviewChartProps {
   candles: Candle[];
   entryPrice: number;
-  entryTime: number; // unix timestamp (seconds)
+  entryTime: number;
   sl: number;
   tp: number;
   action: "BUY" | "SELL";
-  tfLabel: string; // "M1" | "M5" | "M15" | "M30" | "H1"
+  tfLabel: string;
   currentTimeframe?: string;
   onTimeframeChange?: (tf: string) => void;
   isLoadingTf?: boolean;
+}
+
+interface SeriesRefs {
+  candle:  ISeriesApi<"Candlestick"> | null;
+  bbUpper: ISeriesApi<"Line"> | null;
+  bbLower: ISeriesApi<"Line"> | null;
+  sma20:   ISeriesApi<"Line"> | null;
+  ema50:   ISeriesApi<"Line"> | null;
+  lwma5H:  ISeriesApi<"Line"> | null;
+  lwma10H: ISeriesApi<"Line"> | null;
+  lwma5L:  ISeriesApi<"Line"> | null;
+  lwma10L: ISeriesApi<"Line"> | null;
 }
 
 export default function SetupReviewChart({
@@ -51,21 +64,21 @@ export default function SetupReviewChart({
   onTimeframeChange,
   isLoadingTf = false,
 }: SetupReviewChartProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
+  const containerRef   = useRef<HTMLDivElement>(null);
+  const chartRef       = useRef<IChartApi | null>(null);
+  const seriesRef      = useRef<SeriesRefs>({
+    candle: null, bbUpper: null, bbLower: null, sma20: null,
+    ema50: null, lwma5H: null, lwma10H: null, lwma5L: null, lwma10L: null,
+  });
+  const priceLineRef   = useRef<{ entry: any; sl: any; tp: any }>({ entry: null, sl: null, tp: null });
   const [showBbma, setShowBbma] = useState(true);
 
-  const activeTf = (currentTimeframe || tfLabel || "M5").toUpperCase();
+  const activeTf   = (currentTimeframe || tfLabel || "M5").toUpperCase();
   const timeframes = ["M1", "M5", "M15", "M30", "H1"];
 
+  // ── Effect 1: Init chart SEKALI saat mount — TIDAK bergantung pada data ───
   useEffect(() => {
-    if (!containerRef.current || candles.length === 0) return;
-
-    // Destroy chart lama saat setup berganti
-    if (chartRef.current) {
-      chartRef.current.remove();
-      chartRef.current = null;
-    }
+    if (!containerRef.current) return;
 
     const chart = createChart(containerRef.current, {
       layout: {
@@ -83,201 +96,114 @@ export default function SetupReviewChart({
         timeVisible: true,
         secondsVisible: false,
       },
-      width: containerRef.current.clientWidth,
-      height: containerRef.current.clientHeight,
+      width:  containerRef.current.clientWidth,
+      height: containerRef.current.clientHeight || 340,
     });
 
-    // 1. Candlestick Series
-    const candleSeries = chart.addCandlestickSeries({
-      upColor: "#22c55e",
-      downColor: "#ef4444",
+    // Buat semua series sekali — tidak akan di-destroy sampai komponen unmount
+    const s = seriesRef.current;
+    s.candle  = chart.addCandlestickSeries({
+      upColor: "#22c55e", downColor: "#ef4444",
       borderVisible: false,
-      wickUpColor: "#22c55e",
-      wickDownColor: "#ef4444",
+      wickUpColor: "#22c55e", wickDownColor: "#ef4444",
     });
+    s.bbUpper  = chart.addLineSeries({ color: "#818cf8", lineWidth: 1, lineStyle: LineStyle.Solid, priceLineVisible: false, lastValueVisible: false });
+    s.bbLower  = chart.addLineSeries({ color: "#818cf8", lineWidth: 1, lineStyle: LineStyle.Solid, priceLineVisible: false, lastValueVisible: false });
+    s.sma20    = chart.addLineSeries({ color: "#38bdf8", lineWidth: 2, lineStyle: LineStyle.Solid, priceLineVisible: false, lastValueVisible: false });
+    s.ema50    = chart.addLineSeries({ color: "#06b6d4", lineWidth: 2, lineStyle: LineStyle.Solid, priceLineVisible: false, lastValueVisible: false });
+    s.lwma5H   = chart.addLineSeries({ color: "#f87171", lineWidth: 1, lineStyle: LineStyle.Solid, priceLineVisible: false, lastValueVisible: false });
+    s.lwma10H  = chart.addLineSeries({ color: "#ef4444", lineWidth: 2, lineStyle: LineStyle.Solid, priceLineVisible: false, lastValueVisible: false });
+    s.lwma5L   = chart.addLineSeries({ color: "#4ade80", lineWidth: 1, lineStyle: LineStyle.Solid, priceLineVisible: false, lastValueVisible: false });
+    s.lwma10L  = chart.addLineSeries({ color: "#22c55e", lineWidth: 2, lineStyle: LineStyle.Solid, priceLineVisible: false, lastValueVisible: false });
 
-    const bars = candles.map((c) => ({
-      time: c.time as any,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    }));
-    candleSeries.setData(bars);
-
-    // 2. Indikator BBMA Lengkap
-    if (showBbma) {
-      // Top BB & Low BB
-      const bbUpperSeries = chart.addLineSeries({
-        color: "#818cf8",
-        lineWidth: 1,
-        lineStyle: LineStyle.Solid,
-        priceLineVisible: false,
-        title: "Top BB",
-      });
-      const bbLowerSeries = chart.addLineSeries({
-        color: "#818cf8",
-        lineWidth: 1,
-        lineStyle: LineStyle.Solid,
-        priceLineVisible: false,
-        title: "Low BB",
-      });
-
-      // Mid BB (SMA 20)
-      const sma20Series = chart.addLineSeries({
-        color: "#38bdf8",
-        lineWidth: 2,
-        lineStyle: LineStyle.Solid,
-        priceLineVisible: false,
-        title: "Mid BB",
-      });
-
-      // EMA 50
-      const ema50Series = chart.addLineSeries({
-        color: "#06b6d4",
-        lineWidth: 2,
-        lineStyle: LineStyle.Solid,
-        priceLineVisible: false,
-        title: "EMA 50",
-      });
-
-      // LWMA 5 High & LWMA 10 High
-      const lwma5HSeries = chart.addLineSeries({
-        color: "#f87171",
-        lineWidth: 1,
-        lineStyle: LineStyle.Solid,
-        priceLineVisible: false,
-        title: "LWMA 5H",
-      });
-      const lwma10HSeries = chart.addLineSeries({
-        color: "#ef4444",
-        lineWidth: 2,
-        lineStyle: LineStyle.Solid,
-        priceLineVisible: false,
-        title: "LWMA 10H",
-      });
-
-      // LWMA 5 Low & LWMA 10 Low
-      const lwma5LSeries = chart.addLineSeries({
-        color: "#4ade80",
-        lineWidth: 1,
-        lineStyle: LineStyle.Solid,
-        priceLineVisible: false,
-        title: "LWMA 5L",
-      });
-      const lwma10LSeries = chart.addLineSeries({
-        color: "#22c55e",
-        lineWidth: 2,
-        lineStyle: LineStyle.Solid,
-        priceLineVisible: false,
-        title: "LWMA 10L",
-      });
-
-      // Populate BBMA line data
-      const upperData = candles.filter((c) => c.bb_upper != null).map((c) => ({ time: c.time as any, value: c.bb_upper! }));
-      const lowerData = candles.filter((c) => c.bb_lower != null).map((c) => ({ time: c.time as any, value: c.bb_lower! }));
-      const smaData = candles.filter((c) => c.sma_20 != null).map((c) => ({ time: c.time as any, value: c.sma_20! }));
-      const emaData = candles.filter((c) => c.ema_50 != null).map((c) => ({ time: c.time as any, value: c.ema_50! }));
-      const lwma5HData = candles.filter((c) => c.lwma_5_h != null).map((c) => ({ time: c.time as any, value: c.lwma_5_h! }));
-      const lwma10HData = candles.filter((c) => c.lwma_10_h != null).map((c) => ({ time: c.time as any, value: c.lwma_10_h! }));
-      const lwma5LData = candles.filter((c) => c.lwma_5_l != null).map((c) => ({ time: c.time as any, value: c.lwma_5_l! }));
-      const lwma10LData = candles.filter((c) => c.lwma_10_l != null).map((c) => ({ time: c.time as any, value: c.lwma_10_l! }));
-
-      if (upperData.length > 0) bbUpperSeries.setData(upperData);
-      if (lowerData.length > 0) bbLowerSeries.setData(lowerData);
-      if (smaData.length > 0) sma20Series.setData(smaData);
-      if (emaData.length > 0) ema50Series.setData(emaData);
-      if (lwma5HData.length > 0) lwma5HSeries.setData(lwma5HData);
-      if (lwma10HData.length > 0) lwma10HSeries.setData(lwma10HData);
-      if (lwma5LData.length > 0) lwma5LSeries.setData(lwma5LData);
-      if (lwma10LData.length > 0) lwma10LSeries.setData(lwma10LData);
-    }
-
-    // Garis ENTRY — kuning dashed
-    candleSeries.createPriceLine({
-      price: entryPrice,
-      color: "#facc15",
-      lineWidth: 2,
-      lineStyle: LineStyle.Dashed,
-      axisLabelVisible: true,
-      title: "ENTRY @" + entryPrice.toFixed(2),
-    });
-
-    // Garis SL — merah solid
-    candleSeries.createPriceLine({
-      price: sl,
-      color: "#ef4444",
-      lineWidth: 2,
-      lineStyle: LineStyle.Solid,
-      axisLabelVisible: true,
-      title: "SL @" + sl.toFixed(2),
-    });
-
-    // Garis TP — hijau solid
-    candleSeries.createPriceLine({
-      price: tp,
-      color: "#22c55e",
-      lineWidth: 2,
-      lineStyle: LineStyle.Solid,
-      axisLabelVisible: true,
-      title: "TP @" + tp.toFixed(2),
-    });
-
-    // Marker arrow di candle entry terdekat
-    // Cari candle yang paling mendekati entryTime
-    let closestMarkerTime = entryTime;
-    if (candles.length > 0) {
-      let minDiff = Infinity;
-      for (const c of candles) {
-        const diff = Math.abs(c.time - entryTime);
-        if (diff < minDiff) {
-          minDiff = diff;
-          closestMarkerTime = c.time;
-        }
-      }
-    }
-
-    candleSeries.setMarkers([
-      {
-        time: closestMarkerTime as any,
-        position: action === "BUY" ? "belowBar" : "aboveBar",
-        shape: action === "BUY" ? "arrowUp" : "arrowDown",
-        color: "#facc15",
-        text: `${action} @ ${entryPrice.toFixed(2)}`,
-        size: 1.5,
-      },
-    ]);
-
-    chart.timeScale().fitContent();
     chartRef.current = chart;
 
     const handleResize = () => {
       if (containerRef.current && chartRef.current) {
         chartRef.current.applyOptions({
-          width: containerRef.current.clientWidth,
+          width:  containerRef.current.clientWidth,
           height: containerRef.current.clientHeight || 340,
         });
       }
     };
-    const resizeObserver = new ResizeObserver(handleResize);
-    if (containerRef.current) resizeObserver.observe(containerRef.current);
+    const ro = new ResizeObserver(handleResize);
+    ro.observe(containerRef.current);
     window.addEventListener("resize", handleResize);
 
     return () => {
       window.removeEventListener("resize", handleResize);
-      resizeObserver.disconnect();
-      if (chartRef.current) {
-        chartRef.current.remove();
-        chartRef.current = null;
-      }
+      ro.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      seriesRef.current = {
+        candle: null, bbUpper: null, bbLower: null, sma20: null,
+        ema50: null, lwma5H: null, lwma10H: null, lwma5L: null, lwma10L: null,
+      };
     };
-  }, [candles, entryPrice, entryTime, sl, tp, action, showBbma]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Effect 2: Update DATA — tidak recreate chart, hanya setData() ─────────
+  useEffect(() => {
+    const s = seriesRef.current;
+    if (!s.candle || candles.length === 0) return;
+
+    s.candle.setData(
+      candles.map((c) => ({ time: c.time as any, open: c.open, high: c.high, low: c.low, close: c.close }))
+    );
+
+    // Update entry marker
+    let closestTime = entryTime;
+    let minDiff = Infinity;
+    for (const c of candles) {
+      const diff = Math.abs(c.time - entryTime);
+      if (diff < minDiff) { minDiff = diff; closestTime = c.time; }
+    }
+    s.candle.setMarkers([{
+      time: closestTime as any,
+      position: action === "BUY" ? "belowBar" : "aboveBar",
+      shape:    action === "BUY" ? "arrowUp"   : "arrowDown",
+      color: "#facc15",
+      text: `${action} @ ${entryPrice.toFixed(2)}`,
+      size: 1.5,
+    }]);
+
+    // Update BBMA series — set data kosong jika showBbma = false
+    const toLine = (key: keyof Candle) =>
+      showBbma
+        ? candles.filter((c) => c[key] != null).map((c) => ({ time: c.time as any, value: c[key] as number }))
+        : [];
+
+    s.bbUpper?.setData(toLine("bb_upper"));
+    s.bbLower?.setData(toLine("bb_lower"));
+    s.sma20?.setData(toLine("sma_20"));
+    s.ema50?.setData(toLine("ema_50"));
+    s.lwma5H?.setData(toLine("lwma_5_h"));
+    s.lwma10H?.setData(toLine("lwma_10_h"));
+    s.lwma5L?.setData(toLine("lwma_5_l"));
+    s.lwma10L?.setData(toLine("lwma_10_l"));
+
+    chartRef.current?.timeScale().fitContent();
+  }, [candles, action, entryPrice, entryTime, showBbma]);
+
+  // ── Effect 3: Update Price Lines (Entry / SL / TP) ────────────────────────
+  useEffect(() => {
+    const s = seriesRef.current;
+    if (!s.candle) return;
+
+    // Hapus price lines lama sebelum tambah yang baru
+    try { if (priceLineRef.current.entry) s.candle.removePriceLine(priceLineRef.current.entry); } catch (_) {}
+    try { if (priceLineRef.current.sl)    s.candle.removePriceLine(priceLineRef.current.sl); }    catch (_) {}
+    try { if (priceLineRef.current.tp)    s.candle.removePriceLine(priceLineRef.current.tp); }    catch (_) {}
+
+    priceLineRef.current.entry = s.candle.createPriceLine({ price: entryPrice, color: "#facc15", lineWidth: 2, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "ENTRY @" + entryPrice.toFixed(2) });
+    priceLineRef.current.sl    = s.candle.createPriceLine({ price: sl,         color: "#ef4444", lineWidth: 2, lineStyle: LineStyle.Solid,  axisLabelVisible: true, title: "SL @" + sl.toFixed(2) });
+    priceLineRef.current.tp    = s.candle.createPriceLine({ price: tp,         color: "#22c55e", lineWidth: 2, lineStyle: LineStyle.Solid,  axisLabelVisible: true, title: "TP @" + tp.toFixed(2) });
+  }, [entryPrice, sl, tp]);
 
   return (
     <div className="relative w-full h-full flex flex-col">
-      {/* Top Chart Toolbar: Timeframe Selector + BBMA Toggle + Legend */}
       <div className="absolute top-2 left-2 right-2 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
-        {/* Left: Timeframe Switcher Buttons */}
+        {/* Timeframe Switcher */}
         <div className="flex items-center gap-1 bg-black/80 backdrop-blur-md p-1 rounded-xl border border-white/10 pointer-events-auto shadow-lg">
           {timeframes.map((tf) => {
             const isSelected = activeTf === tf;
@@ -300,9 +226,8 @@ export default function SetupReviewChart({
           })}
         </div>
 
-        {/* Right: Order Level Badges + Toggle BBMA */}
+        {/* Order Lines Badge + Toggle BBMA */}
         <div className="flex items-center gap-2 pointer-events-auto">
-          {/* Order Lines Badge */}
           <div className="hidden sm:flex items-center gap-2.5 bg-black/85 backdrop-blur-md px-2.5 py-1 rounded-xl border border-white/10 text-[10px] font-mono shadow-lg">
             <span className="flex items-center gap-1 text-yellow-300 font-semibold">
               <span className="w-2.5 h-0.5 bg-yellow-300 rounded" /> Entry
@@ -315,7 +240,6 @@ export default function SetupReviewChart({
             </span>
           </div>
 
-          {/* Toggle BBMA Visibility Button */}
           <button
             type="button"
             onClick={() => setShowBbma(!showBbma)}
@@ -337,3 +261,4 @@ export default function SetupReviewChart({
     </div>
   );
 }
+
