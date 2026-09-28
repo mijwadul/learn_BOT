@@ -9,6 +9,7 @@ from .models.market import MarketData
 from .models.trade import TradeLog, LiveDecisionSample, TradeJournal
 from .models.rlhf import ApprovedSetup, RejectedSetup, IgnoredSetup, HardNegative
 from .models.macro import EconomicEvent
+from .models.scorecard import ModelScorecard
 from .migrations import ensure_schema_migrations
 
 from .repositories.market_repo import (
@@ -50,6 +51,11 @@ from .repositories.rlhf_repo import (
     get_hard_negative_ids,
     get_rlhf_curation_stats,
     reset_ai_trade_history,
+)
+from .repositories.scorecard_repo import (
+    save_scorecard_record,
+    get_scorecard_history,
+    get_latest_scorecards,
 )
 
 async def init_db():
@@ -107,4 +113,9 @@ __all__ = [
     "get_hard_negative_ids",
     "get_rlhf_curation_stats",
     "reset_ai_trade_history",
+    "ModelScorecard",
+    "save_scorecard_record",
+    "get_scorecard_history",
+    "get_latest_scorecards",
 ]
+

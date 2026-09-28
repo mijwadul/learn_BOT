@@ -2,7 +2,6 @@ MetaTrader5
 pandas
 numpy
 lightgbm
-xgboost
 scikit-learn
 SQLAlchemy
 psycopg2-binary
@@ -15,3 +14,4 @@ fastapi
 uvicorn
 websockets
 python-dotenv
+vectorbt

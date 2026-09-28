@@ -220,7 +220,8 @@ class RiskService:
                     return False
             logging.info(f"[RUNNER PYRAMIDING] ✅ Semua ({len(same_dir_positions)}) Runner profit. Scale-In diizinkan.")
         elif trade_mode != "RUNNER":
-            entry_thresh = getattr(Config, 'AI_NORMAL_ENTRY_THRESHOLD', 75.0) / 100.0
+            th_pct = Config.get_ai_threshold(symbol=symbol, mode='normal')
+            entry_thresh = th_pct / 100.0 if th_pct > 1.0 else th_pct
             is_high_prob = prob_runner is not None and prob_runner >= entry_thresh
             if not is_high_prob and len(same_dir_positions) >= self.max_pyramiding:
                 logging.warning(f"[PYRAMIDING] Limit dinamis {self.max_pyramiding} tercapai. Order ditolak.")

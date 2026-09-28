@@ -33,6 +33,11 @@ from .rlhf_repo import (
     get_rlhf_curation_stats,
     reset_ai_trade_history,
 )
+from .scorecard_repo import (
+    save_scorecard_record,
+    get_scorecard_history,
+    get_latest_scorecards,
+)
 
 __all__ = [
     "get_db_size",
@@ -66,4 +71,8 @@ __all__ = [
     "get_hard_negative_ids",
     "get_rlhf_curation_stats",
     "reset_ai_trade_history",
+    "save_scorecard_record",
+    "get_scorecard_history",
+    "get_latest_scorecards",
 ]
+

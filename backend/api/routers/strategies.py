@@ -411,4 +411,118 @@ async def reset_models(req: Optional[ResetModelRequest] = None):
         "cleared_hard_negatives": cleared_hn,
     }
 
+class EvaluateOosRequest(BaseModel):
+    symbol: Optional[str] = "AUTO"
+    mode: Optional[str] = "normal"  # "normal", "runner", or "all"
+    sample_candles: Optional[int] = 50000
+    custom_thresholds: Optional[dict] = None
+
+@router.post("/api/strategies/evaluate-oos")
+async def evaluate_oos(req: EvaluateOosRequest = EvaluateOosRequest()):
+    """Trigger evaluasi manual Fit & Proper Test pada data OOS menggunakan VectorBT."""
+    target_symbol = str(req.symbol or "AUTO").strip().upper()
+    if target_symbol == "AUTO":
+        target_symbol = bot.active_symbol or "XAUUSD"
+
+    canonical_symbol = target_symbol.upper().rstrip("MC")
+    bot.researcher.set_symbol(canonical_symbol)
+
+    modes_to_evaluate = ["normal", "runner"] if req.mode.lower() == "all" else [req.mode.lower()]
+    models_dict = {}
+    for m in modes_to_evaluate:
+        current_model = bot.researcher.model_normal if m == "normal" else bot.researcher.model_runner
+        if current_model is None:
+            bot.researcher.load_models()
+            current_model = bot.researcher.model_normal if m == "normal" else bot.researcher.model_runner
+        if current_model is None:
+            return {
+                "status": "error",
+                "message": f"Model {m.upper()} untuk {canonical_symbol} belum pernah dilatih atau tidak ditemukan di disk."
+            }
+        models_dict[m] = current_model
+
+    import pandas as pd
+    from agents.research.oos_evaluator import run_fit_proper_test
+    from agents.research.model_manager import ModelManager
+
+    total_chunks, test_gen = bot.data_miner.load_test_chunks(
+        chunk_size=req.sample_candles,
+        symbol=target_symbol,
+        max_test_samples=req.sample_candles
+    )
+
+    if total_chunks == 0 or test_gen is None:
+        return {
+            "status": "error",
+            "message": f"Tidak ada data OOS/Test di database untuk {target_symbol}. Jalankan backfill data terlebih dahulu."
+        }
+
+    try:
+        df_oos = pd.concat(list(test_gen))
+    except Exception as e:
+        return {"status": "error", "message": f"Gagal membaca data OOS: {e}"}
+
+    if df_oos.empty or len(df_oos) < 30:
+        return {
+            "status": "error",
+            "message": f"Data OOS terlalu sedikit ({len(df_oos)} baris). Minimal 30 candle dibutuhkan untuk evaluasi."
+        }
+
+    results = {}
+    from database import save_scorecard_record, get_scorecard_history, get_latest_scorecards
+    start_dt = df_oos.index[0] if (hasattr(df_oos.index, 'strftime') and len(df_oos) > 0) else None
+    end_dt = df_oos.index[-1] if (hasattr(df_oos.index, 'strftime') and len(df_oos) > 0) else None
+
+    for m, m_obj in models_dict.items():
+        scorecard = run_fit_proper_test(
+            model=m_obj,
+            researcher=bot.researcher,
+            df_oos=df_oos,
+            mode=m,
+            symbol=canonical_symbol,
+            custom_thresholds=req.custom_thresholds
+        )
+        results[m] = scorecard
+        ModelManager.save_oos_scorecard(canonical_symbol, m, scorecard)
+        try:
+            save_scorecard_record(scorecard, oos_start_date=start_dt, oos_end_date=end_dt)
+        except Exception as e_rec:
+            logging.warning(f"Gagal menyimpan scorecard ke database: {e_rec}")
+
+    return {
+        "status": "success",
+        "symbol": canonical_symbol,
+        "sample_candles": len(df_oos),
+        "results": results if req.mode.lower() == "all" else results[req.mode.lower()]
+    }
+
+@router.get("/api/strategies/scorecard")
+async def get_scorecards(
+    symbol: Optional[str] = "XAUUSD",
+    mode: Optional[str] = None,
+    page: int = 1,
+    limit: int = 20
+):
+    """Mengambil riwayat kronologis scorecard model (paginated)."""
+    target_symbol = str(symbol or "XAUUSD").strip().upper()
+    if target_symbol == "AUTO":
+        target_symbol = bot.active_symbol or "XAUUSD"
+    canonical_symbol = target_symbol.upper().rstrip("MC")
+
+    from database import get_scorecard_history
+    return get_scorecard_history(symbol=canonical_symbol, mode=mode, page=page, limit=limit)
+
+@router.get("/api/strategies/scorecard/latest")
+async def get_latest_scorecard(symbol: Optional[str] = "XAUUSD"):
+    """Mengambil scorecard terkini untuk kedua mode ('normal' dan 'runner')."""
+    target_symbol = str(symbol or "XAUUSD").strip().upper()
+    if target_symbol == "AUTO":
+        target_symbol = bot.active_symbol or "XAUUSD"
+    canonical_symbol = target_symbol.upper().rstrip("MC")
+
+    from database import get_latest_scorecards
+    return get_latest_scorecards(symbol=canonical_symbol)
+
+
+
 

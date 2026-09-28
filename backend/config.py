@@ -3,6 +3,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+try:
+    from utils.settings_manager import settings_manager
+except ImportError:
+    from backend.utils.settings_manager import settings_manager
+
 class Config:
     # MT5 Configurations
     MT5_SERVER = os.getenv("MT5_SERVER", "Demo Server") # Ubah sesuai broker
@@ -35,18 +40,35 @@ class Config:
     REQUOTE_MAX_RETRIES = int(os.getenv("REQUOTE_MAX_RETRIES", "2")) # Smart requote retry count
     DYNAMIC_SLIPPAGE_MULTIPLIER = float(os.getenv("DYNAMIC_SLIPPAGE_MULTIPLIER", "1.5")) # Spread multiplier for deviation
     
-    RISK_MODE = os.getenv("RISK_MODE", "fixed") # Mode resiko: "fixed" (lot tetap), "dollars" ($ tetap), atau "percent" (% modal)
-    FIXED_LOT_SIZE = float(os.getenv("FIXED_LOT_SIZE", "0.01")) # Ukuran lot tetap jika mode "fixed"
-    MAX_RISK_DOLLARS = float(os.getenv("MAX_RISK_DOLLARS", "10.0")) # Toleransi batas rugi per transaksi ($)
-    MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "1.0")) # Toleransi batas rugi per transaksi (% modal)
-    MAX_LOT_CAP = float(os.getenv("MAX_LOT_CAP", "0.10")) # Batas lot maksimal pengaman (fat-finger protection)
+    RISK_MODE = str(settings_manager.get_setting("risk_mode", os.getenv("RISK_MODE", "fixed"))).lower()
+    FIXED_LOT_SIZE = float(settings_manager.get_setting("fixed_lot_size", os.getenv("FIXED_LOT_SIZE", "0.01")))
+    MAX_RISK_DOLLARS = float(settings_manager.get_setting("max_risk_dollars", os.getenv("MAX_RISK_DOLLARS", "10.0")))
+    MAX_RISK_PERCENT = float(settings_manager.get_setting("max_risk_percent", os.getenv("MAX_RISK_PERCENT", "1.0")))
+    MAX_LOT_CAP = float(settings_manager.get_setting("max_lot_cap", os.getenv("MAX_LOT_CAP", "0.10")))
     MAX_DRAWDOWN_PERCENT = 30.0 # Max drawdown reset JIKA menyentuh 30% dari ekuitas
     SPREAD_LIMIT_POINTS = 400 # Blokir eksekusi jika spread > 400 poin
-    AI_NORMAL_ENTRY_THRESHOLD = float(os.getenv("AI_NORMAL_ENTRY_THRESHOLD", "60.0")) # Batas minimal probabilitas AI untuk mengizinkan OP baru (%)
-    AI_RUNNER_ENTRY_THRESHOLD = float(os.getenv("AI_RUNNER_ENTRY_THRESHOLD", "55.0")) # Batas minimal probabilitas AI Runner (%)
+    AI_NORMAL_ENTRY_THRESHOLD = float(settings_manager.get_setting("ai_normal_entry_threshold", os.getenv("AI_NORMAL_ENTRY_THRESHOLD", "60.0")))
+    AI_RUNNER_ENTRY_THRESHOLD = float(settings_manager.get_setting("ai_runner_entry_threshold", os.getenv("AI_RUNNER_ENTRY_THRESHOLD", "55.0")))
+
+    @classmethod
+    def reload_settings(cls):
+        """Reload all runtime risk and AI threshold settings from SettingsManager."""
+        cls.RISK_MODE = str(settings_manager.get_setting("risk_mode", "fixed")).lower()
+        cls.FIXED_LOT_SIZE = float(settings_manager.get_setting("fixed_lot_size", 0.01))
+        cls.MAX_RISK_DOLLARS = float(settings_manager.get_setting("max_risk_dollars", 10.0))
+        cls.MAX_RISK_PERCENT = float(settings_manager.get_setting("max_risk_percent", 1.0))
+        cls.MAX_LOT_CAP = float(settings_manager.get_setting("max_lot_cap", 0.10))
+        cls.AI_NORMAL_ENTRY_THRESHOLD = float(settings_manager.get_setting("ai_normal_entry_threshold", 60.0))
+        cls.AI_RUNNER_ENTRY_THRESHOLD = float(settings_manager.get_setting("ai_runner_entry_threshold", 55.0))
+
+    @classmethod
+    def get_ai_threshold(cls, symbol: str = None, mode: str = "normal") -> float:
+        """Get AI entry threshold with support for per-pair override."""
+        return settings_manager.get_ai_threshold(symbol=symbol, mode=mode)
 
     # AI Intelligence: Online Learning & Market Regime (ADX)
     ENABLE_ONLINE_LEARNING = os.getenv("ENABLE_ONLINE_LEARNING", "true").lower() == "true"
+    ONLINE_LEARNING_INTERVAL_DAYS = int(os.getenv("ONLINE_LEARNING_INTERVAL_DAYS", "7")) # Jadwal bergantian per minggu (7 hari)
     ADX_TREND_THRESHOLD = float(os.getenv("ADX_TREND_THRESHOLD", "25.0")) # Di atas ini: Rezim Trending Kuat (Prioritas Runner)
     ADX_RANGING_THRESHOLD = float(os.getenv("ADX_RANGING_THRESHOLD", "20.0")) # Di bawah ini: Rezim Choppy/Sideways (Blokir Runner, Utamakan Scalp Hit&Run)
 

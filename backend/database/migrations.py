@@ -65,6 +65,32 @@ def ensure_schema_migrations():
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rejected_setups_symbol ON rejected_setups (symbol)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ignored_setups_symbol ON ignored_setups (symbol)"))
 
+            # 8. Tabel model_scorecard (Fase C)
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS model_scorecard (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(20) NOT NULL,
+                    mode VARCHAR(10) NOT NULL,
+                    trained_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    total_trades INTEGER DEFAULT 0,
+                    win_rate FLOAT DEFAULT 0.0,
+                    profit_factor FLOAT DEFAULT 0.0,
+                    sharpe_ratio FLOAT DEFAULT 0.0,
+                    max_drawdown FLOAT DEFAULT 0.0,
+                    total_return FLOAT DEFAULT 0.0,
+                    passed BOOLEAN NOT NULL DEFAULT FALSE,
+                    failure_reason TEXT,
+                    threshold_used FLOAT,
+                    oos_start_date TIMESTAMP,
+                    oos_end_date TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_model_scorecard_symbol ON model_scorecard (symbol)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_model_scorecard_mode ON model_scorecard (mode)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_model_scorecard_created_at ON model_scorecard (created_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_model_scorecard_passed ON model_scorecard (passed)"))
+
         # 7. Koreksi Otomatis Tiket Posisi, Action BUY/SELL, dan Mode pada closed deals MT5
 
         try:

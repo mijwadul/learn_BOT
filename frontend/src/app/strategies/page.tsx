@@ -7,6 +7,7 @@ import { useToast } from "@/components/ui/Toast";
 import { RiskManagementCard } from "@/components/strategies/RiskManagementCard";
 import { AiEntryThresholdCard } from "@/components/strategies/AiEntryThresholdCard";
 import { ModelStatusGrid } from "@/components/strategies/ModelStatusGrid";
+import { ModelScorecardSection } from "@/components/strategies/ModelScorecardSection";
 import { RlhfReviewQueue } from "@/components/strategies/RlhfReviewQueue";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 
@@ -236,7 +237,10 @@ export default function StrategiesPage() {
         />
       </div>
 
-      {/* 4. RLHF Review Queue Component */}
+      {/* 4. Model Health Report (Scorecard & OOS Fit & Proper Test) */}
+      <ModelScorecardSection selectedPair={selectedPair} />
+
+      {/* 5. RLHF Review Queue Component */}
       <RlhfReviewQueue selectedPair={selectedPair} />
 
       {/* Custom Confirmation Modal */}

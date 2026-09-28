@@ -2,6 +2,7 @@ from .market import MarketData
 from .trade import TradeLog, LiveDecisionSample, TradeJournal
 from .rlhf import ApprovedSetup, RejectedSetup, IgnoredSetup, HardNegative
 from .macro import EconomicEvent
+from .scorecard import ModelScorecard
 
 __all__ = [
     "MarketData",
@@ -13,4 +14,6 @@ __all__ = [
     "IgnoredSetup",
     "HardNegative",
     "EconomicEvent",
+    "ModelScorecard",
 ]
+

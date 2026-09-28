@@ -78,16 +78,14 @@ class GatekeeperAgent:
             target_col = 'Target_Normal' if mode == 'normal' else 'Target_Runner'
             y_test = df_test[target_col]
             
-            # Evaluasi probabilitas menggunakan batas threshold AI (dinamis membaca konfigurasi terbaru)
+            # Evaluasi probabilitas menggunakan batas threshold AI (dinamis membaca konfigurasi dari SettingsManager / Config)
             from config import Config
-            import os
-            from dotenv import load_dotenv
-            load_dotenv(override=True)
+            current_symbol = getattr(self.researcher, 'symbol', getattr(self, 'symbol', None))
+            th_pct = Config.get_ai_threshold(symbol=current_symbol, mode=mode)
+            default_th = th_pct / 100.0 if th_pct > 1.0 else th_pct
             if mode == 'runner':
-                default_th = float(os.getenv("AI_RUNNER_ENTRY_THRESHOLD", getattr(Config, 'AI_RUNNER_ENTRY_THRESHOLD', 55.0))) / 100.0
                 entry_thresh = getattr(self.researcher, 'optimal_threshold_runner', None) or default_th
             else:
-                default_th = float(os.getenv("AI_NORMAL_ENTRY_THRESHOLD", getattr(Config, 'AI_NORMAL_ENTRY_THRESHOLD', 60.0))) / 100.0
                 entry_thresh = getattr(self.researcher, 'optimal_threshold_normal', None) or default_th
             
             if hasattr(model, 'predict_proba'):

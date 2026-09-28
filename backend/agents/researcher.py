@@ -82,6 +82,7 @@ class ResearcherAgent:
             self.optimal_threshold_normal = c.get("optimal_threshold_normal", 0.54)
             self.optimal_threshold_runner = c.get("optimal_threshold_runner", 0.54)
             self.max_runner_rr = c["max_runner_rr"]
+            self.oos_scorecard = c.get("oos_scorecard", {"normal": None, "runner": None})
         else:
             self.model_normal = None
             self.model_runner = None
@@ -92,6 +93,7 @@ class ResearcherAgent:
             self.last_trained_runner = None
             self.optimal_threshold_normal = 0.54
             self.optimal_threshold_runner = 0.54
+            self.oos_scorecard = {"normal": None, "runner": None}
             self.load_models()
 
     def get_model_dir(self) -> str:
@@ -114,7 +116,9 @@ class ResearcherAgent:
             runner_trained_at=self.last_trained_runner,
             runner_th=self.optimal_threshold_runner,
             runner_trained=self.model_runner is not None,
-            max_runner_rr=self.max_runner_rr
+            max_runner_rr=self.max_runner_rr,
+            normal_oos_scorecard=self.oos_scorecard.get("normal") if getattr(self, "oos_scorecard", None) else None,
+            runner_oos_scorecard=self.oos_scorecard.get("runner") if getattr(self, "oos_scorecard", None) else None
         )
 
     def save_models(self):
@@ -128,7 +132,9 @@ class ResearcherAgent:
             runner_acc=self.last_accuracy_runner,
             runner_trained_at=self.last_trained_runner,
             runner_th=self.optimal_threshold_runner,
-            max_runner_rr=self.max_runner_rr
+            max_runner_rr=self.max_runner_rr,
+            normal_oos_scorecard=self.oos_scorecard.get("normal") if getattr(self, "oos_scorecard", None) else None,
+            runner_oos_scorecard=self.oos_scorecard.get("runner") if getattr(self, "oos_scorecard", None) else None
         )
 
     def load_models(self) -> bool:
@@ -143,6 +149,7 @@ class ResearcherAgent:
             self.last_accuracy_runner = loaded["last_accuracy_runner"]
             self.last_trained_runner = loaded["last_trained_runner"]
             self.optimal_threshold_runner = loaded["optimal_threshold_runner"]
+            self.oos_scorecard = loaded.get("oos_scorecard", {"normal": None, "runner": None})
             self.max_runner_rr = loaded["max_runner_rr"]
             return True
         return False
@@ -151,7 +158,7 @@ class ResearcherAgent:
     # RESEARCH HELPERS (Delegates to Submodules)
     # ---------------------------------------------------------------------------------
     def generate_targets(self, df: pd.DataFrame) -> pd.DataFrame:
-        return generate_targets(df, max_runner_rr=getattr(self, 'max_runner_rr', 5.0))
+        return generate_targets(df, max_runner_rr=getattr(self, 'max_runner_rr', 5.0), symbol=self.symbol)
 
     def add_normalized_features(self, df: pd.DataFrame) -> pd.DataFrame:
         return add_normalized_features(df)
@@ -355,20 +362,21 @@ class ResearcherAgent:
                     df_times = pd.to_datetime(df['time'] if 'time' in df.columns else df.index)
                     if hasattr(df_times, 'dt') and hasattr(df_times.dt, 'tz') and df_times.dt.tz is not None:
                         df_times = df_times.dt.tz_localize(None)
-                    df_time_floor = df_times.dt.floor('min') if hasattr(df_times, 'dt') else df_times.floor('min')
 
                     for _, pnl_row in pnl_df.iterrows():
                         p_time = pd.to_datetime(pnl_row['time'])
                         if hasattr(p_time, 'tzinfo') and p_time.tzinfo is not None:
                             p_time = p_time.tz_localize(None)
-                        p_time_floor = p_time.floor('min')
-                        match_idx = np.where(df_time_floor == p_time_floor)[0]
-                        if len(match_idx) > 0:
-                            idx = match_idx[0]
-                            if pnl_row['profit'] < 0:
-                                sample_weights[idx] = 0.5
-                            elif pnl_row['profit'] > 0:
-                                sample_weights[idx] = 1.5
+                        # Pencocokan fleksibel dengan toleransi jendela candle (+/- 10 menit)
+                        time_deltas = np.abs((df_times - p_time).dt.total_seconds() if hasattr(df_times, 'dt') else (df_times - p_time).total_seconds())
+                        if len(time_deltas) > 0:
+                            min_val = time_deltas.min()
+                            if min_val <= 600:
+                                min_idx = int(np.argmin(time_deltas))
+                                if pnl_row['profit'] < 0:
+                                    sample_weights[min_idx] = 0.5
+                                elif pnl_row['profit'] > 0:
+                                    sample_weights[min_idx] = 1.5
 
                 if 'adx' in df.columns:
                     if is_normal:
@@ -455,6 +463,61 @@ class ResearcherAgent:
         cal_th = self.calibrate_optimal_threshold(
             model, X_full, y_full, mode=mode_str, setup_directions=sd_full, min_signals=25
         )
+
+        # -------------------------------------------------------------------------
+        # FIT & PROPER TEST GATE (Fase B: OOS Verification via VectorBT)
+        # -------------------------------------------------------------------------
+        from agents.research.oos_evaluator import run_fit_proper_test
+
+        df_oos = None
+        if dm is not None:
+            try:
+                tot_chunks, test_gen = dm.load_test_chunks(chunk_size=50000, symbol=target_sym, max_test_samples=50000)
+                if tot_chunks > 0 and test_gen is not None:
+                    df_oos = pd.concat(list(test_gen))
+            except Exception as e:
+                logger.warning(f"Gagal mengambil data OOS dari data_miner untuk Fit & Proper Test: {e}")
+
+        if df_oos is not None and not df_oos.empty and len(df_oos) >= 30:
+            logger.info(f"[{mode_str.capitalize()} Mode - {target_sym}] 🛡️ Menjalankan VectorBT Fit & Proper Test pada {len(df_oos):,} candle OOS...")
+            orig_th = getattr(self, f"optimal_threshold_{mode_str}", 0.54)
+            setattr(self, f"optimal_threshold_{mode_str}", cal_th)
+            oos_report = run_fit_proper_test(
+                model=model,
+                researcher=self,
+                df_oos=df_oos,
+                mode=mode_str,
+                symbol=target_sym
+            )
+            if not getattr(self, "oos_scorecard", None):
+                self.oos_scorecard = {}
+            self.oos_scorecard[mode_str] = oos_report
+
+            # Simpan riwayat scorecard ke database model_scorecard (Fase C)
+            try:
+                from database import save_scorecard_record
+                start_dt = df_oos.index[0] if (hasattr(df_oos.index, 'strftime') and len(df_oos) > 0) else None
+                end_dt = df_oos.index[-1] if (hasattr(df_oos.index, 'strftime') and len(df_oos) > 0) else None
+                save_scorecard_record(oos_report, oos_start_date=start_dt, oos_end_date=end_dt)
+            except Exception as e_db:
+                logger.warning(f"Gagal mencatat scorecard ke database: {e_db}")
+
+            if not oos_report.get("passed", False):
+                setattr(self, f"optimal_threshold_{mode_str}", orig_th)
+                logger.warning(
+                    f"⚠️ [{mode_str.capitalize()} Mode - {target_sym}] Model GAGAL Fit & Proper Test OOS: "
+                    f"{', '.join(oos_report.get('reasons', []))}. Model lama tetap dipertahankan."
+                )
+                ModelManager.save_oos_scorecard(target_sym, mode_str, oos_report)
+                if is_normal:
+                    self.is_training_normal = False
+                else:
+                    self.is_training_runner = False
+                return False
+            else:
+                logger.info(f"✅ [{mode_str.capitalize()} Mode - {target_sym}] Model LOLOS Fit & Proper Test OOS! Memperbarui checkpoint model...")
+        else:
+            logger.info(f"[{mode_str.capitalize()} Mode - {target_sym}] Data OOS tidak tersedia di DB ({0 if df_oos is None else len(df_oos)} baris). Melewati OOS gate.")
 
         if is_normal:
             self.model_normal = model
@@ -553,10 +616,15 @@ class ResearcherAgent:
                 logger.warning(f"[MICRO-RETRAIN] Sampel atau kelas tidak lengkap ({len(X)} baris, kelas: {unique_classes}) untuk {mode_str.upper()}. Lewati.")
                 return False
 
+            MAX_ESTIMATORS_CAP = 300
             current_n_est = getattr(current_model, 'n_estimators', 100) or 100
-            new_n_est = current_n_est + 15
-            current_model.set_params(n_estimators=new_n_est, objective='binary', verbose=-1)
-            current_model.fit(X, y, sample_weight=sample_weights, init_model=current_model)
+            if current_n_est < MAX_ESTIMATORS_CAP:
+                new_n_est = min(MAX_ESTIMATORS_CAP, current_n_est + 15)
+                current_model.set_params(n_estimators=new_n_est, objective='binary', verbose=-1)
+                current_model.fit(X, y, sample_weight=sample_weights, init_model=current_model)
+            else:
+                new_n_est = MAX_ESTIMATORS_CAP
+                current_model.fit(X, y, sample_weight=sample_weights)
 
             logger.info(f"[MICRO-RETRAIN] ✅ Berhasil update model {mode_str.upper()} secara inkremental ({len(X)} sampel, total pohon: {new_n_est}).")
             self.save_models()

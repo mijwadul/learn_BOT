@@ -2,12 +2,37 @@
   "normal": {
     "last_accuracy": 0.5549334328729626,
     "last_trained_at": "2026-09-25 14:25:59",
-    "trained": true
+    "trained": true,
+    "oos_scorecard": {
+      "symbol": "XAUUSD",
+      "mode": "normal",
+      "evaluated_at": "2026-09-28 21:00:00",
+      "passed": true,
+      "metrics": {
+        "win_rate_pct": 56.5,
+        "profit_factor": 1.55,
+        "total_trades": 50
+      }
+    }
   },
   "runner": {
     "last_accuracy": 0.2852794924554184,
     "last_trained_at": "2026-09-25 14:33:52",
     "trained": true,
     "max_runner_rr": 5.0
+  },
+  "symbol": "XAUUSD",
+  "oos_scorecard": {
+    "normal": {
+      "symbol": "XAUUSD",
+      "mode": "normal",
+      "evaluated_at": "2026-09-28 21:00:00",
+      "passed": true,
+      "metrics": {
+        "win_rate_pct": 56.5,
+        "profit_factor": 1.55,
+        "total_trades": 50
+      }
+    }
   }
 }

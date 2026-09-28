@@ -31,6 +31,7 @@ class ExecutorAgent:
         # Backward-compatible attributes & state
         self.current_market_regime = {"adx": 0.0, "regime": "UNKNOWN", "last_updated": None}
         self.last_micro_retrain_time = None
+        self.current_retrain_pair_index = 0
         self.latest_df_live = None
         self.latest_dfs_by_pair = {}
         self.latest_probs_by_pair = {}
@@ -81,6 +82,7 @@ class ExecutorAgent:
         self.position_tracker.reconcile_positions_on_startup()
         
         last_hourly_db_sync = datetime.datetime.now()
+        last_weekly_retrain_check = datetime.datetime.now()
         last_exhaustion_check = datetime.datetime.now()
         last_signal_check = datetime.datetime.now()
         last_deals_sync = datetime.datetime.now()
@@ -114,8 +116,12 @@ class ExecutorAgent:
                         await asyncio.to_thread(self.data_miner.backfill_data, 10000)
                     except Exception as e:
                         logging.error(f"[HOURLY SYNC] Gagal sinkronisasi data {clean_p}: {e}")
-                if Config.ENABLE_ONLINE_LEARNING:
-                    asyncio.create_task(self.trigger_online_learning())
+
+            # Micro-Retraining Mingguan Bergantian (Weekly Staggered Online Learning per 1 Pair)
+            weekly_interval_sec = getattr(Config, 'ONLINE_LEARNING_INTERVAL_DAYS', 7) * 86400
+            if Config.ENABLE_ONLINE_LEARNING and (now - last_weekly_retrain_check).total_seconds() >= weekly_interval_sec:
+                last_weekly_retrain_check = now
+                asyncio.create_task(self.trigger_online_learning())
                 
             # Sekring: Friday Liquidator Lintas Pair
             for pair in active_pairs:
@@ -215,7 +221,8 @@ class ExecutorAgent:
                                 max_buy = max(p_buy_n, p_buy_r)
                                 max_sell = max(p_sell_n, p_sell_r)
                                 best_prob = max(max_buy, max_sell)
-                                entry_threshold = getattr(Config, 'AI_NORMAL_ENTRY_THRESHOLD', 75.0) / 100.0
+                                th_pct = Config.get_ai_threshold(symbol=clean_pair, mode='normal')
+                                entry_threshold = th_pct / 100.0 if th_pct > 1.0 else th_pct
                                 
                                 # Regime ADX
                                 row_data = last_row.iloc[0]
@@ -595,53 +602,61 @@ class ExecutorAgent:
         return "Top 3 Fitur: dist_Close_EMA50 (+0.45), BB_Width (+0.32), ATR_14 (+0.21)"
 
     async def trigger_online_learning(self):
-        """Pemicu Online Learning otomatis (Micro-Retrain) di background untuk setiap active pair."""
+        """Pemicu Online Learning mingguan bergantian (Weekly Staggered Retrain) untuk 1 pair bergiliran."""
         if not self.researcher or not self.data_miner:
             return
 
         if self.researcher.is_training_normal or self.researcher.is_training_runner:
             return
 
-        logging.info("[ONLINE LEARNING] 🚀 Memulai siklus auto micro-retrain multi-pair...")
+        active_pairs = ["XAUUSD"]
+        try:
+            from api.dependencies import bot
+            if hasattr(bot, "active_pairs") and isinstance(bot.active_pairs, list):
+                active_pairs = [str(p).upper() for p in bot.active_pairs if str(p).strip()]
+        except Exception:
+            pass
+
+        if not active_pairs:
+            return
+
+        # Pilih 1 pair secara bergiliran (Round-Robin) agar sistem tetap sangat ringan
+        pair_idx = getattr(self, "current_retrain_pair_index", 0)
+        target_pair = active_pairs[pair_idx % len(active_pairs)]
+        self.current_retrain_pair_index = (pair_idx + 1) % len(active_pairs)
+
+        logging.info(f"[WEEKLY ONLINE LEARNING] 🚀 Menjalankan giliran micro-retrain mingguan untuk: {target_pair} (Giliran 1 dari {len(active_pairs)} pair aktif)...")
         loop = asyncio.get_running_loop()
 
         def _run_micro():
             try:
-                active_pairs = ["XAUUSD"]
-                try:
-                    from api.dependencies import bot
-                    if hasattr(bot, "active_pairs") and isinstance(bot.active_pairs, list):
-                        active_pairs = [str(p).upper() for p in bot.active_pairs if str(p).strip()]
-                except Exception:
-                    pass
+                clean_p = target_pair.upper()
+                if self.data_miner:
+                    self.data_miner.set_symbol(clean_p)
+                    try:
+                        self.data_miner.sync_latest_data()
+                    except Exception:
+                        pass
 
-                for pair in active_pairs:
-                    clean_p = pair.upper()
-                    if self.data_miner:
-                        self.data_miner.set_symbol(clean_p)
-                        try:
-                            self.data_miner.sync_latest_data()
-                        except Exception:
-                            pass
+                df_recent = self.data_miner.load_recent_micro_chunk(n_candles=3000)
+                if df_recent is None or df_recent.empty:
+                    logging.info(f"[WEEKLY ONLINE LEARNING] Data recent kosong untuk {clean_p}. Giliran selesai.")
+                    return
 
-                    df_recent = self.data_miner.load_recent_micro_chunk(n_candles=3000)
-                    if df_recent is None or df_recent.empty:
-                        continue
+                if self.researcher:
+                    self.researcher.set_symbol(clean_p)
+                    if self.researcher.model_normal is not None:
+                        fb_normal = self.data_miner.load_live_decision_chunk(mode="normal", symbol=clean_p)
+                        self.researcher.micro_retrain("normal", df_recent, fb_normal)
 
-                    if self.researcher:
-                        self.researcher.set_symbol(clean_p)
-                        if self.researcher.model_normal is not None:
-                            fb_normal = self.data_miner.load_live_decision_chunk(mode="normal", symbol=clean_p)
-                            self.researcher.micro_retrain("normal", df_recent, fb_normal)
-
-                        if self.researcher.model_runner is not None:
-                            fb_runner = self.data_miner.load_live_decision_chunk(mode="runner", symbol=clean_p)
-                            self.researcher.micro_retrain("runner", df_recent, fb_runner)
+                    if self.researcher.model_runner is not None:
+                        fb_runner = self.data_miner.load_live_decision_chunk(mode="runner", symbol=clean_p)
+                        self.researcher.micro_retrain("runner", df_recent, fb_runner)
 
                 self.last_micro_retrain_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                logging.info(f"[ONLINE LEARNING] ✨ Siklus micro-retrain selesai pada {self.last_micro_retrain_time}.")
+                logging.info(f"[WEEKLY ONLINE LEARNING] ✨ Sukses micro-retrain mingguan ({clean_p}) pada {self.last_micro_retrain_time}. Giliran pair berikutnya dijadwalkan minggu depan.")
             except Exception as e:
-                logging.error(f"[ONLINE LEARNING] Gagal mengeksekusi micro-retrain: {e}")
+                logging.error(f"[WEEKLY ONLINE LEARNING] Gagal micro-retrain {target_pair}: {e}")
 
         await loop.run_in_executor(None, _run_micro)
 
