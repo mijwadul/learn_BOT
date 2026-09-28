@@ -41,8 +41,8 @@ def add_normalized_features(df: pd.DataFrame) -> pd.DataFrame:
             val = pd.to_numeric(df[col], errors='coerce').fillna(0.0).values
             df[f'norm_{col}'] = val / atr_safe
 
-    # Normalisasi MTF (_m5, _m15, _h1, _h4)
-    for tf in ['_m5', '_m15', '_h1', '_h4']:
+    # Normalisasi MTF (_setup, _trend, _m5, _m15, _h1, _h4)
+    for tf in ['_setup', '_trend', '_m5', '_m15', '_h1', '_h4']:
         atr_tf_col = f'ATR_14{tf}'
         if atr_tf_col in df.columns:
             atr_tf_safe = np.maximum(pd.to_numeric(df[atr_tf_col], errors='coerce').fillna(0.01).values, 1e-4)
@@ -51,6 +51,22 @@ def add_normalized_features(df: pd.DataFrame) -> pd.DataFrame:
                 if full_col in df.columns:
                     v = pd.to_numeric(df[full_col], errors='coerce').fillna(0.0).values
                     df[f"norm_{full_col}"] = v / atr_tf_safe
+
+    # --- CROSS-TIMEFRAME CONFLUENCE & AUTONOMOUS ALIGNMENT ---
+    # Memungkinkan model AI secara mandiri menemukan korelasi / pengaruh antar timeframe per pair
+    setup_col = 'dist_Close_EMA50_setup' if 'dist_Close_EMA50_setup' in df.columns else 'dist_Close_EMA50_m5'
+    trend_col = 'dist_Close_EMA50_trend' if 'dist_Close_EMA50_trend' in df.columns else 'dist_Close_EMA50_m15'
+    
+    if 'dist_Close_EMA50' in df.columns and setup_col in df.columns:
+        base_bull = (df['dist_Close_EMA50'] > 0).astype(float)
+        setup_bull = (df[setup_col] > 0).astype(float)
+        trend_bull = (df[trend_col] > 0).astype(float) if trend_col in df.columns else setup_bull
+        df['mtf_trend_alignment'] = (base_bull + setup_bull + trend_bull - 1.5) / 1.5
+
+    if 'adx' in df.columns:
+        adx_setup_col = 'adx_setup' if 'adx_setup' in df.columns else 'adx_m5'
+        if adx_setup_col in df.columns:
+            df['mtf_adx_momentum_ratio'] = df['adx'] / np.maximum(df[adx_setup_col], 1.0)
 
     # --- 1. FITUR SESI PASAR & SIKLIKAL TEMPORAL ---
     try:
@@ -101,14 +117,11 @@ def add_normalized_features(df: pd.DataFrame) -> pd.DataFrame:
     if 'setup_dir' not in df.columns:
         lwma_low_zone = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values) if 'LWMA_5_Low' in df.columns else df['low'].values
         lwma_high_zone = np.minimum(df['LWMA_5_High'].values, df['LWMA_10_High'].values) if 'LWMA_5_High' in df.columns else df['high'].values
-        sma_20_vals = df['SMA_20'].values if 'SMA_20' in df.columns else df['close'].values
-        ema_50_vals = df['EMA_50'].values if 'EMA_50' in df.columns else df['close'].values
-        bb_upper_vals = df['BB_Upper'].values if 'BB_Upper' in df.columns else df['close'].values
-        bb_lower_vals = df['BB_Lower'].values if 'BB_Lower' in df.columns else df['close'].values
-        open_vals = df['open'].values if 'open' in df.columns else df['close'].values
+        atr_vals = df['ATR_14'].values if 'ATR_14' in df.columns else np.full(len(df), 0.001)
+        buffer = 0.35 * atr_vals
 
-        reentry_buy_mask = (df['low'].values <= lwma_low_zone) & (df['close'].values >= sma_20_vals) & (df['close'].values <= bb_upper_vals) & (sma_20_vals >= ema_50_vals) & (df['close'].values >= ema_50_vals) & (df['close'].values >= open_vals)
-        reentry_sell_mask = (df['high'].values >= lwma_high_zone) & (df['close'].values <= sma_20_vals) & (df['close'].values >= bb_lower_vals) & (sma_20_vals <= ema_50_vals) & (df['close'].values <= ema_50_vals) & (df['close'].values <= open_vals)
+        reentry_buy_mask = (df['low'].values <= (lwma_low_zone + buffer))
+        reentry_sell_mask = (df['high'].values >= (lwma_high_zone - buffer))
         df['setup_dir'] = np.where(reentry_buy_mask, 1, np.where(reentry_sell_mask, 2, 0))
 
     s_dir = df['setup_dir'].values
@@ -130,7 +143,7 @@ def extract_and_lock_features(df: pd.DataFrame, mode: str = "normal") -> List[st
     Menghindari non-stationarity harga absolut dan indikator statis.
     """
     forbidden_cols: Set[str] = set()
-    tf_list = ['', '_m5', '_m15'] if mode == 'normal' else ['', '_m5', '_m15', '_h1', '_h4']
+    tf_list = ['', '_setup', '_trend', '_m5', '_m15'] if mode == 'normal' else ['', '_setup', '_trend', '_m5', '_m15', '_h1', '_h4']
     for tf in tf_list:
         for c in FORBIDDEN_BASE_COLS:
             forbidden_cols.add(f"{c}{tf}")

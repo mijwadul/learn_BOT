@@ -149,46 +149,75 @@ class DataMinerAgent:
         return df
 
     def fetch_and_merge_data(self, n_candles=2000, start_pos=0):
-        logging.info(f"Fetching data for {self.canonical_symbol} [{self.broker_symbol}] (pos {start_pos}, count {n_candles})...")
+        # Ambil profil timeframe fraktal per pair dari Config
+        tf_profile = Config.get_timeframe_profile(self.canonical_symbol)
+        entry_tf_str = tf_profile.get("entry_tf", "M5")
+        setup_tf_str = tf_profile.get("setup_tf", "M15")
+        trend_tf_str = tf_profile.get("trend_tf", "H1")
+
+        TF_MAP = {
+            "M1": (mt5.TIMEFRAME_M1, 1),
+            "M5": (mt5.TIMEFRAME_M5, 5),
+            "M15": (mt5.TIMEFRAME_M15, 15),
+            "M30": (mt5.TIMEFRAME_M30, 30),
+            "H1": (mt5.TIMEFRAME_H1, 60),
+            "H4": (mt5.TIMEFRAME_H4, 240),
+            "D1": (mt5.TIMEFRAME_D1, 1440),
+        }
+
+        tf_base_const, tf_base_min = TF_MAP.get(entry_tf_str, (mt5.TIMEFRAME_M5, 5))
+        tf_setup_const, tf_setup_min = TF_MAP.get(setup_tf_str, (mt5.TIMEFRAME_M15, 15))
+        tf_trend_const, tf_trend_min = TF_MAP.get(trend_tf_str, (mt5.TIMEFRAME_H1, 60))
+
+        ratio_setup = max(1, int(tf_setup_min / tf_base_min))
+        ratio_trend = max(1, int(tf_trend_min / tf_base_min))
+
+        logging.info(
+            f"Fetching multi-timeframe data for {self.canonical_symbol} [{self.broker_symbol}] "
+            f"(Base: {entry_tf_str}, Setup: {setup_tf_str}, Trend: {trend_tf_str}, count: {n_candles})..."
+        )
         
-        # Buffer warmup agar MA tidak corrupt di perbatasan chunk
-        warmup_m1 = 200
-        df_m1 = get_rates(self.broker_symbol, mt5.TIMEFRAME_M1, n_candles + warmup_m1, start_pos=start_pos)
+        warmup_base = 200
+        df_base = get_rates(self.broker_symbol, tf_base_const, n_candles + warmup_base, start_pos=start_pos)
         
-        start_pos_m5 = max(0, int(start_pos / 5) - 5)
-        n_candles_m5 = int(n_candles / 5) + 100
-        df_m5 = get_rates(self.broker_symbol, mt5.TIMEFRAME_M5, n_candles_m5, start_pos=start_pos_m5)
+        start_pos_setup = max(0, int(start_pos / ratio_setup) - 5)
+        n_candles_setup = int(n_candles / ratio_setup) + 100
+        df_setup = get_rates(self.broker_symbol, tf_setup_const, n_candles_setup, start_pos=start_pos_setup)
         
-        start_pos_m15 = max(0, int(start_pos / 15) - 5)
-        n_candles_m15 = int(n_candles / 15) + 100
-        df_m15 = get_rates(self.broker_symbol, mt5.TIMEFRAME_M15, n_candles_m15, start_pos=start_pos_m15)
+        start_pos_trend = max(0, int(start_pos / ratio_trend) - 5)
+        n_candles_trend = int(n_candles / ratio_trend) + 100
+        df_trend = get_rates(self.broker_symbol, tf_trend_const, n_candles_trend, start_pos=start_pos_trend)
         
-        if df_m1 is None or df_m5 is None or df_m15 is None:
+        if df_base is None or df_setup is None or df_trend is None:
             # Ini normal jika kita meminta data yang lebih tua dari kapasitas maksimal broker
             return None
 
         # Set index
-        df_m1.set_index('time', inplace=True)
-        df_m5.set_index('time', inplace=True)
-        df_m15.set_index('time', inplace=True)
+        df_base.set_index('time', inplace=True)
+        df_setup.set_index('time', inplace=True)
+        df_trend.set_index('time', inplace=True)
 
         # Feature engineering BBMA & ADX per timeframe
         from utils.indicators import calculate_atr, calculate_adx
-        df_m1 = calculate_bbma(df_m1)
-        df_m1['ATR_14'] = calculate_atr(df_m1, 14)
-        df_m1['adx'] = calculate_adx(df_m1, 14)
-        df_m5 = calculate_bbma(df_m5)
-        df_m5['adx'] = calculate_adx(df_m5, 14)
-        df_m15 = calculate_bbma(df_m15)
-        df_m15['adx'] = calculate_adx(df_m15, 14)
+        df_base = calculate_bbma(df_base)
+        df_base['ATR_14'] = calculate_atr(df_base, 14)
+        df_base['adx'] = calculate_adx(df_base, 14)
+        
+        df_setup = calculate_bbma(df_setup)
+        df_setup['adx'] = calculate_adx(df_setup, 14)
+        
+        df_trend = calculate_bbma(df_trend)
+        df_trend['adx'] = calculate_adx(df_trend, 14)
         
         # Anti-Leakage MTF Merging: shift(1) for higher timeframes before merging to avoid lookahead bias
-        df_m5_shifted = df_m5.shift(1).add_suffix('_m5')
-        df_m15_shifted = df_m15.shift(1).add_suffix('_m15')
+        df_setup_shifted = df_setup.shift(1)
+        df_trend_shifted = df_trend.shift(1)
         
-        # Merge to M1
-        df_merged = df_m1.join(df_m5_shifted, how='left')
-        df_merged = df_merged.join(df_m15_shifted, how='left')
+        # Suffix fraktal (_setup & _trend) serta kompatibilitas mundur (_m5 & _m15)
+        df_merged = df_base.join(df_setup_shifted.add_suffix('_setup'), how='left')
+        df_merged = df_merged.join(df_trend_shifted.add_suffix('_trend'), how='left')
+        df_merged = df_merged.join(df_setup_shifted.add_suffix('_m5'), how='left')
+        df_merged = df_merged.join(df_trend_shifted.add_suffix('_m15'), how='left')
         
         # Forward fill AFTER joining
         df_merged.ffill(inplace=True)
@@ -197,8 +226,11 @@ class DataMinerAgent:
         # Tambahkan data makro
         df_merged = self.merge_macro_data(df_merged)
         
-        # Tandai kolom symbol canonical
+        # Tandai kolom symbol canonical & metadata timeframe
         df_merged['symbol'] = self.canonical_symbol
+        df_merged['entry_timeframe'] = entry_tf_str
+        df_merged['setup_timeframe'] = setup_tf_str
+        df_merged['trend_timeframe'] = trend_tf_str
 
         # Konversi semua tipe data unsigned int (uint8, uint16, uint32, uint64) ke int64
         for col in df_merged.columns:
@@ -209,8 +241,9 @@ class DataMinerAgent:
         if len(df_merged) > n_candles:
             df_merged = df_merged.iloc[-n_candles:]
         
-        logging.info(f"Data merged successfully for {self.canonical_symbol}. Shape: {df_merged.shape}")
+        logging.info(f"Data merged successfully for {self.canonical_symbol} ({entry_tf_str}). Shape: {df_merged.shape}")
         return df_merged
+
 
     def _save_market_data(self, df, if_exists='append'):
         """

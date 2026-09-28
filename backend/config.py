@@ -49,3 +49,21 @@ class Config:
     ENABLE_ONLINE_LEARNING = os.getenv("ENABLE_ONLINE_LEARNING", "true").lower() == "true"
     ADX_TREND_THRESHOLD = float(os.getenv("ADX_TREND_THRESHOLD", "25.0")) # Di atas ini: Rezim Trending Kuat (Prioritas Runner)
     ADX_RANGING_THRESHOLD = float(os.getenv("ADX_RANGING_THRESHOLD", "20.0")) # Di bawah ini: Rezim Choppy/Sideways (Blokir Runner, Utamakan Scalp Hit&Run)
+
+    # Friction Guard: Batas maksimal rasio Spread terhadap ATR (20% default)
+    MAX_SPREAD_TO_ATR_RATIO = float(os.getenv("MAX_SPREAD_TO_ATR_RATIO", "0.20"))
+    DEFAULT_TIMEFRAME_PROFILE = {"entry_tf": "M5", "setup_tf": "M15", "trend_tf": "H1"}
+
+    @classmethod
+    def get_timeframe_profile(cls, symbol: str) -> dict:
+        """
+        Autonomous Multi-Timeframe Discovery (Zero Hardcoding):
+        Secara otonom memindai dan menentukan hierarki timeframe terbaik untuk APAPUN pair/simbol
+        berdasarkan rasio spread dan volatilitas (ATR) riil dari broker.
+        """
+        try:
+            from utils.market_profiler import resolve_autonomous_timeframe_hierarchy
+            return resolve_autonomous_timeframe_hierarchy(symbol, max_friction_ratio=cls.MAX_SPREAD_TO_ATR_RATIO)
+        except Exception:
+            return cls.DEFAULT_TIMEFRAME_PROFILE
+

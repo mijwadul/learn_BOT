@@ -85,7 +85,14 @@ class RiskService:
     def check_spread_limit(self, symbol: str) -> bool:
         """Pengecekan sekring spread adaptif."""
         spread = check_spread(symbol)
-        rates_spread = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 15)
+        tf_profile = Config.get_timeframe_profile(symbol)
+        entry_tf_str = tf_profile.get("entry_tf", "M5")
+        TF_MAP_CONST = {
+            "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1
+        }
+        active_tf_const = TF_MAP_CONST.get(entry_tf_str, mt5.TIMEFRAME_M5)
+        rates_spread = mt5.copy_rates_from_pos(symbol, active_tf_const, 0, 15)
         if rates_spread is not None and len(rates_spread) >= 15:
             df_spread = pd.DataFrame(rates_spread)
             avg_spread = df_spread['spread'].mean()

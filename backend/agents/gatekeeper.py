@@ -47,18 +47,16 @@ class GatekeeperAgent:
             df_test = self.researcher.generate_targets(df_test)
             df_test = self.researcher.add_normalized_features(df_test)
             
-            # Filter spesifik zona Re-entry BBMA LWMA & Zon Zero Loss (Slide 33 & 51-56)
+            # Filter spasial zona Re-entry BBMA LWMA (Selaras dengan Target Labeler)
             lwma_low_zone = np.maximum(df_test['LWMA_5_Low'].values, df_test['LWMA_10_Low'].values)
             lwma_high_zone = np.minimum(df_test['LWMA_5_High'].values, df_test['LWMA_10_High'].values)
-            sma_20_vals = df_test['SMA_20'].values if 'SMA_20' in df_test.columns else df_test['close'].values
-            ema_50_vals = df_test['EMA_50'].values if 'EMA_50' in df_test.columns else df_test['close'].values
-            bb_upper_vals = df_test['BB_Upper'].values if 'BB_Upper' in df_test.columns else df_test['close'].values
-            bb_lower_vals = df_test['BB_Lower'].values if 'BB_Lower' in df_test.columns else df_test['close'].values
+            atr_test = df_test['ATR_14'].values if 'ATR_14' in df_test.columns else np.full(len(df_test), 0.001)
+            buffer = 0.35 * atr_test
 
-            open_vals = df_test['open'].values if 'open' in df_test.columns else df_test['close'].values
-            reentry_buy_mask = (df_test['low'].values <= lwma_low_zone) & (df_test['close'].values >= sma_20_vals) & (df_test['close'].values <= bb_upper_vals) & (sma_20_vals >= ema_50_vals) & (df_test['close'].values >= ema_50_vals) & (df_test['close'].values >= open_vals)
-            reentry_sell_mask = (df_test['high'].values >= lwma_high_zone) & (df_test['close'].values <= sma_20_vals) & (df_test['close'].values >= bb_lower_vals) & (sma_20_vals <= ema_50_vals) & (df_test['close'].values <= ema_50_vals) & (df_test['close'].values <= open_vals)
+            reentry_buy_mask = (df_test['low'].values <= (lwma_low_zone + buffer))
+            reentry_sell_mask = (df_test['high'].values >= (lwma_high_zone - buffer))
             df_test = df_test[reentry_buy_mask | reentry_sell_mask].copy()
+
             
             if df_test.empty:
                 continue
@@ -97,19 +95,16 @@ class GatekeeperAgent:
                 classes = list(getattr(model, 'classes_', [0, 1]))
                 is_binary = (len(classes) == 2 or probs.shape[1] == 2)
 
+                low_vals = df_test['low'].values if 'low' in df_test.columns else df_test['close'].values
+                high_vals = df_test['high'].values if 'high' in df_test.columns else df_test['close'].values
                 lwma_low_zone = np.maximum(df_test['LWMA_5_Low'].values, df_test['LWMA_10_Low'].values) if 'LWMA_5_Low' in df_test.columns else None
                 lwma_high_zone = np.minimum(df_test['LWMA_5_High'].values, df_test['LWMA_10_High'].values) if 'LWMA_5_High' in df_test.columns else None
-                low_vals = df_test['low'].values
-                high_vals = df_test['high'].values
-                close_vals = df_test['close'].values
-                open_vals = df_test['open'].values if 'open' in df_test.columns else close_vals
-                sma_20_vals = df_test['SMA_20'].values if 'SMA_20' in df_test.columns else close_vals
-                ema_50_vals = df_test['EMA_50'].values if 'EMA_50' in df_test.columns else close_vals
-                bb_upper_vals = df_test['BB_Upper'].values if 'BB_Upper' in df_test.columns else close_vals
-                bb_lower_vals = df_test['BB_Lower'].values if 'BB_Lower' in df_test.columns else close_vals
+                atrs = df_test['ATR_14'].values if 'ATR_14' in df_test.columns else np.full(len(df_test), 0.001)
+                buffer_zone = 0.35 * atrs
 
-                is_valid_buy = (low_vals <= lwma_low_zone) & (close_vals >= sma_20_vals) & (close_vals <= bb_upper_vals) & (sma_20_vals >= ema_50_vals) & (close_vals >= ema_50_vals) & (close_vals >= open_vals)
-                is_valid_sell = (high_vals >= lwma_high_zone) & (close_vals <= sma_20_vals) & (close_vals >= bb_lower_vals) & (sma_20_vals <= ema_50_vals) & (close_vals <= ema_50_vals) & (close_vals <= open_vals)
+                # Pemicu Spasial Dinamis (Selaras dengan Target Labeler)
+                is_valid_buy = (low_vals <= (lwma_low_zone + buffer_zone)) if lwma_low_zone is not None else np.ones(len(df_test), dtype=bool)
+                is_valid_sell = (high_vals >= (lwma_high_zone - buffer_zone)) if lwma_high_zone is not None else np.ones(len(df_test), dtype=bool)
 
                 preds = np.zeros(len(df_test), dtype=int)
                 if is_binary:

@@ -285,52 +285,46 @@ class ExecutorAgent:
                                         allow_execution = False
                                         logging.info(f"[{clean_pair}] Sinyal HIT_RUN dibatalkan karena Otak Normal untuk {clean_pair} nonaktif/quarantine.")
 
-                                    # Filter BBMA Re-entry LWMA Zone & Zon Zero Loss (Slide 20, 21, 33, 51-56)
-                                    lwma_5_h = row_data.get('LWMA_5_High', 0)
-                                    lwma_10_h = row_data.get('LWMA_10_High', 0)
-                                    lwma_5_l = row_data.get('LWMA_5_Low', 0)
-                                    lwma_10_l = row_data.get('LWMA_10_Low', 0)
-                                    high_price = row_data.get('high', 0)
-                                    low_price = row_data.get('low', 0)
-                                    sma_20_val = row_data.get('SMA_20', 0)
-                                    bb_upper_val = row_data.get('BB_Upper', 0)
-                                    bb_lower_val = row_data.get('BB_Lower', 0)
-                                    
-                                    open_val = row_data.get('open', close_val)
-                                    rejection_reasons = []
+                                    # Evaluasi Friksi Biaya: Rasio Spread terhadap Volatilitas (ATR)
+                                    sym_info = mt5.symbol_info(broker_p)
+                                    point = sym_info.point if sym_info and sym_info.point else 0.01
+                                    spread_points = sym_info.spread if sym_info else 0
+                                    atr_val = row_data.get('ATR_14', 0.0)
+                                    if atr_val > 0:
+                                        spread_cost = spread_points * point
+                                        friction_ratio = spread_cost / atr_val
+                                        max_friction = getattr(Config, 'MAX_SPREAD_TO_ATR_RATIO', 0.20)
+                                        if friction_ratio > max_friction:
+                                            allow_execution = False
+                                            logging.warning(
+                                                f"[{clean_pair}] ⚠️ Eksekusi ditolak: Friksi spread terlalu tinggi "
+                                                f"({friction_ratio*100:.1f}% > batas {max_friction*100:.1f}% ATR | Spread: {spread_points} pts, ATR: {atr_val:.4f})"
+                                            )
 
-                                    if action_type == mt5.ORDER_TYPE_SELL:
-                                        reentry_zone = min(lwma_5_h, lwma_10_h)
-                                        if high_price < reentry_zone:
-                                            rejection_reasons.append(f"High ({high_price:.4f}) belum menyentuh zona LWMA High (>= {reentry_zone:.4f})")
-                                        if close_val > sma_20_val:
-                                            rejection_reasons.append(f"Close ({close_val:.4f}) di atas Mid BB ({sma_20_val:.4f})")
-                                        if close_val < bb_lower_val:
-                                            rejection_reasons.append(f"Close ({close_val:.4f}) menembus Lower BB ({bb_lower_val:.4f}) (oversold)")
-                                        if close_val > open_val:
-                                            rejection_reasons.append(f"Candle masih hijau/bullish (close: {close_val:.4f} > open: {open_val:.4f})")
-                                        if ema_50_val > 0 and (sma_20_val > ema_50_val or close_val > ema_50_val):
-                                            rejection_reasons.append(f"Tren mayor masih uptrend (Mid BB/Close > EMA 50: {ema_50_val:.4f})")
-                                    elif action_type == mt5.ORDER_TYPE_BUY:
-                                        reentry_zone = max(lwma_5_l, lwma_10_l)
-                                        if low_price > reentry_zone:
-                                            rejection_reasons.append(f"Low ({low_price:.4f}) belum menjemput zona LWMA Low (<= {reentry_zone:.4f})")
-                                        if close_val < sma_20_val:
-                                            rejection_reasons.append(f"Close ({close_val:.4f}) di bawah Mid BB ({sma_20_val:.4f})")
-                                        if close_val > bb_upper_val:
-                                            rejection_reasons.append(f"Close ({close_val:.4f}) menembus Upper BB ({bb_upper_val:.4f}) (overbought)")
-                                        if close_val < open_val:
-                                            rejection_reasons.append(f"Candle masih merah/bearish (close: {close_val:.4f} < open: {open_val:.4f})")
-                                        if ema_50_val > 0 and (sma_20_val < ema_50_val or close_val < ema_50_val):
-                                            rejection_reasons.append(f"Tren mayor masih downtrend (Mid BB/Close < EMA 50: {ema_50_val:.4f})")
+                                    # Spasial Re-entry Proximity (Kandidat berada di sekitar zona interaksi MA)
+                                    if allow_execution:
+                                        lwma_5_h = row_data.get('LWMA_5_High', 0)
+                                        lwma_10_h = row_data.get('LWMA_10_High', 0)
+                                        lwma_5_l = row_data.get('LWMA_5_Low', 0)
+                                        lwma_10_l = row_data.get('LWMA_10_Low', 0)
+                                        high_price = row_data.get('high', 0)
+                                        low_price = row_data.get('low', 0)
+                                        reentry_buffer = 0.35 * (atr_val if atr_val > 0 else (50 * point))
 
-                                    if rejection_reasons:
-                                        allow_execution = False
-                                        action_str = "BUY" if action_type == mt5.ORDER_TYPE_BUY else "SELL"
-                                        logging.info(
-                                            f"[{clean_pair}] ⚠️ Sinyal AI {action_str} ({used_prob*100:.1f}%, Mode: {trade_mode}) DITAHAN konfirmasi mekanikal BBMA: "
-                                            f"{'; '.join(rejection_reasons)}"
-                                        )
+                                        # Evaluasi jendela 3 candle terakhir agar konfirmasi pasca-sentuhan MA tetap sah
+                                        recent_min_low = float(df_live['low'].tail(3).min()) if (df_live is not None and len(df_live) >= 3) else low_price
+                                        recent_max_high = float(df_live['high'].tail(3).max()) if (df_live is not None and len(df_live) >= 3) else high_price
+
+                                        if action_type == mt5.ORDER_TYPE_SELL:
+                                            reentry_min = min(lwma_5_h, lwma_10_h) - reentry_buffer
+                                            if recent_max_high < reentry_min:
+                                                allow_execution = False
+                                                logging.info(f"[{clean_pair}] Sinyal SELL ({used_prob*100:.1f}%) belum menguji zona Re-entry LWMA High (High 3 bar: {recent_max_high:.4f} < {reentry_min:.4f})")
+                                        elif action_type == mt5.ORDER_TYPE_BUY:
+                                            reentry_max = max(lwma_5_l, lwma_10_l) + reentry_buffer
+                                            if recent_min_low > reentry_max:
+                                                allow_execution = False
+                                                logging.info(f"[{clean_pair}] Sinyal BUY ({used_prob*100:.1f}%) belum menguji zona Re-entry LWMA Low (Low 3 bar: {recent_min_low:.4f} > {reentry_max:.4f})")
 
                                     # Institutional Risk Service Validation (Anti-Hedging, News Blackout, Hit-Run Limit, Pyramiding)
                                     if allow_execution and self.risk_service.validate_execution_allowed(broker_p, action_type, trade_mode, used_prob):
@@ -458,8 +452,15 @@ class ExecutorAgent:
             target_df = df_live if df_live is not None else self.latest_dfs_by_pair.get(target_symbol)
             sl_distance = self.calculate_dynamic_structural_sl(target_symbol, action, price, target_df, row_data)
 
-        # Validasi volatilitas ekstrem
-        rates = mt5.copy_rates_from_pos(target_symbol, mt5.TIMEFRAME_M1, 0, 30)
+        # Validasi volatilitas ekstrem pada timeframe aktif instrumen
+        tf_profile = Config.get_timeframe_profile(target_symbol)
+        entry_tf_str = tf_profile.get("entry_tf", "M5")
+        TF_MAP_CONST = {
+            "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1
+        }
+        active_tf_const = TF_MAP_CONST.get(entry_tf_str, mt5.TIMEFRAME_M5)
+        rates = mt5.copy_rates_from_pos(target_symbol, active_tf_const, 0, 30)
         if rates is not None and len(rates) >= 15:
             df_rates = pd.DataFrame(rates)
             from utils.indicators import calculate_adx
@@ -648,14 +649,21 @@ def capture_m1_snapshot(symbol=None, n_candles=50):
     try:
         from utils.mt5_utils import resolve_broker_symbol
         target_sym = resolve_broker_symbol(symbol or Config.SYMBOL)
-        rates = mt5.copy_rates_from_pos(target_sym, mt5.TIMEFRAME_M1, 0, n_candles)
+        tf_profile = Config.get_timeframe_profile(target_sym)
+        entry_tf_str = tf_profile.get("entry_tf", "M5")
+        TF_MAP_CONST = {
+            "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1
+        }
+        active_tf_const = TF_MAP_CONST.get(entry_tf_str, mt5.TIMEFRAME_M5)
+        rates = mt5.copy_rates_from_pos(target_sym, active_tf_const, 0, n_candles)
         if rates is not None and len(rates) > 0:
             df = pd.DataFrame(rates)
             if 'time' in df.columns:
                 df['time'] = pd.to_datetime(df['time'], unit='s').dt.strftime('%Y-%m-%d %H:%M:%S')
             return df.to_json(orient='records')
     except Exception as e:
-        logging.debug(f"Gagal merekam M1 snapshot: {e}")
+        logging.debug(f"Gagal merekam chart snapshot: {e}")
     return "{}"
 
 def record_journal_event_async(tiket: int, event_type: str, harga: float, alasan: str, snapshot_json: str, symbol: str = "XAUUSD"):

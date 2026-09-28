@@ -308,35 +308,57 @@ class PositionTracker:
                 
                 conf_close = confirmed_candle.get('close', c_close)
                 conf_ema = confirmed_candle.get('EMA_50', c_ema)
+                conf_sma20 = confirmed_candle.get('SMA_20', c_sma20)
+                conf_bb_upper = confirmed_candle.get('BB_Upper', 0.0)
+                conf_bb_lower = confirmed_candle.get('BB_Lower', 0.0)
                 break_dist = 50 * point
 
+                # --- 1. DYNAMIC EARLY CUT-LOSS & TRAP PROTECTION (BBMA Dynamic Invalidation) ---
                 if pos.type == mt5.ORDER_TYPE_BUY:
-                    # Syarat Batal ZZL (Slide 51-56): Candle terkonfirmasi Close < EMA 50 atau harga tembus kuat (> 50 pts)
-                    if (conf_ema > 0 and conf_close < conf_ema) or (c_ema > 0 and c_close < (c_ema - break_dist)):
+                    # A. Batal Struktur Mid BB: Candle terkonfirmasi Close di bawah Mid BB (Slide 33)
+                    if conf_sma20 > 0 and conf_close < conf_sma20:
                         reversal_detected = True
-                        reversal_reason = f"Thesis Invalidation: Close ({c_close:.2f}) < EMA 50 ({c_ema:.2f})"
-                    # Konfirmasi CSAK/CSM Sell Lawan Arah (Slide 31): Close < Mid BB dan < LWMA 10 Low
-                    elif c_sma20 > 0 and lwma_10_l > 0 and c_close < c_sma20 and c_close < lwma_10_l:
+                        reversal_reason = f"Trap / Invalidation: Candle Close ({conf_close:.4f}) < Mid BB ({conf_sma20:.4f})"
+                    # B. Syarat Batal ZZL: Candle Close < EMA 50 atau tembus kuat (Slide 51-56)
+                    elif (conf_ema > 0 and conf_close < conf_ema) or (c_ema > 0 and c_close < (c_ema - break_dist)):
                         reversal_detected = True
-                        reversal_reason = f"Opposite CSAK Sell: Close ({c_close:.2f}) < Mid BB ({c_sma20:.2f}) & LWMA 10 Low ({lwma_10_l:.2f})"
-                    # AI Signal Surge ke arah lawan
+                        reversal_reason = f"ZZL Thesis Invalidation: Close ({conf_close:.4f}) < EMA 50 ({conf_ema:.4f})"
+                    # C. Opposite CSM Sell: Muncul candle momentum tembus keluar Lower BB
+                    elif conf_bb_lower > 0 and conf_close < conf_bb_lower:
+                        reversal_detected = True
+                        reversal_reason = f"Opposite CSM Sell Formed: Close ({conf_close:.4f}) < Lower BB ({conf_bb_lower:.4f})"
+                    # D. AI Signal Surge ke arah lawan
                     elif p_sell_rev >= 0.70:
                         reversal_detected = True
                         reversal_reason = f"AI Reversal Surge: Prob SELL {p_sell_rev*100:.0f}%"
 
+                    # Dynamic TP Wajib: Jika harga menyentuh zona MA High seberang dan profit >= 0.8R, amankan ke BE
+                    elif lwma_10_h > 0 and current_price >= lwma_10_h and current_r >= 0.80 and not is_already_be:
+                        logging.info(f"[DYNAMIC TPW] 🎯 BUY #{ticket} menyentuh MA 10 High seberang ({lwma_10_h:.4f}) saat +{current_r:.2f}R. Mengunci ke BE.")
+                        self.order_router.modify_sl_to_break_even(ticket, pos_sym)
+
                 elif pos.type == mt5.ORDER_TYPE_SELL:
-                    # Syarat Batal ZZL (Slide 51-56): Candle terkonfirmasi Close > EMA 50 atau harga tembus kuat (> 50 pts)
-                    if (conf_ema > 0 and conf_close > conf_ema) or (c_ema > 0 and c_close > (c_ema + break_dist)):
+                    # A. Batal Struktur Mid BB: Candle terkonfirmasi Close di atas Mid BB (Slide 33)
+                    if conf_sma20 > 0 and conf_close > conf_sma20:
                         reversal_detected = True
-                        reversal_reason = f"Thesis Invalidation: Close ({c_close:.2f}) > EMA 50 ({c_ema:.2f})"
-                    # Konfirmasi CSAK/CSM Buy Lawan Arah (Slide 31): Close > Mid BB dan > LWMA 10 High
-                    elif c_sma20 > 0 and lwma_10_h > 0 and c_close > c_sma20 and c_close > lwma_10_h:
+                        reversal_reason = f"Trap / Invalidation: Candle Close ({conf_close:.4f}) > Mid BB ({conf_sma20:.4f})"
+                    # B. Syarat Batal ZZL: Candle Close > EMA 50 atau tembus kuat (Slide 51-56)
+                    elif (conf_ema > 0 and conf_close > conf_ema) or (c_ema > 0 and c_close > (c_ema + break_dist)):
                         reversal_detected = True
-                        reversal_reason = f"Opposite CSAK Buy: Close ({c_close:.2f}) > Mid BB ({c_sma20:.2f}) & LWMA 10 High ({lwma_10_h:.2f})"
-                    # AI Signal Surge ke arah lawan
+                        reversal_reason = f"ZZL Thesis Invalidation: Close ({conf_close:.4f}) > EMA 50 ({conf_ema:.4f})"
+                    # C. Opposite CSM Buy: Muncul candle momentum tembus keluar Upper BB
+                    elif conf_bb_upper > 0 and conf_close > conf_bb_upper:
+                        reversal_detected = True
+                        reversal_reason = f"Opposite CSM Buy Formed: Close ({conf_close:.4f}) > Upper BB ({conf_bb_upper:.4f})"
+                    # D. AI Signal Surge ke arah lawan
                     elif p_buy_rev >= 0.70:
                         reversal_detected = True
                         reversal_reason = f"AI Reversal Surge: Prob BUY {p_buy_rev*100:.0f}%"
+
+                    # Dynamic TP Wajib: Jika harga menyentuh zona MA Low seberang dan profit >= 0.8R, amankan ke BE
+                    elif lwma_10_l > 0 and current_price <= lwma_10_l and current_r >= 0.80 and not is_already_be:
+                        logging.info(f"[DYNAMIC TPW] 🎯 SELL #{ticket} menyentuh MA 10 Low seberang ({lwma_10_l:.4f}) saat +{current_r:.2f}R. Mengunci ke BE.")
+                        self.order_router.modify_sl_to_break_even(ticket, pos_sym)
 
             if reversal_detected:
                 logging.warning(

@@ -3,11 +3,14 @@
   "normal": {
     "last_accuracy": 0.0,
     "last_trained_at": null,
-    "trained": false
+    "trained": true,
+    "optimal_threshold": 0.54
   },
   "runner": {
     "last_accuracy": 0.0,
     "last_trained_at": null,
-    "trained": false
+    "trained": true,
+    "max_runner_rr": 5.0,
+    "optimal_threshold": 0.54
   }
 }
