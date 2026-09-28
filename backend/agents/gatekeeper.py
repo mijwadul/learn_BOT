@@ -63,16 +63,21 @@ class GatekeeperAgent:
             if df_test.empty:
                 continue
             
-            # Pastikan kelengkapan kolom fitur
-            for col in self.researcher.features:
-                if col not in df_test.columns:
-                    df_test[col] = 0.0
-                elif not (pd.api.types.is_numeric_dtype(df_test[col]) or pd.api.types.is_bool_dtype(df_test[col])):
-                    df_test[col] = pd.to_numeric(df_test[col], errors='coerce').fillna(0.0)
-            
+            # Pastikan kelengkapan kolom fitur sesuai model
+            model_features = []
+            if hasattr(model, 'feature_name_') and model.feature_name_ is not None:
+                model_features = list(model.feature_name_)
+            elif hasattr(model, 'booster_') and hasattr(model.booster_, 'feature_name'):
+                model_features = list(model.booster_.feature_name())
+            if not model_features:
+                model_features = self.researcher.get_model_features(model, mode=mode)
+
+            X_test = df_test.reindex(columns=model_features, fill_value=0.0).copy()
+            for col in model_features:
+                if not (pd.api.types.is_numeric_dtype(X_test[col]) or pd.api.types.is_bool_dtype(X_test[col])):
+                    X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0.0)
+
             target_col = 'Target_Normal' if mode == 'normal' else 'Target_Runner'
-            
-            X_test = df_test[self.researcher.features]
             y_test = df_test[target_col]
             
             # Evaluasi probabilitas menggunakan batas threshold AI (dinamis membaca konfigurasi terbaru)

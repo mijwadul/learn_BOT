@@ -237,7 +237,7 @@ export default function StrategiesPage() {
       </div>
 
       {/* 4. RLHF Review Queue Component */}
-      <RlhfReviewQueue />
+      <RlhfReviewQueue selectedPair={selectedPair} />
 
       {/* Custom Confirmation Modal */}
       <ConfirmModal

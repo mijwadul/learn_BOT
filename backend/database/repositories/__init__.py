@@ -30,6 +30,7 @@ from .rlhf_repo import (
     add_hard_negative,
     bulk_add_hard_negatives,
     get_hard_negative_ids,
+    get_rlhf_curation_stats,
     reset_ai_trade_history,
 )
 
@@ -63,5 +64,6 @@ __all__ = [
     "add_hard_negative",
     "bulk_add_hard_negatives",
     "get_hard_negative_ids",
+    "get_rlhf_curation_stats",
     "reset_ai_trade_history",
 ]

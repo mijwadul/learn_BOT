@@ -151,6 +151,35 @@ def get_ignored_setup_ids(mode: str = None, symbol: str = None):
         logging.error(f"Failed to get ignored setup IDs: {e}")
         return set()
 
+def get_rlhf_curation_stats(symbol: str = None, mode: str = None):
+    """Ambil statistik jumlah setup yang telah dikurasi (Approved, Rejected, Ignored) per mode dan simbol."""
+    try:
+        ensure_schema_migrations()
+        with Session(sync_engine) as session:
+            q_app = session.query(func.count(ApprovedSetup.id))
+            q_rej = session.query(func.count(RejectedSetup.id))
+            q_ign = session.query(func.count(IgnoredSetup.id))
+            if mode:
+                q_app = q_app.filter(ApprovedSetup.mode == mode.lower())
+                q_rej = q_rej.filter(RejectedSetup.mode == mode.lower())
+                q_ign = q_ign.filter(IgnoredSetup.mode == mode.lower())
+            if symbol:
+                q_app = q_app.filter(func.upper(ApprovedSetup.symbol) == symbol.upper())
+                q_rej = q_rej.filter(func.upper(RejectedSetup.symbol) == symbol.upper())
+                q_ign = q_ign.filter(func.upper(IgnoredSetup.symbol) == symbol.upper())
+            app_count = q_app.scalar() or 0
+            rej_count = q_rej.scalar() or 0
+            ign_count = q_ign.scalar() or 0
+            return {
+                "approved": app_count,
+                "rejected": rej_count,
+                "ignored": ign_count,
+                "total_curated": app_count + rej_count + ign_count
+            }
+    except Exception as e:
+        logging.error(f"Failed to get curation stats: {e}")
+        return {"approved": 0, "rejected": 0, "ignored": 0, "total_curated": 0}
+
 def add_hard_negative(setup_id: str, failed_mode: str = "Normal", symbol: str = "XAUUSD"):
     try:
         with Session(sync_engine) as session:

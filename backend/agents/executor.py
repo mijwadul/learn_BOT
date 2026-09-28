@@ -297,14 +297,40 @@ class ExecutorAgent:
                                     bb_lower_val = row_data.get('BB_Lower', 0)
                                     
                                     open_val = row_data.get('open', close_val)
+                                    rejection_reasons = []
+
                                     if action_type == mt5.ORDER_TYPE_SELL:
                                         reentry_zone = min(lwma_5_h, lwma_10_h)
-                                        if high_price < reentry_zone or close_val > sma_20_val or close_val < bb_lower_val or close_val > open_val or (ema_50_val > 0 and (sma_20_val > ema_50_val or close_val > ema_50_val)):
-                                            allow_execution = False
+                                        if high_price < reentry_zone:
+                                            rejection_reasons.append(f"High ({high_price:.4f}) belum menyentuh zona LWMA High (>= {reentry_zone:.4f})")
+                                        if close_val > sma_20_val:
+                                            rejection_reasons.append(f"Close ({close_val:.4f}) di atas Mid BB ({sma_20_val:.4f})")
+                                        if close_val < bb_lower_val:
+                                            rejection_reasons.append(f"Close ({close_val:.4f}) menembus Lower BB ({bb_lower_val:.4f}) (oversold)")
+                                        if close_val > open_val:
+                                            rejection_reasons.append(f"Candle masih hijau/bullish (close: {close_val:.4f} > open: {open_val:.4f})")
+                                        if ema_50_val > 0 and (sma_20_val > ema_50_val or close_val > ema_50_val):
+                                            rejection_reasons.append(f"Tren mayor masih uptrend (Mid BB/Close > EMA 50: {ema_50_val:.4f})")
                                     elif action_type == mt5.ORDER_TYPE_BUY:
                                         reentry_zone = max(lwma_5_l, lwma_10_l)
-                                        if low_price > reentry_zone or close_val < sma_20_val or close_val > bb_upper_val or close_val < open_val or (ema_50_val > 0 and (sma_20_val < ema_50_val or close_val < ema_50_val)):
-                                            allow_execution = False
+                                        if low_price > reentry_zone:
+                                            rejection_reasons.append(f"Low ({low_price:.4f}) belum menjemput zona LWMA Low (<= {reentry_zone:.4f})")
+                                        if close_val < sma_20_val:
+                                            rejection_reasons.append(f"Close ({close_val:.4f}) di bawah Mid BB ({sma_20_val:.4f})")
+                                        if close_val > bb_upper_val:
+                                            rejection_reasons.append(f"Close ({close_val:.4f}) menembus Upper BB ({bb_upper_val:.4f}) (overbought)")
+                                        if close_val < open_val:
+                                            rejection_reasons.append(f"Candle masih merah/bearish (close: {close_val:.4f} < open: {open_val:.4f})")
+                                        if ema_50_val > 0 and (sma_20_val < ema_50_val or close_val < ema_50_val):
+                                            rejection_reasons.append(f"Tren mayor masih downtrend (Mid BB/Close < EMA 50: {ema_50_val:.4f})")
+
+                                    if rejection_reasons:
+                                        allow_execution = False
+                                        action_str = "BUY" if action_type == mt5.ORDER_TYPE_BUY else "SELL"
+                                        logging.info(
+                                            f"[{clean_pair}] ⚠️ Sinyal AI {action_str} ({used_prob*100:.1f}%, Mode: {trade_mode}) DITAHAN konfirmasi mekanikal BBMA: "
+                                            f"{'; '.join(rejection_reasons)}"
+                                        )
 
                                     # Institutional Risk Service Validation (Anti-Hedging, News Blackout, Hit-Run Limit, Pyramiding)
                                     if allow_execution and self.risk_service.validate_execution_allowed(broker_p, action_type, trade_mode, used_prob):
@@ -312,7 +338,7 @@ class ExecutorAgent:
                                         logging.info(f"[SIGNAL] {clean_pair} Multiclass Entry: {action_str} | Mode: {trade_mode} | Prob: {used_prob:.2f} | Dynamic SL Dist: {sl_dist:.5f}")
                                         self.execute_order(action_type, sl_dist, trade_mode=trade_mode, prob_runner=used_prob, row_data=row_data, symbol=broker_p, df_live=df_live)
                         except Exception as e:
-                            logging.debug(f"[SIGNAL_CHECK] Error {pair}: {e}")
+                            logging.error(f"[SIGNAL_CHECK] Error evaluasi sinyal {pair}: {e}", exc_info=True)
 
             # Manajemen Posisi Aktif Lintas Pair (Break-Even, Partial Close, Reversal Exit, Pre-News Protection)
             try:
