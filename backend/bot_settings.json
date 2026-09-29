@@ -4,7 +4,7 @@
   "max_risk_dollars": 10.0,
   "max_risk_percent": 2.0,
   "max_lot_cap": 0.1,
-  "ai_normal_entry_threshold": 75.0,
+  "ai_normal_entry_threshold": 70.0,
   "ai_runner_entry_threshold": 55.0,
   "pairs": {
     "XAUUSD": {

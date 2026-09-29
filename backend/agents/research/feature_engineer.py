@@ -2,7 +2,7 @@ import logging
 import numpy as np
 import pandas as pd
 from typing import List, Set
-from utils.indicators import calculate_atr
+from utils.indicators import calculate_atr, calculate_bbma_sequence_features, calculate_fractal_origin
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +11,42 @@ RAW_NON_STATIONARY = [
     'dist_Close_LWMA_Low', 'dist_Low_LWMA_Low', 'dist_Close_LWMA_High', 'dist_High_LWMA_High',
     'SMA_20_Slope', 'BB_Width_Slope', 'LWMA_Crossover_High', 'LWMA_Crossover_Low',
     'upper_wick', 'lower_wick', 'body_size'
+]
+
+# Kolom fitur baru berbasis sekuens dan fraktal asal (dimensionless / tidak memerlukan
+# normalisasi ATR karena sudah dinormalisasi di dalam fungsi calculate_* masing-masing)
+SEQUENCE_FRACTAL_PASSTHROUGH = [
+    # Bars-since features (skala candle, bukan harga)
+    'bars_since_csa_buy',   'bars_since_csa_sell',
+    'bars_since_csak_buy',  'bars_since_csak_sell',
+    'bars_since_csm_buy',   'bars_since_csm_sell',
+    'bars_since_extrem_buy','bars_since_extrem_sell',
+    # Freshness decay scores (0..1)
+    'freshness_csa_buy',    'freshness_csa_sell',
+    'freshness_csak_buy',   'freshness_csak_sell',
+    'freshness_csm_buy',    'freshness_csm_sell',
+    # Trigger momentum ratios (dimensionless body/ATR)
+    'trigger_momentum_csa_buy',   'trigger_momentum_csa_sell',
+    'trigger_momentum_csak_buy',  'trigger_momentum_csak_sell',
+    'trigger_momentum_csm_buy',   'trigger_momentum_csm_sell',
+    # Composite trigger scores
+    'trigger_score_buy',    'trigger_score_sell',
+    # Room-to-BB (dimensionless, ATR-normalized)
+    'room_to_bb_upper',     'room_to_bb_lower',
+    # MHV likelihood
+    'mhv_likelihood',
+    # Body rejection quality
+    'reentry_quality_buy',  'reentry_quality_sell',
+    # Fractal origin (count 0..3)
+    'fractal_origin_buy',   'fractal_origin_sell',
+    # Fractal capacity estimate
+    'fractal_capacity_buy', 'fractal_capacity_sell',
+    # Per-TF Re-entry flags
+    'is_reentry_buy_base',  'is_reentry_sell_base',
+    'is_reentry_buy_setup', 'is_reentry_sell_setup',
+    'is_reentry_buy_trend', 'is_reentry_sell_trend',
+    # ATR cross-TF ratios (dimensionless)
+    'atr_ratio_setup_base', 'atr_ratio_trend_base',
 ]
 
 FORBIDDEN_BASE_COLS = [
@@ -113,7 +149,7 @@ def add_normalized_features(df: pd.DataFrame) -> pd.DataFrame:
         vol_ma = vol.rolling(20, min_periods=5).mean().fillna(vol).replace(0, 1.0)
         df['norm_relative_volume'] = np.clip(vol.values / vol_ma.values, 0.1, 10.0)
 
-    # --- 6. DIRECTION-ALIGNED SETUP FEATURES ---
+    # --- DIRECTION-ALIGNED SETUP FEATURES ---
     if 'setup_dir' not in df.columns:
         lwma_low_zone = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values) if 'LWMA_5_Low' in df.columns else df['low'].values
         lwma_high_zone = np.minimum(df['LWMA_5_High'].values, df['LWMA_10_High'].values) if 'LWMA_5_High' in df.columns else df['high'].values
@@ -134,6 +170,22 @@ def add_normalized_features(df: pd.DataFrame) -> pd.DataFrame:
     if 'norm_dist_Close_SMA20' in df.columns:
         df['aligned_dist_sma20'] = np.where(s_dir == 1, df['norm_dist_Close_SMA20'], -df['norm_dist_Close_SMA20'])
 
+    # --- 7. FITUR SEKUENSIAL BBMA (n-candle history) ---
+    # Menghitung berapa candle lalu muncul CSA/CSAK/CSM, seberapa kuat,
+    # ruang gerak ke BB seberang, dan kualitas body rejection candle saat ini.
+    try:
+        df = calculate_bbma_sequence_features(df, lookback=30)
+    except Exception as e_seq:
+        logger.debug(f"Gagal hitung BBMA sequence features: {e_seq}")
+
+    # --- 8. FRACTAL ORIGIN DETECTION (posisi Re-entry di multi-TF) ---
+    # Mendeteksi di TF mana (base/setup/trend) harga sedang menyentuh zona
+    # Re-entry LWMA secara simultan. Semakin besar TF yang aktif = energi lebih besar.
+    try:
+        df = calculate_fractal_origin(df)
+    except Exception as e_frac:
+        logger.debug(f"Gagal hitung Fractal Origin features: {e_frac}")
+
     return df
 
 
@@ -141,6 +193,7 @@ def extract_and_lock_features(df: pd.DataFrame, mode: str = "normal") -> List[st
     """
     Mengisolasi fitur invarian rezim (regime-invariant features) yang aman untuk generalisasi ML.
     Menghindari non-stationarity harga absolut dan indikator statis.
+    Menyertakan fitur sekuensial BBMA dan fractal origin yang sudah dimensionless.
     """
     forbidden_cols: Set[str] = set()
     tf_list = ['', '_setup', '_trend', '_m5', '_m15'] if mode == 'normal' else ['', '_setup', '_trend', '_m5', '_m15', '_h1', '_h4']
@@ -151,7 +204,14 @@ def extract_and_lock_features(df: pd.DataFrame, mode: str = "normal") -> List[st
             forbidden_cols.add(f"{c}{tf}")
 
     candidate_features = []
+    # Prioritas: sequence & fractal features selalu masuk jika tersedia
+    for col in SEQUENCE_FRACTAL_PASSTHROUGH:
+        if col in df.columns:
+            candidate_features.append(col)
+
     for col in df.columns:
+        if col in candidate_features:  # Sudah masuk dari passthrough
+            continue
         if col in forbidden_cols or 'Target' in col or col.startswith('_'):
             continue
         if pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col]):

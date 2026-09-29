@@ -198,7 +198,7 @@ class DataMinerAgent:
         df_trend.set_index('time', inplace=True)
 
         # Feature engineering BBMA & ADX per timeframe
-        from utils.indicators import calculate_atr, calculate_adx
+        from utils.indicators import calculate_atr, calculate_adx, calculate_bbma_sequence_features, calculate_fractal_origin
         df_base = calculate_bbma(df_base)
         df_base['ATR_14'] = calculate_atr(df_base, 14)
         df_base['adx'] = calculate_adx(df_base, 14)
@@ -222,6 +222,19 @@ class DataMinerAgent:
         # Forward fill AFTER joining
         df_merged.ffill(inplace=True)
         df_merged.dropna(inplace=True)
+
+        # Hitung BBMA Sequence Features (bars_since_csa/csak/csm, freshness, trigger_score, dll.)
+        # Dilakukan di sini agar fitur fraktal tersedia baik di live feed maupun training batch.
+        try:
+            df_merged = calculate_bbma_sequence_features(df_merged, lookback=30)
+        except Exception as e_seq:
+            logging.debug(f"[MERGE] Gagal hitung BBMA sequence features: {e_seq}")
+
+        # Hitung Fractal Origin (di TF mana Re-entry sedang aktif secara simultan)
+        try:
+            df_merged = calculate_fractal_origin(df_merged)
+        except Exception as e_frac:
+            logging.debug(f"[MERGE] Gagal hitung Fractal Origin: {e_frac}")
         
         # Tambahkan data makro
         df_merged = self.merge_macro_data(df_merged)

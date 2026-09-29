@@ -3,245 +3,266 @@ import numpy as np
 import pandas as pd
 from utils.indicators import calculate_atr, calculate_ema, calculate_lwma
 
+
+# ---------------------------------------------------------------------------
+# TARGET LABELER v2 — Fractal-Aware MFE (Maximum Favorable Excursion)
+# ---------------------------------------------------------------------------
+
+
+def _get_sym_buffer(sym_name: str) -> float:
+    """Mengembalikan buffer LWMA zona berdasarkan profil pair."""
+    s = sym_name.upper()
+    if 'BTC' in s or 'XAU' in s or 'GOLD' in s:
+        return 0.25
+    elif 'OIL' in s or 'USO' in s:
+        return 0.20
+    return 0.15
+
+
+def _find_trigger_score(flags_csa: np.ndarray, flags_csak: np.ndarray, flags_csm: np.ndarray,
+                         body_sizes: np.ndarray, atrs: np.ndarray,
+                         i: int, lookback: int = 30) -> float:
+    """
+    Menghitung trigger score komposit untuk bar ke-i:
+    CSM > CSAK > CSA dalam hierarki.
+    Returns: skor [0, ∞), 0 = tidak ada trigger.
+    Dibiarkan kontinu agar AI bisa menemukan ambang batas sendiri.
+    """
+    decay_k = np.log(2) / 5.0  # half-life 5 candle
+    best = 0.0
+    for lag in range(1, min(lookback + 1, i + 1)):
+        idx = i - lag
+        atr_at = float(atrs[idx]) if atrs[idx] > 0 else 1e-5
+        body_ratio = float(body_sizes[idx]) / atr_at
+        freshness = float(np.exp(-decay_k * lag))
+        weight = 3.0 if flags_csm[idx] else (2.0 if flags_csak[idx] else (1.0 if flags_csa[idx] else 0.0))
+        score = weight * freshness * body_ratio
+        if score > best:
+            best = score
+    return best
+
+
 def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str = None) -> pd.DataFrame:
     """
-    Generating Dynamic BBMA Lifecycle Targets (Event-Driven Invalidation & Dynamic S/R).
-    
-    Penyempurnaan Institusional (Adaptive Multi-Pair & Extended Trend Horizon):
-    1. Rantai 1 (Runner Horizon Extended): Horizon Runner diperpanjang hingga 240 candle (20 jam di M5)
-       untuk menangkap ekspansi tren besar 1:5.0 RR tanpa membebani CPU (menggunakan early-exit execution).
-    2. Rantai 2 (Pair-Aware Invalidation): Dynamic buffer disesuaikan dengan profil volatilitas masing-masing pair:
-       - XAUUSD / BTCUSD: 0.25 ATR buffer (toleransi liquidity sweep & false-wick dalam).
-       - USOIL: 0.20 ATR buffer.
-       - GBPUSD / Forex: 0.15 ATR buffer.
-    3. Konfirmasi Struktural: Memerlukan 2 candle berturut-turut (consecutive closes) di luar batas
-       untuk mengonfirmasi Structure Break sejati, sehingga 1 candle retest wajar tidak langsung membunuh setup.
+    Labeling BBMA Re-entry berbasis MFE Fraktal-Aware (versi 2).
+
+    Menghasilkan kolom:
+    - Target_Normal   : 1 jika hit ≥ 1R sebelum invalidasi, 0 sebaliknya
+    - Target_Runner   : 1 jika hit ≥ 3R sebelum invalidasi, 0 sebaliknya
+    - max_mfe_r       : Nilai MFE tertinggi yang dicapai (kontinu, untuk regresi)
+    - trigger_score_i : Skor trigger BBMA saat candle ini (fitur tambahan)
+    - fractal_horizon : Horizon simulasi yang digunakan (mencerminkan kekuatan fraktal)
     """
-    logging.info("Generating Dynamic BBMA Lifecycle Targets (Adaptive Pair Invalidation & 240-Candle Runner)...")
-    
+    logging.info("Generating Fractal-Aware MFE Targets (v2 — No Fixed RR, Contextual Sequence)...")
+
+    # --- Pastikan kolom indikator tersedia ---
     if 'ATR_14' not in df.columns:
         df['ATR_14'] = calculate_atr(df, 14)
-        
     if 'EMA_50' not in df.columns:
         df['EMA_50'] = calculate_ema(df['close'], 50)
-        
     if 'dist_Close_EMA50' not in df.columns:
         df['dist_Close_EMA50'] = df['close'] - df['EMA_50']
-        
-    if 'LWMA_5_Low' not in df.columns:
-        df['LWMA_5_Low'] = calculate_lwma(df['low'], 5)
-    if 'LWMA_10_Low' not in df.columns:
-        df['LWMA_10_Low'] = calculate_lwma(df['low'], 10)
-    if 'LWMA_5_High' not in df.columns:
-        df['LWMA_5_High'] = calculate_lwma(df['high'], 5)
-    if 'LWMA_10_High' not in df.columns:
-        df['LWMA_10_High'] = calculate_lwma(df['high'], 10)
+    if 'LWMA_5_Low'   not in df.columns: df['LWMA_5_Low']   = calculate_lwma(df['low'],  5)
+    if 'LWMA_10_Low'  not in df.columns: df['LWMA_10_Low']  = calculate_lwma(df['low'],  10)
+    if 'LWMA_5_High'  not in df.columns: df['LWMA_5_High']  = calculate_lwma(df['high'], 5)
+    if 'LWMA_10_High' not in df.columns: df['LWMA_10_High'] = calculate_lwma(df['high'], 10)
 
-    closes = df['close'].values
-    highs = df['high'].values
-    lows = df['low'].values
-    atrs = df['ATR_14'].values
-    ema_50_vals = df['EMA_50'].values if 'EMA_50' in df.columns else closes
-    sma_20_vals = df['SMA_20'].values if 'SMA_20' in df.columns else closes
-    bb_upper_vals = df['BB_Upper'].values if 'BB_Upper' in df.columns else (closes + atrs * 2.0)
-    bb_lower_vals = df['BB_Lower'].values if 'BB_Lower' in df.columns else (closes - atrs * 2.0)
-    
-    lwma_low_zone = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values)
+    # --- Array NumPy untuk kecepatan ---
+    closes   = df['close'].values
+    highs    = df['high'].values
+    lows     = df['low'].values
+    opens    = df['open'].values if 'open' in df.columns else closes
+    atrs     = df['ATR_14'].values
+    ema50    = df['EMA_50'].values if 'EMA_50' in df.columns else closes
+    sma20    = df['SMA_20'].values if 'SMA_20' in df.columns else closes
+    bb_upper = df['BB_Upper'].values if 'BB_Upper' in df.columns else (closes + atrs * 2.0)
+    bb_lower = df['BB_Lower'].values if 'BB_Lower' in df.columns else (closes - atrs * 2.0)
+
+    lwma_low_zone  = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values)
     lwma_high_zone = np.minimum(df['LWMA_5_High'].values, df['LWMA_10_High'].values)
-    
-    # Deteksi Profil Simbol untuk Toleransi Invalidasi Adaptif
-    sym_name = str(symbol or getattr(df, 'attrs', {}).get('symbol') or (df['symbol'].iloc[0] if 'symbol' in df.columns and len(df) > 0 else 'XAUUSD')).upper()
-    if 'BTC' in sym_name or 'XAU' in sym_name or 'GOLD' in sym_name:
-        pair_struct_buffer_ratio = 0.25 # Emas/Kripto: toleransi wick & liquidity sweep lebih longgar
-    elif 'OIL' in sym_name or 'USO' in sym_name:
-        pair_struct_buffer_ratio = 0.20 # Minyak: toleransi sedang
-    else:
-        pair_struct_buffer_ratio = 0.15 # Forex (GBPUSD, dll): struktur lebih disiplin
+
+    # --- Trigger event arrays ---
+    is_csa_buy   = df['is_CSA_Buy'].values   if 'is_CSA_Buy'   in df.columns else np.zeros(len(df))
+    is_csa_sell  = df['is_CSA_Sell'].values  if 'is_CSA_Sell'  in df.columns else np.zeros(len(df))
+    is_csak_buy  = df['is_CSAK_Buy'].values  if 'is_CSAK_Buy'  in df.columns else np.zeros(len(df))
+    is_csak_sell = df['is_CSAK_Sell'].values if 'is_CSAK_Sell' in df.columns else np.zeros(len(df))
+    is_csm_buy   = df['is_CSM_Buy'].values   if 'is_CSM_Buy'   in df.columns else np.zeros(len(df))
+    is_csm_sell  = df['is_CSM_Sell'].values  if 'is_CSM_Sell'  in df.columns else np.zeros(len(df))
+
+    body_sizes = np.abs(closes - opens)
+
+    # --- Profil pair ---
+    sym_name = str(
+        symbol
+        or getattr(df, 'attrs', {}).get('symbol')
+        or (df['symbol'].iloc[0] if 'symbol' in df.columns and len(df) > 0 else 'XAUUSD')
+    ).upper()
+    struct_buf_ratio = _get_sym_buffer(sym_name)
+
+    # --- Deteksi fractal origin dari kolom hasil calculate_fractal_origin() ---
+    frac_buy  = df['fractal_origin_buy'].values  if 'fractal_origin_buy'  in df.columns else np.ones(len(df))
+    frac_sell = df['fractal_origin_sell'].values if 'fractal_origin_sell' in df.columns else np.ones(len(df))
+    frac_cap_buy  = df['fractal_capacity_buy'].values  if 'fractal_capacity_buy'  in df.columns else np.ones(len(df))
+    frac_cap_sell = df['fractal_capacity_sell'].values if 'fractal_capacity_sell' in df.columns else np.ones(len(df))
 
     n = len(df)
-    labels_normal = np.zeros(n)
-    labels_runner = np.zeros(n)
 
-    HORIZON_NORMAL_MAX = 90   # 90 candle M5 (7.5 jam) sudah cukup untuk target 1.5R
-    HORIZON_RUNNER_MAX = 240  # 240 candle M5 (20 jam) untuk menangkap ekspansi tren swing 5.0R
+    # --- Horizons fraktal:
+    # fractal_origin score 1 (base only)  → 60 candle
+    # fractal_origin score 2 (setup+base) → 120 candle
+    # fractal_origin score 3 (all three)  → 240 candle
+    HORIZON_BY_FRACTAL = {0: 60, 1: 60, 2: 120, 3: 240}
+
+    labels_normal  = np.zeros(n, dtype=np.int8)
+    labels_runner  = np.zeros(n, dtype=np.int8)
+    mfe_r_arr      = np.zeros(n, dtype=np.float32)
+    trigger_scores = np.zeros(n, dtype=np.float32)
+    frac_horizons  = np.zeros(n, dtype=np.int16)
 
     for i in range(n):
         atr_i = float(atrs[i]) if (not np.isnan(atrs[i]) and atrs[i] > 0) else 0.001
         if np.isnan(lwma_low_zone[i]) or np.isnan(lwma_high_zone[i]):
             continue
-            
-        buffer_zone = 0.35 * atr_i
-        eval_buy = (lows[i] <= lwma_low_zone[i] + buffer_zone)
-        eval_sell = (highs[i] >= lwma_high_zone[i] - buffer_zone)
 
+        buf = 0.35 * atr_i
+        eval_buy  = (lows[i]  <= lwma_low_zone[i]  + buf)
+        eval_sell = (highs[i] >= lwma_high_zone[i] - buf)
         if not eval_buy and not eval_sell:
             continue
 
         entry_price = closes[i]
-        lookback_idx = max(0, i - 8)
-        struct_tol = pair_struct_buffer_ratio * atr_i
+        struct_tol  = struct_buf_ratio * atr_i
 
-        # -------------------------------------------------------------------------
-        # 1. EVALUASI SETUP BUY (BBMA Dynamic Lifecycle Simulation)
-        # -------------------------------------------------------------------------
+        # --- SL Distance (konsisten dengan OOS evaluator: 1.2 * ATR) ---
+        sl_dist_i = max(0.4 * atr_i, min(2.5 * atr_i, 1.2 * atr_i))
+
+        # ---------------------------------------------------------------
+        # BUY SETUP
+        # ---------------------------------------------------------------
         if eval_buy:
-            recent_low = float(np.min(lows[lookback_idx:i+1]))
-            buy_supports = [recent_low]
-            if ema_50_vals[i] > 0 and ema_50_vals[i] < entry_price:
-                buy_supports.append(float(ema_50_vals[i]))
-            if sma_20_vals[i] > 0 and sma_20_vals[i] < entry_price:
-                buy_supports.append(float(sma_20_vals[i]))
-            support_level = min(buy_supports)
-            
-            raw_sl_buy = (entry_price - support_level) + (0.15 * atr_i)
-            sl_dist_buy = max(0.4 * atr_i, min(2.5 * atr_i, raw_sl_buy))
-            hard_sl_buy = entry_price - sl_dist_buy
-            
-            tp_normal_target = entry_price + (1.5 * sl_dist_buy)
-            tp_runner_target = entry_price + (max_runner_rr * sl_dist_buy)
+            t_score = _find_trigger_score(
+                is_csa_buy, is_csak_buy, is_csm_buy, body_sizes, atrs, i
+            )
+            trigger_scores[i] = max(trigger_scores[i], t_score)
 
-            hit_tp_normal = False
-            hit_tp_runner = False
-            is_trap_or_invalidated = False
-            secured_be = False
-            consecutive_breaks = 0
+            fc = int(min(3, max(0, round(float(frac_buy[i])))))
+            horizon = HORIZON_BY_FRACTAL.get(fc, 60)
+            frac_horizons[i] = horizon
 
-            horizon_buy = min(i + HORIZON_RUNNER_MAX, n)
-            normal_cutoff = min(i + HORIZON_NORMAL_MAX, n)
+            hard_sl  = entry_price - sl_dist_i
+            max_mfe  = 0.0
+            consec   = 0
+            secured  = False
+            invalidated = False
 
-            for j in range(i + 1, horizon_buy):
-                c_close = closes[j]
-                c_low = lows[j]
-                c_high = highs[j]
-                mid_bb = sma_20_vals[j]
-                ema_50 = ema_50_vals[j]
-                low_bb = bb_lower_vals[j]
-                opp_ma = lwma_high_zone[j]
+            for j in range(i + 1, min(i + horizon + 1, n)):
+                c_c = closes[j]; c_l = lows[j]; c_h = highs[j]
+                mid = sma20[j]; e50 = ema50[j]; l_bb = bb_lower[j]
 
-                # A. Deteksi Invalidation Mutlak
-                # 1. Hard SL tersentuh (Invalidasi Mutlak)
-                if c_low <= hard_sl_buy:
-                    is_trap_or_invalidated = True
+                # --- Invalidation ---
+                if c_l <= hard_sl:
+                    invalidated = True
                     break
-                
-                # 2. Opposite CSM Sell: Candle Momentum Bearish keluar Lower BB (Invalidasi Mutlak)
-                if c_close < low_bb:
-                    if not secured_be:
-                        is_trap_or_invalidated = True
+                if c_c < l_bb and not secured:
+                    invalidated = True
                     break
-
-                # 3. Structure Broken Dinamis dengan Konfirmasi 2-Candle & Pair Buffer
-                struct_baseline = min(mid_bb, ema_50) if ema_50 > 0 else mid_bb
-                if c_close < (struct_baseline - struct_tol):
-                    consecutive_breaks += 1
-                    if consecutive_breaks >= 2:
-                        if not secured_be:
-                            is_trap_or_invalidated = True
+                base = min(mid, e50) if e50 > 0 else mid
+                if c_c < (base - struct_tol):
+                    consec += 1
+                    if consec >= 2 and not secured:
+                        invalidated = True
                         break
                 else:
-                    consecutive_breaks = 0 # Retest berhasil bertahan (Liquidity sweep dipertahankan)
+                    consec = 0
 
-                # B. Deteksi Keberhasilan Target Dinamis
-                # Normal TP (1.5R) hanya dihitung dalam horizon normal
-                if not hit_tp_normal and j <= normal_cutoff:
-                    if (c_high >= opp_ma and (c_high - entry_price) >= (1.0 * sl_dist_buy)) or (c_high >= tp_normal_target):
-                        hit_tp_normal = True
-                        secured_be = True
+                # --- MFE tracking ---
+                excursion_r = (c_h - entry_price) / sl_dist_i
+                if excursion_r > max_mfe:
+                    max_mfe = excursion_r
 
-                # Runner TP (5.0R) bisa tercapai hingga horizon penuh (240 candle)
-                if c_high >= tp_runner_target:
-                    hit_tp_runner = True
-                    break # Early-exit: Target maksimal sudah tercapai, hemat CPU!
+                # Secured breakeven ketika hit ≥ 1R
+                if not secured and excursion_r >= 1.0:
+                    secured = True
 
-                # Proteksi Trailing Breakeven setelah mengunci profit
-                if secured_be and c_low <= entry_price:
-                    break # Early-exit: Posisi ditutup impas, simulasi selesai!
+                # Early exit if we already captured max_runner_rr
+                if max_mfe >= max_runner_rr:
+                    break
 
-            if hit_tp_normal and not is_trap_or_invalidated:
-                labels_normal[i] = 1
-            if (hit_tp_runner or (hit_tp_normal and secured_be)) and not is_trap_or_invalidated:
-                labels_runner[i] = 1
+                # Trailing: if secured and pulls back to entry, done
+                if secured and c_l <= entry_price:
+                    break
 
-        # -------------------------------------------------------------------------
-        # 2. EVALUASI SETUP SELL (BBMA Dynamic Lifecycle Simulation)
-        # -------------------------------------------------------------------------
+            if not invalidated:
+                mfe_r_arr[i] = max(mfe_r_arr[i], float(max_mfe))
+                if max_mfe >= 1.0:
+                    labels_normal[i] = 1
+                if max_mfe >= 3.0:
+                    labels_runner[i] = 1
+
+        # ---------------------------------------------------------------
+        # SELL SETUP
+        # ---------------------------------------------------------------
         if eval_sell:
-            recent_high = float(np.max(highs[lookback_idx:i+1]))
-            sell_resists = [recent_high]
-            if ema_50_vals[i] > entry_price:
-                sell_resists.append(float(ema_50_vals[i]))
-            if sma_20_vals[i] > entry_price:
-                sell_resists.append(float(sma_20_vals[i]))
-            resist_level = max(sell_resists)
-            
-            raw_sl_sell = (resist_level - entry_price) + (0.15 * atr_i)
-            sl_dist_sell = max(0.4 * atr_i, min(2.5 * atr_i, raw_sl_sell))
-            hard_sl_sell = entry_price + sl_dist_sell
-            
-            tp_normal_target = entry_price - (1.5 * sl_dist_sell)
-            tp_runner_target = entry_price - (max_runner_rr * sl_dist_sell)
+            t_score = _find_trigger_score(
+                is_csa_sell, is_csak_sell, is_csm_sell, body_sizes, atrs, i
+            )
+            trigger_scores[i] = max(trigger_scores[i], t_score)
 
-            hit_tp_normal = False
-            hit_tp_runner = False
-            is_trap_or_invalidated = False
-            secured_be = False
-            consecutive_breaks = 0
+            fc = int(min(3, max(0, round(float(frac_sell[i])))))
+            horizon = HORIZON_BY_FRACTAL.get(fc, 60)
+            frac_horizons[i] = max(frac_horizons[i], horizon)
 
-            horizon_sell = min(i + HORIZON_RUNNER_MAX, n)
-            normal_cutoff = min(i + HORIZON_NORMAL_MAX, n)
+            hard_sl  = entry_price + sl_dist_i
+            max_mfe  = 0.0
+            consec   = 0
+            secured  = False
+            invalidated = False
 
-            for j in range(i + 1, horizon_sell):
-                c_close = closes[j]
-                c_low = lows[j]
-                c_high = highs[j]
-                mid_bb = sma_20_vals[j]
-                ema_50 = ema_50_vals[j]
-                top_bb = bb_upper_vals[j]
-                opp_ma = lwma_low_zone[j]
+            for j in range(i + 1, min(i + horizon + 1, n)):
+                c_c = closes[j]; c_l = lows[j]; c_h = highs[j]
+                mid = sma20[j]; e50 = ema50[j]; t_bb = bb_upper[j]
 
-                # A. Deteksi Invalidation Mutlak
-                # 1. Hard SL tersentuh (Invalidasi Mutlak)
-                if c_high >= hard_sl_sell:
-                    is_trap_or_invalidated = True
+                # --- Invalidation ---
+                if c_h >= hard_sl:
+                    invalidated = True
                     break
-                
-                # 2. Opposite CSM Buy: Candle Momentum Bullish keluar Top BB (Invalidasi Mutlak)
-                if c_close > top_bb:
-                    if not secured_be:
-                        is_trap_or_invalidated = True
+                if c_c > t_bb and not secured:
+                    invalidated = True
                     break
-
-                # 3. Structure Broken Dinamis dengan Konfirmasi 2-Candle & Pair Buffer
-                struct_baseline = max(mid_bb, ema_50) if ema_50 > 0 else mid_bb
-                if c_close > (struct_baseline + struct_tol):
-                    consecutive_breaks += 1
-                    if consecutive_breaks >= 2:
-                        if not secured_be:
-                            is_trap_or_invalidated = True
+                base = max(mid, e50) if e50 > 0 else mid
+                if c_c > (base + struct_tol):
+                    consec += 1
+                    if consec >= 2 and not secured:
+                        invalidated = True
                         break
                 else:
-                    consecutive_breaks = 0
+                    consec = 0
 
-                # B. Deteksi Keberhasilan Target Dinamis
-                if not hit_tp_normal and j <= normal_cutoff:
-                    if (c_low <= opp_ma and (entry_price - c_low) >= (1.0 * sl_dist_sell)) or (c_low <= tp_normal_target):
-                        hit_tp_normal = True
-                        secured_be = True
+                # --- MFE tracking ---
+                excursion_r = (entry_price - c_l) / sl_dist_i
+                if excursion_r > max_mfe:
+                    max_mfe = excursion_r
 
-                # Runner TP (5.0R) bisa tercapai hingga horizon penuh (240 candle)
-                if c_low <= tp_runner_target:
-                    hit_tp_runner = True
-                    break # Early-exit
+                if not secured and excursion_r >= 1.0:
+                    secured = True
 
-                # Proteksi Trailing Breakeven setelah mengunci profit
-                if secured_be and c_high >= entry_price:
-                    break # Early-exit
+                if max_mfe >= max_runner_rr:
+                    break
 
-            if hit_tp_normal and not is_trap_or_invalidated:
-                labels_normal[i] = 1
-            if (hit_tp_runner or (hit_tp_normal and secured_be)) and not is_trap_or_invalidated:
-                labels_runner[i] = 1
+                if secured and c_h >= entry_price:
+                    break
 
-    df['Target_Normal'] = labels_normal
-    df['Target_Runner'] = labels_runner
+            if not invalidated:
+                cur = mfe_r_arr[i]
+                mfe_r_arr[i] = max(cur, float(max_mfe))
+                if max_mfe >= 1.0:
+                    labels_normal[i] = 1
+                if max_mfe >= 3.0:
+                    labels_runner[i] = 1
+
+    df['Target_Normal']   = labels_normal.astype(int)
+    df['Target_Runner']   = labels_runner.astype(int)
+    df['max_mfe_r']       = mfe_r_arr           # label regresi kontinu (opsional)
+    df['trigger_score_i'] = trigger_scores       # skor trigger saat candle ini (fitur informatif)
+    df['fractal_horizon'] = frac_horizons        # horizon yang dipakai (diagnostik)
     return df

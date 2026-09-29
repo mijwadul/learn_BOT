@@ -187,12 +187,40 @@ def run_fit_proper_test(
             sell_signals = sell_signals & (~both_mask | (close_val < ema_val))
 
         # 6. Kalkulasi SL & TP Adaptif per Candle dari ATR
+        # PENTING: Formula SL harus identik dengan target_labeler v2 (1.2 * ATR)
+        # agar label training dan simulasi VectorBT benar-benar konsisten.
         rr_ratio = 1.5 if mode_str == "normal" else getattr(researcher, "max_runner_rr", 5.0)
         close_prices = df_calc['close'].values
         sl_pct = np.clip((1.2 * atrs) / close_prices, 0.0005, 0.15)
-        tp_pct = np.clip((rr_ratio * 1.2 * atrs) / close_prices, 0.001, 0.50)
 
-        # 7. Jalankan Simulasi Finansial VectorBT
+        # TP dinamis: jika tersedia fractal_capacity_buy/sell, gunakan untuk scaling TP
+        # Hal ini mencerminkan bahwa setup Re-entry H1 layak diberi TP lebih jauh dari M5.
+        frac_cap_buy  = df_calc['fractal_capacity_buy'].values  if 'fractal_capacity_buy'  in df_calc.columns else np.full(len(df_calc), 1.0)
+        frac_cap_sell = df_calc['fractal_capacity_sell'].values if 'fractal_capacity_sell' in df_calc.columns else np.full(len(df_calc), 1.0)
+        # Rata-rata kapasitas buy & sell untuk tiap bar (bar bisa aktif keduanya)
+        frac_cap = np.where(buy_signals, frac_cap_buy, np.where(sell_signals, frac_cap_sell, 1.0))
+        # TP scaling: base_rr * fractal_capacity (1.0..3.0+)
+        tp_pct = np.clip((rr_ratio * frac_cap * 1.2 * atrs) / close_prices, 0.001, 0.80)
+
+        # 7. Cooldown State Machine — mencegah spam sinyal di zona yang sama
+        # Setelah satu sinyal aktif, abaikan MIN_COOLDOWN_BARS berikutnya.
+        MIN_COOLDOWN_BARS = 10  # ~50 menit di M5 setelah entry
+        cooldown_remaining = 0
+        buy_signals_filtered  = np.zeros(len(buy_signals), dtype=bool)
+        sell_signals_filtered = np.zeros(len(sell_signals), dtype=bool)
+        for idx_cd in range(len(buy_signals)):
+            if cooldown_remaining > 0:
+                cooldown_remaining -= 1
+                continue
+            if buy_signals[idx_cd]:
+                buy_signals_filtered[idx_cd]  = True
+                cooldown_remaining = MIN_COOLDOWN_BARS
+            elif sell_signals[idx_cd]:
+                sell_signals_filtered[idx_cd] = True
+                cooldown_remaining = MIN_COOLDOWN_BARS
+        buy_signals  = buy_signals_filtered
+        sell_signals = sell_signals_filtered
+
         import vectorbt as vbt
 
         spread_fee = 0.00015 # Standar spread institusional ~30 poin pada emas/forex
