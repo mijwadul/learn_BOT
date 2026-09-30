@@ -141,8 +141,8 @@ def run_fit_proper_test(
             model_features = list(researcher.features)
 
         if not model_features:
-            # Fallback ke kolom numerik yang tersedia
-            model_features = [c for c in df_calc.columns if c not in ['open', 'high', 'low', 'close', 'tick_volume', 'Target_Normal', 'Target_Runner', 'setup_dir', 'symbol']]
+            excluded = {'open', 'high', 'low', 'close', 'tick_volume', 'Target_Normal', 'Target_Runner', 'setup_dir', 'symbol', 'max_mfe_r', 'fractal_horizon'}
+            model_features = [c for c in df_calc.columns if c not in excluded and 'mfe' not in c.lower() and 'Target' not in c and 'horizon' not in c.lower()]
 
         X_oos = df_calc.reindex(columns=model_features, fill_value=0.0).copy()
         for col in model_features:
@@ -170,13 +170,58 @@ def run_fit_proper_test(
         is_valid_buy = (df_calc['low'].values <= (lwma_low_zone + buffer))
         is_valid_sell = (df_calc['high'].values >= (lwma_high_zone - buffer))
 
+        # 4b. Filter Trigger BBMA — Sinkronisasi dengan target_labeler
+        # target_labeler HANYA memberi label positif jika ada CSA/CSAK/CSM dalam 30 bar
+        # sebelum candle entry. OOS evaluator wajib menerapkan aturan yang sama agar
+        # model tidak diuji pada kondisi yang tidak pernah diajarkan (entry tanpa trigger).
+        TRIGGER_WINDOW = 30
+        _flag_names_buy  = ['is_CSA_Buy',  'is_CSAK_Buy',  'is_CSM_Buy']
+        _flag_names_sell = ['is_CSA_Sell', 'is_CSAK_Sell', 'is_CSM_Sell']
+
+        _any_buy_flag  = any(c in df_calc.columns for c in _flag_names_buy)
+        _any_sell_flag = any(c in df_calc.columns for c in _flag_names_sell)
+
+        if _any_buy_flag or _any_sell_flag:
+            # Gabungkan semua flag trigger buy/sell menjadi satu array boolean
+            _trig_buy_raw = np.zeros(len(df_calc), dtype=np.float32)
+            for _col in _flag_names_buy:
+                if _col in df_calc.columns:
+                    _trig_buy_raw = np.maximum(_trig_buy_raw, pd.to_numeric(df_calc[_col], errors='coerce').fillna(0).values.astype(np.float32))
+
+            _trig_sell_raw = np.zeros(len(df_calc), dtype=np.float32)
+            for _col in _flag_names_sell:
+                if _col in df_calc.columns:
+                    _trig_sell_raw = np.maximum(_trig_sell_raw, pd.to_numeric(df_calc[_col], errors='coerce').fillna(0).values.astype(np.float32))
+
+            # Rolling sum pada 30 bar SEBELUM bar saat ini (shift(1) agar bar ini tidak dihitung sendiri)
+            # has_trigger_buy[i] = True jika ada minimal 1 trigger buy di [i-30, i-1]
+            _s_buy  = pd.Series(_trig_buy_raw)
+            _s_sell = pd.Series(_trig_sell_raw)
+            has_trigger_buy  = (_s_buy.shift(1).rolling(TRIGGER_WINDOW, min_periods=1).sum() > 0).values
+            has_trigger_sell = (_s_sell.shift(1).rolling(TRIGGER_WINDOW, min_periods=1).sum() > 0).values
+
+            logger.debug(
+                f"[TRIGGER FILTER] Buy zone valid: {is_valid_buy.sum()} → setelah trigger filter: {(is_valid_buy & has_trigger_buy).sum()} | "
+                f"Sell zone valid: {is_valid_sell.sum()} → setelah trigger filter: {(is_valid_sell & has_trigger_sell).sum()}"
+            )
+        else:
+            # Fallback graceful: kolom flag tidak tersedia (mungkin data lama sebelum v2 indicators)
+            # → tidak terapkan filter, biarkan semua zona lolos agar tidak memblokir evaluasi
+            logger.warning(
+                "[TRIGGER FILTER] Kolom flag CSA/CSAK/CSM tidak ditemukan di df_calc. "
+                "Filter trigger dinonaktifkan (fallback graceful). Pastikan calculate_bbma_sequence_features() "
+                "sudah dijalankan sebelum OOS evaluasi untuk hasil optimal."
+            )
+            has_trigger_buy  = np.ones(len(df_calc), dtype=bool)
+            has_trigger_sell = np.ones(len(df_calc), dtype=bool)
+
         # 5. Threshold Masuk
         cal_th = getattr(researcher, f"optimal_threshold_{mode_str}", 0.54) or 0.54
         if cal_th > 1.0:
             cal_th /= 100.0
 
-        buy_signals = (p_win >= cal_th) & is_valid_buy
-        sell_signals = (p_win >= cal_th) & is_valid_sell
+        buy_signals  = (p_win >= cal_th) & is_valid_buy  & has_trigger_buy
+        sell_signals = (p_win >= cal_th) & is_valid_sell & has_trigger_sell
 
         # Resolusi sinyal ganda di bar yang sama (Mutual Exclusion via EMA 50)
         both_mask = buy_signals & sell_signals
@@ -187,24 +232,25 @@ def run_fit_proper_test(
             sell_signals = sell_signals & (~both_mask | (close_val < ema_val))
 
         # 6. Kalkulasi SL & TP Adaptif per Candle dari ATR
-        # PENTING: Formula SL harus identik dengan target_labeler v2 (1.2 * ATR)
-        # agar label training dan simulasi VectorBT benar-benar konsisten.
-        rr_ratio = 1.5 if mode_str == "normal" else getattr(researcher, "max_runner_rr", 5.0)
+        # PENTING: Formula SL & TP diselaraskan presisi dengan target_labeler v2:
+        # - SL: 1.2 * ATR
+        # - Normal Mode TP: 1.3R * SL (~1.56 ATR, selaras dengan labeler MFE >= 1.0R)
+        # - Runner Mode TP: 3.0R * SL (~3.60 ATR, selaras dengan labeler MFE >= 3.0R)
+        # Mencegah mismatch fatal di mana labeler menargetkan 3.0R tetapi VectorBT menuntut 5.0R-15.0R.
         close_prices = df_calc['close'].values
         sl_pct = np.clip((1.2 * atrs) / close_prices, 0.0005, 0.15)
 
-        # TP dinamis: jika tersedia fractal_capacity_buy/sell, gunakan untuk scaling TP
-        # Hal ini mencerminkan bahwa setup Re-entry H1 layak diberi TP lebih jauh dari M5.
-        frac_cap_buy  = df_calc['fractal_capacity_buy'].values  if 'fractal_capacity_buy'  in df_calc.columns else np.full(len(df_calc), 1.0)
-        frac_cap_sell = df_calc['fractal_capacity_sell'].values if 'fractal_capacity_sell' in df_calc.columns else np.full(len(df_calc), 1.0)
-        # Rata-rata kapasitas buy & sell untuk tiap bar (bar bisa aktif keduanya)
-        frac_cap = np.where(buy_signals, frac_cap_buy, np.where(sell_signals, frac_cap_sell, 1.0))
-        # TP scaling: base_rr * fractal_capacity (1.0..3.0+)
-        tp_pct = np.clip((rr_ratio * frac_cap * 1.2 * atrs) / close_prices, 0.001, 0.80)
+        if mode_str == "normal":
+            tp_pct = np.clip((1.3 * 1.2 * atrs) / close_prices, 0.001, 0.80)
+        else:
+            # Runner Mode: 3.0R selaras dengan Target_Runner (MFE >= 3.0R)
+            tp_pct = np.clip((3.0 * 1.2 * atrs) / close_prices, 0.001, 0.80)
 
         # 7. Cooldown State Machine — mencegah spam sinyal di zona yang sama
         # Setelah satu sinyal aktif, abaikan MIN_COOLDOWN_BARS berikutnya.
-        MIN_COOLDOWN_BARS = 10  # ~50 menit di M5 setelah entry
+        # TD#4 FIX: Dinaikkan dari 10 → 18 bar (~1.5 jam di M5) agar siklus ayunan
+        # harga selesai sebelum membuka posisi baru di zona LWMA yang sama.
+        MIN_COOLDOWN_BARS = 18  # ~90 menit di M5 setelah entry
         cooldown_remaining = 0
         buy_signals_filtered  = np.zeros(len(buy_signals), dtype=bool)
         sell_signals_filtered = np.zeros(len(sell_signals), dtype=bool)
@@ -223,11 +269,31 @@ def run_fit_proper_test(
 
         import vectorbt as vbt
 
+        # 7b. Body Rejection Exit Signals — Sinkronisasi Invalidasi Labeler vs VectorBT
+        # target_labeler membatalkan (invalidate) posisi buy jika `close < BB_Lower` sebelum secured,
+        # dan posisi sell jika `close > BB_Upper` sebelum secured. VectorBT tidak punya mekanisme
+        # ini secara native. Kita tambahkan sebagai `exits`/`short_exits` yang bersaing dengan SL/TP —
+        # mana yang duluan terpicu, itulah yang dieksekusi (konsisten dengan aturan BBMA body rejection).
+        bb_lower_arr = df_calc['BB_Lower'].values if 'BB_Lower' in df_calc.columns else (close_prices - 2.0 * atrs)
+        bb_upper_arr = df_calc['BB_Upper'].values if 'BB_Upper' in df_calc.columns else (close_prices + 2.0 * atrs)
+
+        # Close di bawah Lower BB → CSM Sell berlawanan → exit posisi Buy
+        body_reject_buy_exit  = pd.Series((close_prices < bb_lower_arr), index=df_calc.index)
+        # Close di atas Upper BB → CSM Buy berlawanan → exit posisi Sell
+        body_reject_sell_exit = pd.Series((close_prices > bb_upper_arr), index=df_calc.index)
+
+        logger.debug(
+            f"[BODY REJECTION EXIT] Potensi exit buy (CSM Sell): {body_reject_buy_exit.sum()} bar | "
+            f"Potensi exit sell (CSM Buy): {body_reject_sell_exit.sum()} bar"
+        )
+
         spread_fee = 0.00015 # Standar spread institusional ~30 poin pada emas/forex
         portfolio = vbt.Portfolio.from_signals(
             close=pd.Series(close_prices, index=df_calc.index),
             entries=pd.Series(buy_signals, index=df_calc.index),
             short_entries=pd.Series(sell_signals, index=df_calc.index),
+            exits=body_reject_buy_exit,
+            short_exits=body_reject_sell_exit,
             sl_stop=pd.Series(sl_pct, index=df_calc.index),
             tp_stop=pd.Series(tp_pct, index=df_calc.index),
             fees=spread_fee,
@@ -236,28 +302,41 @@ def run_fit_proper_test(
 
         stats = portfolio.stats()
 
-        def safe_float(val: Any, default: float = 0.0) -> float:
+        def safe_float(val: Any, default: float = 0.0, max_cap: float = 999.0) -> float:
             try:
                 f = float(val)
-                return default if np.isnan(f) else f
+                if np.isnan(f):
+                    return default
+                if np.isposinf(f):
+                    return max_cap
+                if np.isneginf(f):
+                    return -max_cap
+                return f
             except Exception:
                 return default
 
-        win_rate = safe_float(stats.get("Win Rate [%]"), 0.0)
-        profit_factor = safe_float(stats.get("Profit Factor"), 0.0)
-        sharpe_ratio = safe_float(stats.get("Sharpe Ratio"), 0.0)
-        max_dd = abs(safe_float(stats.get("Max Drawdown [%]"), 0.0))
         total_trades = int(safe_float(stats.get("Total Trades"), 0.0))
+        win_rate = safe_float(stats.get("Win Rate [%]"), 0.0)
+        profit_factor = safe_float(stats.get("Profit Factor"), 0.0, max_cap=999.0) if total_trades > 0 else 0.0
+        sharpe_ratio = safe_float(stats.get("Sharpe Ratio"), 0.0, max_cap=99.0) if total_trades > 0 else 0.0
+        max_dd = abs(safe_float(stats.get("Max Drawdown [%]"), 0.0))
         total_return = safe_float(stats.get("Total Return [%]"), 0.0)
 
         metrics = {
             "win_rate_pct": round(win_rate, 2),
-            "profit_factor": round(profit_factor, 2) if not np.isinf(profit_factor) else 999.0,
+            "profit_factor": round(profit_factor, 2),
             "sharpe_ratio": round(sharpe_ratio, 2),
             "max_drawdown_pct": round(max_dd, 2),
             "total_trades": total_trades,
             "total_return_pct": round(total_return, 2)
         }
+
+        # 7b. TD Eradication: Hentikan auto-harvest trade rugi OOS ke Hard Negatives
+        # Setup rugi pada backtest OOS adalah varians stokastik normal di pasar finansial.
+        # Memanen trade rugi dan meng-override ground truth label menjadi 0 di training
+        # berikutnya terbukti meracuni model dan memicu degradasi akurasi sekuensial.
+        harvested_hn_count = 0
+        losing_records = []
 
         # 8. Ekstraksi Kurva Ekuitas (downsampled to <= 100 points untuk visualisasi lightweight-charts)
         equity_curve = []
@@ -297,7 +376,9 @@ def run_fit_proper_test(
             "criteria": base_criteria,
             "checks": checks,
             "reasons": reasons,
-            "equity_curve": equity_curve
+            "equity_curve": equity_curve,
+            "harvested_hard_negatives": harvested_hn_count,
+            "losing_records": losing_records
         }
 
         if passed:

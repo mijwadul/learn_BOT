@@ -51,7 +51,8 @@ SEQUENCE_FRACTAL_PASSTHROUGH = [
 
 FORBIDDEN_BASE_COLS = [
     'open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume',
-    'symbol', 'time', 'timestamp', 'datetime', 'date', 'id', 'setup_dir'
+    'symbol', 'time', 'timestamp', 'datetime', 'date', 'id', 'setup_dir',
+    'max_mfe_r', 'fractal_horizon', 'Target_Normal', 'Target_Runner'
 ] + RAW_NON_STATIONARY
 
 
@@ -212,7 +213,7 @@ def extract_and_lock_features(df: pd.DataFrame, mode: str = "normal") -> List[st
     for col in df.columns:
         if col in candidate_features:  # Sudah masuk dari passthrough
             continue
-        if col in forbidden_cols or 'Target' in col or col.startswith('_'):
+        if col in forbidden_cols or 'Target' in col or col.startswith('_') or 'mfe' in col.lower() or 'horizon' in col.lower():
             continue
         if pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col]):
             candidate_features.append(col)

@@ -201,3 +201,18 @@ def get_latest_scorecards(symbol: str = "XAUUSD") -> Dict[str, Any]:
             "message": str(e),
             "latest": {"normal": None, "runner": None}
         }
+
+def delete_scorecards_by_symbol(symbol: str) -> int:
+    """Menghapus seluruh rekaman riwayat scorecard kuantitatif untuk symbol tertentu (Reset Otak)."""
+    try:
+        ensure_schema_migrations()
+        sym_clean = str(symbol or "XAUUSD").strip().upper()
+        with Session(sync_engine) as session:
+            deleted_count = session.query(ModelScorecard).filter(ModelScorecard.symbol == sym_clean).delete()
+            session.commit()
+            logger.info(f"[SCORECARD DB] 🗑️ Berhasil menghapus {deleted_count} entri scorecard untuk {sym_clean}.")
+            return deleted_count
+    except Exception as e:
+        logger.error(f"[SCORECARD DB] Gagal menghapus scorecard untuk {symbol}: {e}")
+        return 0
+

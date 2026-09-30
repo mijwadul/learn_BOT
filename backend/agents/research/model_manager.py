@@ -1,11 +1,26 @@
 import os
 import json
 import logging
+import math
 import joblib
 from pathlib import Path
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+def sanitize_json_floats(obj: Any) -> Any:
+    """Konversi nilai float inf, -inf, dan NaN menjadi angka float finite yang valid untuk JSON."""
+    if isinstance(obj, float):
+        if math.isnan(obj):
+            return 0.0
+        if math.isinf(obj):
+            return 999.0 if obj > 0 else -999.0
+        return obj
+    elif isinstance(obj, dict):
+        return {k: sanitize_json_floats(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [sanitize_json_floats(v) for v in obj]
+    return obj
 
 class ModelManager:
     """
@@ -26,9 +41,132 @@ class ModelManager:
         return os.path.join(d, f"model_{mode}.pkl")
 
     @staticmethod
+    def get_candidate_model_path(symbol: str, mode: str) -> str:
+        d = ModelManager.get_model_dir(symbol)
+        return os.path.join(d, f"model_{mode}_candidate.pkl")
+
+    @staticmethod
+    def get_pending_model_path(symbol: str, mode: str) -> str:
+        d = ModelManager.get_model_dir(symbol)
+        return os.path.join(d, f"model_{mode}_pending.pkl")
+
+    @staticmethod
+    def get_pending_info_path(symbol: str, mode: str) -> str:
+        d = ModelManager.get_model_dir(symbol)
+        return os.path.join(d, f"pending_{mode}_info.json")
+
+    @staticmethod
+    def save_pending_model(symbol: str, mode: str, model: Any, info: Dict[str, Any]) -> bool:
+        """Menyimpan model hasil training baru sebagai checkpoint pending tanpa menimpa .pkl lama."""
+        try:
+            sym = str(symbol or "XAUUSD").upper()
+            mode_clean = str(mode).strip().lower()
+            p_model = ModelManager.get_pending_model_path(sym, mode_clean)
+            p_info = ModelManager.get_pending_info_path(sym, mode_clean)
+            joblib.dump(model, p_model)
+            cleaned_info = sanitize_json_floats(info)
+            with open(p_info, "w") as f:
+                json.dump(cleaned_info, f, indent=2)
+            logger.info(f"💾 [RESEARCHER-{sym}] Model pending ({mode_clean}) tersimpan di {p_model}. Menunggu konfirmasi user.")
+            return True
+        except Exception as e:
+            logger.error(f"Gagal menyimpan model pending ({mode}) untuk {symbol}: {e}")
+            return False
+
+    @staticmethod
+    def get_pending_info(symbol: str, mode: str) -> Optional[Dict[str, Any]]:
+        """Membaca metadata model pending yang belum dikonfirmasi jika ada."""
+        try:
+            sym = str(symbol or "XAUUSD").upper()
+            mode_clean = str(mode).strip().lower()
+            p_info = ModelManager.get_pending_info_path(sym, mode_clean)
+            p_model = ModelManager.get_pending_model_path(sym, mode_clean)
+            if os.path.exists(p_info) and os.path.exists(p_model):
+                with open(p_info, "r") as f:
+                    raw_data = json.load(f)
+                    return sanitize_json_floats(raw_data)
+        except Exception as e:
+            logger.warning(f"Gagal membaca pending info ({mode}) untuk {symbol}: {e}")
+        return None
+
+    @staticmethod
+    def load_pending_model(symbol: str, mode: str) -> Optional[Any]:
+        """Memuat objek model pending dari disk."""
+        try:
+            sym = str(symbol or "XAUUSD").upper()
+            mode_clean = str(mode).strip().lower()
+            p_model = ModelManager.get_pending_model_path(sym, mode_clean)
+            if os.path.exists(p_model) and os.path.getsize(p_model) > 100:
+                return joblib.load(p_model)
+        except Exception as e:
+            logger.warning(f"Gagal memuat pending model ({mode}) untuk {symbol}: {e}")
+        return None
+
+    @staticmethod
+    def discard_pending_model(symbol: str, mode: str) -> bool:
+        """Menghapus file model pending dan infonya dari disk."""
+        try:
+            sym = str(symbol or "XAUUSD").upper()
+            mode_clean = str(mode).strip().lower()
+            p_model = ModelManager.get_pending_model_path(sym, mode_clean)
+            p_info = ModelManager.get_pending_info_path(sym, mode_clean)
+            if os.path.exists(p_model):
+                os.remove(p_model)
+            if os.path.exists(p_info):
+                os.remove(p_info)
+            logger.info(f"🗑️ [RESEARCHER-{sym}] File pending model & info ({mode_clean}) telah dibersihkan.")
+            return True
+        except Exception as e:
+            logger.warning(f"Gagal menghapus file pending ({mode}) untuk {symbol}: {e}")
+            return False
+
+    @staticmethod
+    def reset_all_models_and_metrics(symbol: str) -> list:
+        """
+        Menghapus seluruh file model (.pkl), candidate (.pkl), pending (.pkl),
+        dan seluruh metadata/metric (.json) di folder models/{symbol}/.
+        """
+        sym = str(symbol or "XAUUSD").upper()
+        deleted = []
+        d = ModelManager.get_model_dir(sym)
+        if os.path.exists(d):
+            for fname in os.listdir(d):
+                fpath = os.path.join(d, fname)
+                if os.path.isfile(fpath):
+                    try:
+                        os.remove(fpath)
+                        deleted.append(fname)
+                        logger.info(f"🗑️ [RESET - {sym}] Menghapus file: {fpath}")
+                    except Exception as e:
+                        logger.warning(f"Gagal menghapus file {fpath}: {e}")
+
+        # Hapus legacy XAUUSD jika ada di root models/
+        if sym == "XAUUSD":
+            for legacy in ["model_normal.pkl", "model_runner.pkl", "models_metadata.json", "candidate_normal_metadata.json", "candidate_runner_metadata.json"]:
+                lpath = os.path.join("models", legacy)
+                if os.path.exists(lpath) and os.path.isfile(lpath):
+                    try:
+                        os.remove(lpath)
+                        deleted.append(legacy)
+                        logger.info(f"🗑️ [RESET - {sym}] Menghapus legacy file: {lpath}")
+                    except Exception as e:
+                        logger.warning(f"Gagal menghapus legacy file {lpath}: {e}")
+        return deleted
+
+    @staticmethod
     def get_metadata_path(symbol: str) -> str:
         d = ModelManager.get_model_dir(symbol)
         return os.path.join(d, "models_metadata.json")
+
+    @staticmethod
+    def _clean_scorecard(card: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Menghapus array trade individual yang berat sebelum serialisasi metadata JSON."""
+        if not card or not isinstance(card, dict):
+            return card
+        cleaned = card.copy()
+        cleaned.pop("losing_records", None)
+        cleaned.pop("harvested_hard_negatives", None)
+        return cleaned
 
     @staticmethod
     def save_metadata(
@@ -58,6 +196,9 @@ class ModelManager:
 
             normal_card = normal_oos_scorecard if normal_oos_scorecard is not None else existing.get("normal", {}).get("oos_scorecard")
             runner_card = runner_oos_scorecard if runner_oos_scorecard is not None else existing.get("runner", {}).get("oos_scorecard")
+
+            normal_card = ModelManager._clean_scorecard(normal_card)
+            runner_card = ModelManager._clean_scorecard(runner_card)
 
             meta = {
                 "symbol": sym,
@@ -95,7 +236,7 @@ class ModelManager:
 
     @staticmethod
     def save_oos_scorecard(symbol: str, mode: str, scorecard: Dict[str, Any]) -> bool:
-        """Menyimpan atau memperbarui OOS scorecard ke models_metadata.json."""
+        """Menyimpan atau memperbarui OOS scorecard ke models_metadata.json (sanitized)."""
         try:
             sym = str(symbol or "XAUUSD").upper()
             meta_path = ModelManager.get_metadata_path(sym)
@@ -107,14 +248,15 @@ class ModelManager:
                 except Exception:
                     meta = {}
 
+            clean_card = ModelManager._clean_scorecard(scorecard)
             meta["symbol"] = sym
             mode_clean = str(mode).strip().lower()
             if mode_clean not in meta:
                 meta[mode_clean] = {}
-            meta[mode_clean]["oos_scorecard"] = scorecard
+            meta[mode_clean]["oos_scorecard"] = clean_card
             if "oos_scorecard" not in meta:
                 meta["oos_scorecard"] = {}
-            meta["oos_scorecard"][mode_clean] = scorecard
+            meta["oos_scorecard"][mode_clean] = clean_card
 
             os.makedirs(os.path.dirname(meta_path), exist_ok=True)
             with open(meta_path, "w") as f:
@@ -151,6 +293,61 @@ class ModelManager:
         except Exception as e:
             logger.error(f"Failed to save models for {symbol}: {e}")
             return False
+
+    @staticmethod
+    def save_candidate_model(
+        symbol: str,
+        mode: str,
+        model: Any,
+        scorecard: Optional[Dict[str, Any]] = None,
+        features: Optional[list] = None
+    ) -> bool:
+        """
+        Menyimpan checkpoint model yang belum lolos OOS Fit & Proper Test sebagai model kandidat.
+        Model ini sangat bernilai untuk dijadikan bobot dasar (init_model) pada incremental training berikutnya.
+        """
+        try:
+            sym = str(symbol or "XAUUSD").upper()
+            mode_clean = str(mode).strip().lower()
+            path_candidate = ModelManager.get_candidate_model_path(sym, mode_clean)
+            joblib.dump(model, path_candidate)
+
+            # Catat metadata kandidat
+            cand_meta_path = os.path.join(ModelManager.get_model_dir(sym), f"candidate_{mode_clean}_metadata.json")
+            cand_meta = {
+                "symbol": sym,
+                "mode": mode_clean,
+                "saved_at": scorecard.get("evaluated_at") if scorecard else None,
+                "metrics": scorecard.get("metrics", {}) if scorecard else {},
+                "reasons": scorecard.get("reasons", []) if scorecard else [],
+                "threshold_used": scorecard.get("threshold_used", 0.0) if scorecard else 0.0,
+                "features": features or []
+            }
+            with open(cand_meta_path, "w") as f:
+                json.dump(cand_meta, f, indent=2)
+
+            logger.info(f"💾 [RESEARCHER-{sym}] Checkpoint model kandidat ({mode_clean}) tersimpan di {path_candidate} untuk incremental training.")
+            return True
+        except Exception as e:
+            logger.error(f"Gagal menyimpan model kandidat ({mode}) untuk {symbol}: {e}")
+            return False
+
+    @staticmethod
+    def load_candidate_model(symbol: str, mode: str) -> Optional[Any]:
+        """
+        Memuat checkpoint model kandidat yang tersimpan jika ada.
+        """
+        try:
+            sym = str(symbol or "XAUUSD").upper()
+            mode_clean = str(mode).strip().lower()
+            path_candidate = ModelManager.get_candidate_model_path(sym, mode_clean)
+            if os.path.exists(path_candidate) and os.path.getsize(path_candidate) > 100:
+                model = joblib.load(path_candidate)
+                logger.info(f"📂 [RESEARCHER-{sym}] Berhasil memuat model kandidat ({mode_clean}) dari {path_candidate}")
+                return model
+        except Exception as e:
+            logger.warning(f"Gagal memuat model kandidat ({mode}) untuk {symbol}: {e}")
+        return None
 
     @staticmethod
     def load_models(symbol: str) -> Dict[str, Any]:

@@ -12,6 +12,8 @@ from typing import Optional
 import os
 import json
 from pathlib import Path
+from agents.research.explainer import extract_feature_importance
+from agents.research.model_manager import ModelManager, sanitize_json_floats
 
 class ModeRequest(BaseModel):
     mode: str
@@ -34,9 +36,25 @@ class TrainRequest(BaseModel):
 class ResetModelRequest(BaseModel):
     symbol: Optional[str] = "XAUUSD"
 
+class ConfirmSaveModelRequest(BaseModel):
+    symbol: Optional[str] = "XAUUSD"
+    mode: str = "normal" # "normal" or "runner"
+    action: str = "save" # "save" or "discard"
+
 class MicroTrainRequest(BaseModel):
     mode: str = "all" # "normal", "runner", or "all"
     symbol: Optional[str] = "XAUUSD"
+
+class QueueTaskItem(BaseModel):
+    id: Optional[str] = None
+    symbol: str = "XAUUSD"
+    mode: str # "normal" or "runner"
+    type: str # "full" or "incremental"
+
+class QueueTrainRequest(BaseModel):
+    tasks: list[QueueTaskItem]
+    post_completion_action: str = "idle" # "idle" or "force_live"
+    auto_apply: bool = True # Automatically apply model to live if passed OOS / completed
 
 @router.get("/api/strategies/status")
 async def get_strategy_model_status(symbol: Optional[str] = "XAUUSD"):
@@ -71,12 +89,24 @@ async def get_strategy_model_status(symbol: Optional[str] = "XAUUSD"):
     is_normal_active = bot.supervisor.is_normal_valid(sym)
     is_runner_active = bot.supervisor.is_runner_valid(sym)
 
-    return {
+    # Deteksi pending model yang menunggu konfirmasi penyimpanan dari user
+    pending_models = {}
+    for m in ["normal", "runner"]:
+        p_info = None
+        if is_same_pair and hasattr(bot.researcher, "pending_training") and m in bot.researcher.pending_training:
+            p_info = bot.researcher.pending_training[m].get("info")
+        if not p_info:
+            p_info = ModelManager.get_pending_info(sym, m)
+        if p_info:
+            pending_models[m] = p_info
+
+    res = {
         "status": "success",
         "symbol": sym,
         "is_normal_active": is_normal_active,
         "is_runner_active": is_runner_active,
         "all_brains_active": is_normal_active and is_runner_active,
+        "pending_models": pending_models,
         "models_status": {
             "normal": {
                 "trained": normal_trained,
@@ -84,7 +114,8 @@ async def get_strategy_model_status(symbol: Optional[str] = "XAUUSD"):
                 "status": "LIVE/LAYAK" if is_normal_active else "IDLE/QUARANTINE",
                 "is_training": bot.researcher.is_training_normal if is_same_pair else False,
                 "last_accuracy": last_acc_normal,
-                "last_trained": last_train_normal
+                "last_trained": last_train_normal,
+                "has_pending": "normal" in pending_models
             },
             "runner": {
                 "trained": runner_trained,
@@ -92,10 +123,12 @@ async def get_strategy_model_status(symbol: Optional[str] = "XAUUSD"):
                 "status": "LIVE/LAYAK" if is_runner_active else "IDLE/QUARANTINE",
                 "is_training": bot.researcher.is_training_runner if is_same_pair else False,
                 "last_accuracy": last_acc_runner,
-                "last_trained": last_train_runner
+                "last_trained": last_train_runner,
+                "has_pending": "runner" in pending_models
             }
         }
     }
+    return sanitize_json_floats(res)
 
 @router.post("/api/strategies/toggle-brain")
 async def toggle_brain(req: ToggleBrainRequest):
@@ -184,73 +217,28 @@ async def train_model(req: TrainRequest):
                 
             total_test_chunks, test_generator = bot.data_miner.load_test_chunks(chunk_size=100000, symbol=target_symbol)
 
+            bot.researcher._current_train_type = req.type
+
             if req.type == 'full':
                 bot.researcher.features = []
-                if req.mode == 'normal':
-                    bot.researcher.model_normal = None
-                    logging.info(f"[FULL TRAIN - {target_symbol}] Model Normal di-reset. Melatih dari awal...")
-                elif req.mode == 'runner':
-                    bot.researcher.model_runner = None
-                    logging.info(f"[FULL TRAIN - {target_symbol}] Model Runner di-reset. Melatih dari awal...")
+                logging.info(f"[FULL TRAIN - {target_symbol}] Mode {req.mode.upper()} akan dilatih ulang dari awal dengan Optuna...")
 
             if req.mode == 'normal':
                 bot.researcher.is_training_normal = True
                 try:
-                    result = bot.researcher.train_normal_mode(data_generator, total_chunks=total_chunks, data_miner=bot.data_miner)
-                    if result:
-                        if test_generator and total_test_chunks > 0:
-                            accuracy = bot.gatekeeper.validate_model('normal', test_generator, total_test_chunks)
-                            bot.researcher.last_accuracy_normal = float(accuracy)
-                            bot.researcher.last_trained_normal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            bot.researcher.save_metadata()
-                            norm_metrics = bot.gatekeeper.last_metrics.get('normal', {})
-                            pf = norm_metrics.get('profit_factor', 0.0)
-                            exp = norm_metrics.get('expectancy', 0.0)
-                            # Kriteria Kelulusan Normal Mode (RR 1:2.0, Breakeven 33.3%):
-                            # 1. Target Utama: Win Rate >= 50.0%
-                            # 2. Standar Kuantitatif Institusional: Win Rate >= 47.0% DENGAN Profit Factor >= 1.60 dan Expectancy >= +0.30R
-                            if accuracy >= 0.50:
-                                bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
-                                logging.info(f"✅ Model Normal ({target_symbol}) lulus validasi (Win Rate: {accuracy*100:.2f}% >= 50%). Supervisor Normal Mode = VALID.")
-                            elif accuracy >= 0.47 and pf >= 1.60 and exp >= 0.30:
-                                bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
-                                logging.info(f"✅ Model Normal ({target_symbol}) lulus validasi institusional (Win Rate: {accuracy*100:.2f}%, PF: {pf:.2f} >= 1.6, Exp: {exp:+.2f}R pada RR 1:2). Supervisor Normal Mode = VALID.")
-                            else:
-                                bot.supervisor.set_model_validity(False, bot.supervisor.is_runner_valid())
-                                logging.warning(f"❌ Model Normal ({target_symbol}) gagal validasi (Win Rate: {accuracy*100:.2f}% < 50%, PF: {pf:.2f}). Supervisor Normal Mode = QUARANTINE.")
-                        else:
-                            bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
-                            bot.researcher.last_trained_normal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            bot.researcher.save_metadata()
-                            logging.info(f"✅ Model Normal ({target_symbol}) dilatih tanpa OOS. Supervisor Normal Mode = VALID.")
+                    result = bot.researcher.train_normal_mode(data_generator, total_chunks=total_chunks, data_miner=bot.data_miner, train_type=req.type)
+                    logging.info(f"✅ Pelatihan Normal ({req.type}) selesai. Hasil tersimpan sebagai PENDING model menunggu konfirmasi dialog.")
                 finally:
                     bot.researcher.is_training_normal = False
             elif req.mode == 'runner':
                 bot.researcher.is_training_runner = True
                 try:
-                    result = bot.researcher.train_runner_mode(data_generator, total_chunks=total_chunks, data_miner=bot.data_miner)
-                    if result:
-                        if test_generator and total_test_chunks > 0:
-                            accuracy = bot.gatekeeper.validate_model('runner', test_generator, total_test_chunks)
-                            bot.researcher.last_accuracy_runner = float(accuracy)
-                            bot.researcher.last_trained_runner = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            bot.researcher.save_metadata()
-                            RUNNER_MIN_WIN_RATE = 0.25
-                            if accuracy >= RUNNER_MIN_WIN_RATE:
-                                bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), True)
-                                logging.info(f"✅ Model Runner lulus validasi (Win Rate: {accuracy*100:.2f}% >= {RUNNER_MIN_WIN_RATE*100:.0f}% pada RR 1:5). Supervisor Runner Mode = VALID.")
-                            else:
-                                bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), False)
-                                logging.warning(f"❌ Model Runner gagal validasi (Win Rate: {accuracy*100:.2f}% < {RUNNER_MIN_WIN_RATE*100:.0f}%). Supervisor Runner Mode = QUARANTINE.")
-                        else:
-                            bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), True)
-                            bot.researcher.last_trained_runner = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            bot.researcher.save_metadata()
-                            logging.info("✅ Model Runner dilatih tanpa OOS. Supervisor Runner Mode = VALID.")
+                    result = bot.researcher.train_runner_mode(data_generator, total_chunks=total_chunks, data_miner=bot.data_miner, train_type=req.type)
+                    logging.info(f"✅ Pelatihan Runner ({req.type}) selesai. Hasil tersimpan sebagai PENDING model menunggu konfirmasi dialog.")
                 finally:
                     bot.researcher.is_training_runner = False
 
-            logging.info(f"✅ Pelatihan AI ({req.type}) untuk {req.mode} Mode selesai.")
+            logging.info(f"✅ Pelatihan AI ({req.type}) untuk {req.mode} Mode ({target_symbol}) selesai diproses.")
         except Exception as e:
             import traceback
             logging.error(f"Training failed: {e}")
@@ -348,54 +336,69 @@ async def trigger_validate(req: ValidateRequest = None):
     threading.Thread(target=_validate_task, daemon=True).start()
     return {"status": "success", "message": f"Validasi OOS {target_symbol} - {target_mode.upper()} dimulai di background. Cek Logs untuk progress."}
 
+@router.post("/api/strategies/confirm-save")
+async def confirm_save_model(req: ConfirmSaveModelRequest):
+    """
+    Konfirmasi dialog penyimpanan checkpoint model:
+    - 'save': Menimpa file .pkl lama dengan model baru, memperbarui metadata & scorecard, serta mengaktifkan model.
+    - 'discard': Membuang model baru tanpa menyentuh file .pkl lama.
+    """
+    sym = (req.symbol or getattr(bot.researcher, "symbol", "XAUUSD")).upper()
+    mode = req.mode.lower()
+    action = req.action.lower()
+
+    if getattr(bot.researcher, "symbol", "XAUUSD").upper() != sym:
+        bot.researcher.set_symbol(sym)
+
+    if action == "save":
+        success, msg, info = bot.researcher.apply_pending_model(mode)
+        if success:
+            passed = info.get("passed_oos", False)
+            if mode == "normal":
+                bot.supervisor.set_model_validity(passed, bot.supervisor.is_runner_valid(sym), symbol=sym)
+            else:
+                bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(sym), passed, symbol=sym)
+            return {
+                "status": "success",
+                "symbol": sym,
+                "mode": mode,
+                "action": "save",
+                "message": msg,
+                "info": info
+            }
+        else:
+            return {"status": "error", "message": msg}
+    elif action == "discard":
+        success, msg = bot.researcher.discard_pending_model(mode)
+        return {
+            "status": "success" if success else "error",
+            "symbol": sym,
+            "mode": mode,
+            "action": "discard",
+            "message": msg
+        }
+    else:
+        return {"status": "error", "message": f"Action '{action}' tidak dikenal. Gunakan 'save' atau 'discard'."}
+
 @router.post("/api/strategies/reset-models")
 async def reset_models(req: Optional[ResetModelRequest] = None):
-    """Menghapus checkpoint model (.pkl) untuk pair bersangkutan, mengosongkan tabel hard_negatives,
-    dan mengembalikan status model ke awal (Fresh Quantitative Baseline)."""
-    import os
-    from pathlib import Path
-    from database import reset_ai_trade_history
+    """
+    Reset Otak AI:
+    Menghapus SELURUH file .pkl (utama, kandidat, pending), SEMUA metadata dan metric JSON di models/{sym}/,
+    menghapus semua riwayat metric scorecard di database untuk pair ini,
+    mengosongkan tabel hard_negatives, dan mengembalikan in-memory state ke Fresh Quantitative Baseline.
+    """
+    from database import reset_ai_trade_history, delete_scorecards_by_symbol
 
     sym = (req.symbol if req and req.symbol else getattr(bot.researcher, "symbol", "XAUUSD")).upper()
 
-    deleted = []
-    backend_dir = Path(__file__).resolve().parent.parent.parent
-    candidate_paths = [
-        Path("models") / sym / "model_normal.pkl",
-        Path("models") / sym / "model_runner.pkl",
-        Path("models") / sym / "models_metadata.json",
-        backend_dir / "models" / sym / "model_normal.pkl",
-        backend_dir / "models" / sym / "model_runner.pkl",
-        backend_dir / "models" / sym / "models_metadata.json",
-    ]
-    if sym == "XAUUSD":
-        candidate_paths.extend([
-            Path("models/model_normal.pkl"),
-            Path("models/model_runner.pkl"),
-            backend_dir / "models" / "model_normal.pkl",
-            backend_dir / "models" / "model_runner.pkl",
-        ])
+    # 1. Hapus SELURUH file model (.pkl), candidate, pending, dan metadata/scorecard JSON di folder models/{sym}/
+    deleted_files = ModelManager.reset_all_models_and_metrics(sym)
 
-    for p in candidate_paths:
-        if p.exists():
-            try:
-                p.unlink()
-                deleted.append(str(p.name))
-                logging.info(f"🗑️ [API RESET - {sym}] Berhasil menghapus file model: {p}")
-            except Exception as e:
-                logging.warning(f"Gagal menghapus {p}: {e}")
+    # 2. Hapus seluruh riwayat metric scorecard di database untuk pair ini
+    cleared_scorecards = delete_scorecards_by_symbol(sym)
 
-    # Reset in-memory state Researcher & Supervisor jika sedang mengelola pair ini
-    if getattr(bot.researcher, "symbol", "XAUUSD").upper() == sym:
-        bot.researcher.model_normal = None
-        bot.researcher.model_runner = None
-        bot.researcher.last_accuracy_normal = 0.0
-        bot.researcher.last_accuracy_runner = 0.0
-        bot.researcher.last_trained_normal = "Never"
-        bot.researcher.last_trained_runner = "Never"
-        bot.supervisor.set_model_validity(False, False)
-
-    # Truncate tabel hard_negatives
+    # 3. Truncate tabel hard_negatives
     cleared_hn = 0
     try:
         cleared_hn = reset_ai_trade_history(categories=["hard_negatives"])
@@ -403,11 +406,32 @@ async def reset_models(req: Optional[ResetModelRequest] = None):
     except Exception as e_hn:
         logging.warning(f"Gagal membersihkan hard_negatives: {e_hn}")
 
+    # 4. Reset in-memory state Researcher & Supervisor jika sedang mengelola pair ini
+    if getattr(bot.researcher, "symbol", "XAUUSD").upper() == sym:
+        bot.researcher.model_normal = None
+        bot.researcher.model_runner = None
+        bot.researcher.features = []
+        bot.researcher.last_accuracy_normal = 0.0
+        bot.researcher.last_accuracy_runner = 0.0
+        bot.researcher.last_trained_normal = "Never"
+        bot.researcher.last_trained_runner = "Never"
+        bot.researcher.optimal_threshold_normal = 0.54
+        bot.researcher.optimal_threshold_runner = 0.54
+        bot.researcher.oos_scorecard = {"normal": None, "runner": None}
+        bot.researcher.pending_training = {}
+        bot.supervisor.set_model_validity(False, False, symbol=sym)
+        bot.supervisor.isolate_quarantine("all", symbol=sym)
+
+    # 5. Reset gatekeeper metrics
+    if hasattr(bot, "gatekeeper"):
+        bot.gatekeeper.last_metrics = {"normal": {}, "runner": {}}
+
     return {
         "status": "success",
         "symbol": sym,
-        "message": f"Fresh Quantitative Baseline ({sym}) aktif: Seluruh model (.pkl), metadata di models/{sym}/ berhasil di-reset.",
-        "deleted_files": list(set(deleted)),
+        "message": f"Fresh Quantitative Baseline ({sym}) aktif: Seluruh file .pkl, metadata, dan metrik scorecard di database berhasil dihapus bersih.",
+        "deleted_files": deleted_files,
+        "cleared_scorecards": cleared_scorecards,
         "cleared_hard_negatives": cleared_hn,
     }
 
@@ -522,7 +546,306 @@ async def get_latest_scorecard(symbol: Optional[str] = "XAUUSD"):
 
     from database import get_latest_scorecards
     return get_latest_scorecards(symbol=canonical_symbol)
+@router.get("/api/strategies/features")
+async def get_feature_importance(
+    symbol: Optional[str] = "XAUUSD",
+    mode: Optional[str] = "normal",
+    top_n: int = 10,
+    importance_type: str = "gain"
+):
+    """
+    TD#1: Mengembalikan Top-N Feature Importance (Gain / Split) dari model yang sedang aktif.
+    Digunakan oleh halaman Strategi (Dapur AI) untuk visualisasi bar chart transparansi AI.
+    """
+    sym = (symbol or "XAUUSD").upper()
+    mode_clean = (mode or "normal").lower()
+    imp_type = (importance_type or "gain").lower()
 
+    # Muat model dari in-memory researcher atau dari disk
+    is_same_pair = (getattr(bot.researcher, "symbol", "XAUUSD").upper() == sym)
+    if is_same_pair:
+        model = bot.researcher.model_normal if mode_clean == "normal" else bot.researcher.model_runner
+        features = list(getattr(bot.researcher, "features", []) or [])
+    else:
+        loaded = ModelManager.load_models(sym)
+        model = loaded.get("model_normal") if mode_clean == "normal" else loaded.get("model_runner")
+        features = loaded.get("features", [])
+
+    if model is None:
+        return {
+            "status": "error",
+            "message": f"Model {mode_clean.upper()} untuk {sym} belum dilatih. Jalankan Full Training terlebih dahulu.",
+            "features": []
+        }
+
+    importance_list = extract_feature_importance(
+        model=model,
+        features=features or None,
+        top_n=top_n,
+        importance_type=imp_type
+    )
+
+    return {
+        "status": "success",
+        "symbol": sym,
+        "mode": mode_clean,
+        "importance_type": imp_type,
+        "top_n": len(importance_list),
+        "features": importance_list
+    }
+
+# =========================================================================
+# AI INCUBATOR: BATCH TRAINING QUEUE PIPELINE
+# =========================================================================
+
+import uuid
+
+class TrainingQueueManager:
+    """
+    Manajer Antrean Pelatihan Batch (Training Queue Pipeline).
+    Mengeksekusi serangkaian tugas pelatihan AI (Full/Incremental) secara sekuensial (FIFO),
+    dengan pelacakan progres per-tugas, opsi auto-apply checkpoint model yang lulus OOS,
+    dan eksekusi aksi otomatis pasca antrean (Kembali IDLE atau FORCE LIVE).
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.tasks: list[dict] = []
+        self.is_running: bool = False
+        self.current_task_id: Optional[str] = None
+        self.post_completion_action: str = "idle" # "idle" or "force_live"
+        self.auto_apply: bool = True
+        self.cancel_requested: bool = False
+        self.started_at: Optional[str] = None
+        self.completed_at: Optional[str] = None
+
+    def get_status(self) -> dict:
+        with self._lock:
+            total = len(self.tasks)
+            completed_count = sum(1 for t in self.tasks if t.get("status") in ["completed", "failed", "cancelled"])
+            return {
+                "status": "success",
+                "is_running": self.is_running,
+                "current_task_id": self.current_task_id,
+                "post_completion_action": self.post_completion_action,
+                "auto_apply": self.auto_apply,
+                "total_tasks": total,
+                "completed_tasks": completed_count,
+                "started_at": self.started_at,
+                "completed_at": self.completed_at,
+                "tasks": [dict(t) for t in self.tasks]
+            }
+
+    def cancel_queue(self) -> dict:
+        with self._lock:
+            if not self.is_running:
+                for t in self.tasks:
+                    if t.get("status") == "pending":
+                        t["status"] = "cancelled"
+                return {"status": "success", "message": "Antrean telah dibersihkan."}
+            self.cancel_requested = True
+            for t in self.tasks:
+                if t.get("status") == "pending":
+                    t["status"] = "cancelled"
+            return {"status": "success", "message": "Permintaan pembatalan antrean berhasil diajukan."}
+
+    def start_queue(self, task_items: list[QueueTaskItem], post_completion_action: str = "idle", auto_apply: bool = True) -> tuple[bool, str]:
+        with self._lock:
+            if self.is_running:
+                return False, "Antrean training saat ini masih berjalan. Batalkan atau tunggu hingga selesai."
+            if not task_items:
+                return False, "Daftar tugas antrean kosong. Tambahkan minimal 1 tugas latihan."
+
+            self.tasks = []
+            for item in task_items:
+                self.tasks.append({
+                    "id": item.id or str(uuid.uuid4())[:8],
+                    "symbol": item.symbol.upper(),
+                    "mode": item.mode.lower(),
+                    "type": item.type.lower(),
+                    "status": "pending",
+                    "progress": "Menunggu antrean...",
+                    "started_at": None,
+                    "completed_at": None,
+                    "accuracy": 0.0,
+                    "passed_oos": False,
+                    "error": None
+                })
+            self.is_running = True
+            self.cancel_requested = False
+            self.post_completion_action = post_completion_action.lower()
+            self.auto_apply = auto_apply
+            self.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.completed_at = None
+
+        thread = threading.Thread(target=self._worker, daemon=True)
+        thread.start()
+        return True, f"Antrean training dengan {len(self.tasks)} tugas berhasil diluncurkan."
+
+    def _worker(self):
+        try:
+            for task in self.tasks:
+                with self._lock:
+                    if self.cancel_requested:
+                        if task["status"] == "pending":
+                            task["status"] = "cancelled"
+                        continue
+                    self.current_task_id = task["id"]
+                    task["status"] = "running"
+                    task["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    task["progress"] = f"Melatih {task['symbol']} {task['mode'].upper()} ({task['type'].upper()})..."
+
+                sym = task["symbol"]
+                mode = task["mode"]
+                train_type = task["type"]
+
+                logging.info(f"🚀 [QUEUE WORKER] Memulai Task {task['id']}: {sym} - {mode.upper()} ({train_type.upper()})...")
+
+                try:
+                    bot.data_miner.set_symbol(sym)
+                    bot.researcher.set_symbol(sym)
+
+                    total_chunks, data_generator = bot.data_miner.load_train_chunks(
+                        chunk_size=100000, mode=mode, symbol=sym
+                    )
+
+                    if total_chunks == 0 or data_generator is None:
+                        raise ValueError(f"Database {bot.data_miner.table_name} kosong atau tidak ada candle data.")
+
+                    bot.researcher._current_train_type = train_type
+                    if train_type == "full":
+                        bot.researcher.features = []
+
+                    if mode == "normal":
+                        bot.researcher.is_training_normal = True
+                        try:
+                            bot.researcher.train_normal_mode(
+                                data_generator,
+                                total_chunks=total_chunks,
+                                data_miner=bot.data_miner,
+                                train_type=train_type
+                            )
+                        finally:
+                            bot.researcher.is_training_normal = False
+                    else:
+                        bot.researcher.is_training_runner = True
+                        try:
+                            bot.researcher.train_runner_mode(
+                                data_generator,
+                                total_chunks=total_chunks,
+                                data_miner=bot.data_miner,
+                                train_type=train_type
+                            )
+                        finally:
+                            bot.researcher.is_training_runner = False
+
+                    p_info = bot.researcher.pending_training.get(mode, {}).get("info", {})
+                    acc = float(p_info.get("candidate_accuracy", 0.0))
+                    passed = bool(p_info.get("passed_oos", False))
+
+                    with self._lock:
+                        task["accuracy"] = acc
+                        task["passed_oos"] = passed
+
+                    if self.auto_apply:
+                        apply_success, apply_msg, _ = bot.researcher.apply_pending_model(mode)
+                        if apply_success:
+                            if mode == "normal":
+                                bot.supervisor.set_model_validity(passed, bot.supervisor.is_runner_valid(sym), symbol=sym)
+                            else:
+                                bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(sym), passed, symbol=sym)
+                            logging.info(f"✅ [QUEUE WORKER] Model {mode} ({sym}) auto-applied: {apply_msg}")
+
+                    with self._lock:
+                        task["status"] = "completed"
+                        task["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        task["progress"] = f"Selesai! Win Rate OOS: {acc*100:.1f}% ({'LULUS' if passed else 'TIDAK LULUS'})"
+
+                    logging.info(f"✅ [QUEUE WORKER] Task {task['id']} selesai: {sym} {mode} - Acc: {acc*100:.1f}%.")
+
+                except Exception as ex:
+                    import traceback
+                    logging.error(f"❌ [QUEUE WORKER] Task {task['id']} gagal: {ex}")
+                    logging.error(traceback.format_exc())
+                    with self._lock:
+                        task["status"] = "failed"
+                        task["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        task["error"] = str(ex)
+                        task["progress"] = f"Gagal: {str(ex)[:120]}"
+
+            with self._lock:
+                self.is_running = False
+                self.current_task_id = None
+                self.completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                final_action = self.post_completion_action
+                was_cancelled = self.cancel_requested
+
+            # Eksekusi aksi pasca antrean (Post Completion Action)
+            if not was_cancelled:
+                if final_action == "force_live":
+                    logging.info("🚀 [TRAINING QUEUE] Seluruh tugas selesai. Mengeksekusi FORCE LIVE MODE...")
+                    bot.supervisor.force_live_mode("all")
+                    bot.is_live = True
+                    bot.active_since = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    bot.supervisor.state = "live"
+                    if not bot.mt5_connected:
+                        try:
+                            bot.connect_mt5()
+                        except Exception as e_mt5:
+                            logging.warning(f"Gagal menghubungkan MT5: {e_mt5}")
+                    import asyncio
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running() and (bot.executor_task is None or bot.executor_task.done()):
+                            bot.executor_task = loop.create_task(bot.executor.monitor_market())
+                    except Exception as e_loop:
+                        logging.warning(f"Executor loop dispatch info: {e_loop}")
+                else:
+                    logging.info("⏸️ [TRAINING QUEUE] Seluruh tugas selesai. Sistem standby dalam mode IDLE.")
+                    bot.is_live = False
+                    bot.active_since = None
+                    bot.supervisor.state = "idle"
+                    bot.executor.running = False
+                    if bot.executor_task:
+                        try:
+                            bot.executor_task.cancel()
+                        except Exception:
+                            pass
+        except Exception as e_fatal:
+            logging.error(f"[QUEUE WORKER FATAL ERROR] {e_fatal}")
+            with self._lock:
+                self.is_running = False
+                self.current_task_id = None
+
+training_queue_manager = TrainingQueueManager()
+
+@router.post("/api/strategies/queue-train")
+async def trigger_queue_train(req: QueueTrainRequest):
+    """
+    Menjalankan antrean pelatihan AI (Batch Training Queue).
+    Menerima daftar tugas (mode, type, symbol) dan opsi pasca antrean ('idle' atau 'force_live').
+    """
+    success, msg = training_queue_manager.start_queue(
+        task_items=req.tasks,
+        post_completion_action=req.post_completion_action,
+        auto_apply=req.auto_apply
+    )
+    if not success:
+        return {"status": "error", "message": msg}
+    return {
+        "status": "success",
+        "message": msg,
+        "queue_status": training_queue_manager.get_status()
+    }
+
+@router.get("/api/strategies/queue-status")
+async def get_queue_status():
+    """Mengembalikan status langsung dari Training Queue Pipeline."""
+    return training_queue_manager.get_status()
+
+@router.post("/api/strategies/queue-cancel")
+async def cancel_queue_training():
+    """Membatalkan seluruh antrean tugas latihan yang tersisa."""
+    return training_queue_manager.cancel_queue()
 
 
 

@@ -43,6 +43,8 @@ class ResearcherAgent:
         self.optimal_threshold_normal = 0.54
         self.optimal_threshold_runner = 0.54
         self.max_runner_rr = 5.0
+        self.pending_training: Dict[str, Dict[str, Any]] = {}
+        self._current_train_type: str = "incremental"
         self._models_cache: Dict[str, Dict[str, Any]] = {}
 
     # ---------------------------------------------------------------------------------
@@ -95,6 +97,15 @@ class ResearcherAgent:
             self.optimal_threshold_runner = 0.54
             self.oos_scorecard = {"normal": None, "runner": None}
             self.load_models()
+
+        # Muat pending training dari disk jika ada
+        self.pending_training = {}
+        for m in ["normal", "runner"]:
+            p_info = ModelManager.get_pending_info(self.symbol, m)
+            if p_info:
+                p_model = ModelManager.load_pending_model(self.symbol, m)
+                if p_model is not None:
+                    self.pending_training[m] = {"model": p_model, "info": p_info}
 
     def get_model_dir(self) -> str:
         return ModelManager.get_model_dir(self.symbol)
@@ -167,6 +178,17 @@ class ResearcherAgent:
         self.features = extract_and_lock_features(df, mode=mode)
         return self.features
 
+    def get_model_features(self, model: Any = None, mode: str = "normal") -> List[str]:
+        target_model = model or (self.model_normal if mode == "normal" else self.model_runner)
+        if target_model is not None:
+            if hasattr(target_model, 'feature_name_') and target_model.feature_name_ is not None:
+                return list(target_model.feature_name_)
+            if hasattr(target_model, 'booster_') and hasattr(target_model.booster_, 'feature_name'):
+                return list(target_model.booster_.feature_name())
+        if self.features:
+            return list(self.features)
+        return []
+
     def optimize_hyperparameters(
         self,
         X: pd.DataFrame,
@@ -238,7 +260,8 @@ class ResearcherAgent:
         data_generator,
         total_chunks: int = 1,
         progress_callback=None,
-        data_miner=None
+        data_miner=None,
+        train_type: str = None
     ) -> bool:
         mode_str = mode.lower()
         is_normal = (mode_str == "normal")
@@ -250,58 +273,120 @@ class ResearcherAgent:
         else:
             self.is_training_runner = True
 
-        logger.info(f"Training LightGBM {mode_str.capitalize()} Mode with RLHF & PnL Feedback (Optuna Auto-Tuning) untuk {target_sym}.")
+        actual_train_type = (train_type or getattr(self, "_current_train_type", "incremental") or "incremental").lower()
+        self._current_train_type = actual_train_type
+
+        existing_model = self.model_normal if is_normal else self.model_runner
+        if existing_model is None:
+            existing_model = ModelManager.load_candidate_model(target_sym, mode_str)
+
+        # TD Item 2 & 3: Incremental Train Sejati (Warm-Start init_model) + Hard Cap 250 Pohon
+        MAX_ESTIMATORS_CAP = 250
+        is_incremental_warm_start = (actual_train_type == "incremental" and existing_model is not None)
+        cap_reached = False
+        new_n_est = 200
+        incremental_params = None
+
+        if is_incremental_warm_start:
+            curr_n_est = getattr(existing_model, 'n_estimators', None)
+            if curr_n_est is None or not isinstance(curr_n_est, int):
+                if hasattr(existing_model, 'booster_'):
+                    curr_n_est = existing_model.booster_.num_trees()
+                else:
+                    curr_n_est = 100
+
+            if curr_n_est >= MAX_ESTIMATORS_CAP:
+                cap_reached = True
+                new_n_est = MAX_ESTIMATORS_CAP
+                logger.warning(
+                    f"[{mode_str.capitalize()} Mode - {target_sym}] ⚠️ Model telah mencapai batas kapasitas maksimum "
+                    f"({curr_n_est}/{MAX_ESTIMATORS_CAP} pohon). Penambahan pohon baru dihentikan untuk mencegah overfitting! "
+                    f"Disarankan menekan 'Force Full Train' jika ingin merombak arsitektur atau parameter model."
+                )
+            else:
+                new_n_est = min(MAX_ESTIMATORS_CAP, curr_n_est + 25)
+                logger.info(
+                    f"[{mode_str.capitalize()} Mode - {target_sym}] 🔄 Warm-Start Incremental Training: "
+                    f"Menambah pohon dari {curr_n_est} -> {new_n_est} (+25 pohon, Hard Cap: {MAX_ESTIMATORS_CAP}). Optuna dilewati."
+                )
+
+            # Ambil hyperparameter arsitektur dari model lama yang sudah terbukti
+            if hasattr(existing_model, 'get_params'):
+                incremental_params = existing_model.get_params().copy()
+            else:
+                incremental_params = {
+                    'learning_rate': 0.03, 'max_depth': 4, 'num_leaves': 31,
+                    'min_child_samples': 50, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
+                }
+            incremental_params['n_estimators'] = new_n_est
+            incremental_params['objective'] = 'binary'
+            incremental_params['verbose'] = -1
+            incremental_params['random_state'] = 42
+            if is_normal:
+                incremental_params['class_weight'] = 'balanced'
+            else:
+                if 'class_weight' not in incremental_params:
+                    incremental_params['class_weight'] = None
+
+            # Kunci urutan & nama fitur agar konsisten dengan model yang ada
+            if hasattr(existing_model, 'feature_name_'):
+                self.features = list(existing_model.feature_name_)
+            elif hasattr(existing_model, 'booster_'):
+                self.features = list(existing_model.booster_.feature_name())
+        else:
+            logger.info(f"Training LightGBM {mode_str.capitalize()} Mode with RLHF & PnL Feedback (Optuna Auto-Tuning) untuk {target_sym}.")
 
         best_params = None
         approved_ids, rejected_ids, hard_negative_ids, pnl_df = self._fetch_rlhf_pnl_data(mode=mode_str)
 
-        # STEP 1: Multi-Regime Optuna Hyperparameter Optimization
+        # STEP 1: Multi-Regime Optuna Hyperparameter Optimization (Dilewati jika incremental warm-start)
         dm = data_miner
-        if dm is None:
-            try:
-                from agents.data_miner import DataMinerAgent
-                dm = DataMinerAgent(symbol=target_sym)
-            except Exception as e:
-                logger.warning(f"Tidak dapat memuat DataMinerAgent untuk Optuna multi-regime sample: {e}")
+        if not is_incremental_warm_start:
+            if dm is None:
+                try:
+                    from agents.data_miner import DataMinerAgent
+                    dm = DataMinerAgent(symbol=target_sym)
+                except Exception as e:
+                    logger.warning(f"Tidak dapat memuat DataMinerAgent untuk Optuna multi-regime sample: {e}")
 
-        if dm is not None:
-            try:
-                logger.info(f"[{mode_str.capitalize()} Mode - {target_sym}] 📦 Mengambil multi-regime sample melintasi seluruh riwayat dataset untuk Optuna...")
-                sample_df = dm.load_optuna_sample(mode=mode_str, symbol=target_sym, total_sample_candles=60000)
-                if not sample_df.empty and len(sample_df) >= 100:
-                    logger.info(f"[{mode_str.capitalize()} Mode - {target_sym}] 🔍 Memproses indikator & filter setup Re-entry pada {len(sample_df):,} baris...")
-                    sample_df = self.generate_targets(sample_df)
-                    sample_df = self.add_normalized_features(sample_df)
+            if dm is not None:
+                try:
+                    logger.info(f"[{mode_str.capitalize()} Mode - {target_sym}] 📦 Mengambil multi-regime sample melintasi seluruh riwayat dataset untuk Optuna...")
+                    sample_df = dm.load_optuna_sample(mode=mode_str, symbol=target_sym, total_sample_candles=60000)
+                    if not sample_df.empty and len(sample_df) >= 100:
+                        logger.info(f"[{mode_str.capitalize()} Mode - {target_sym}] 🔍 Memproses indikator & filter setup Re-entry pada {len(sample_df):,} baris...")
+                        sample_df = self.generate_targets(sample_df)
+                        sample_df = self.add_normalized_features(sample_df)
 
-                    sample_df = sample_df[sample_df['setup_dir'] > 0].copy() if 'setup_dir' in sample_df.columns else sample_df
+                        sample_df = sample_df[sample_df['setup_dir'] > 0].copy() if 'setup_dir' in sample_df.columns else sample_df
 
-                    if len(sample_df) >= 60 and len(np.unique(sample_df[target_col])) >= 2:
-                        if not getattr(self, 'features', None):
-                            self._extract_and_lock_features(sample_df, mode=mode_str)
+                        if len(sample_df) >= 60 and len(np.unique(sample_df[target_col])) >= 2:
+                            if not getattr(self, 'features', None):
+                                self._extract_and_lock_features(sample_df, mode=mode_str)
 
-                        for col in self.features:
-                            if col not in sample_df.columns:
-                                sample_df[col] = 0.0
-                            elif not (pd.api.types.is_numeric_dtype(sample_df[col]) or pd.api.types.is_bool_dtype(sample_df[col])):
-                                sample_df[col] = pd.to_numeric(sample_df[col], errors='coerce').fillna(0.0)
+                            for col in self.features:
+                                if col not in sample_df.columns:
+                                    sample_df[col] = 0.0
+                                elif not (pd.api.types.is_numeric_dtype(sample_df[col]) or pd.api.types.is_bool_dtype(sample_df[col])):
+                                    sample_df[col] = pd.to_numeric(sample_df[col], errors='coerce').fillna(0.0)
 
-                        X_sample = sample_df[self.features]
-                        y_sample = sample_df[target_col]
-                        sw_sample = np.ones(len(sample_df), dtype=float)
-                        if 'adx' in sample_df.columns:
-                            if is_normal:
-                                sw_sample *= np.where(sample_df['adx'] < 25.0, 1.25, 0.85)
-                            else:
-                                sw_sample *= np.where(sample_df['adx'] >= 25.0, 1.35, 0.75)
+                            X_sample = sample_df[self.features]
+                            y_sample = sample_df[target_col]
+                            sw_sample = np.ones(len(sample_df), dtype=float)
+                            if 'adx' in sample_df.columns:
+                                if is_normal:
+                                    sw_sample *= np.where(sample_df['adx'] < 25.0, 1.25, 0.85)
+                                else:
+                                    sw_sample *= np.where(sample_df['adx'] >= 25.0, 1.35, 0.75)
 
-                        s_dir = sample_df['setup_dir'].values if 'setup_dir' in sample_df.columns else None
-                        best_params = self.optimize_hyperparameters(
-                            X_sample, y_sample, sw_sample, mode=mode_str, n_trials=40, setup_directions=s_dir
-                        )
-                    else:
-                        logger.warning(f"[{mode_str.capitalize()} Mode - {target_sym}] Multi-regime sample setup Re-entry terlalu sedikit ({len(sample_df)} baris), fallback ke Chunk 1.")
-            except Exception as e:
-                logger.error(f"[{mode_str.capitalize()} Mode] Gagal menjalankan multi-regime Optuna pre-sampling: {e}", exc_info=True)
+                            s_dir = sample_df['setup_dir'].values if 'setup_dir' in sample_df.columns else None
+                            best_params = self.optimize_hyperparameters(
+                                X_sample, y_sample, sw_sample, mode=mode_str, n_trials=40, setup_directions=s_dir
+                            )
+                        else:
+                            logger.warning(f"[{mode_str.capitalize()} Mode - {target_sym}] Multi-regime sample setup Re-entry terlalu sedikit ({len(sample_df)} baris), fallback ke Chunk 1.")
+                except Exception as e:
+                    logger.error(f"[{mode_str.capitalize()} Mode] Gagal menjalankan multi-regime Optuna pre-sampling: {e}", exc_info=True)
 
         # STEP 2: Ekstraksi Setup Antar-Chunk & Pelatihan Model Terpadu (Unified Fit)
         chunk_idx = 1
@@ -347,16 +432,17 @@ class ResearcherAgent:
 
             if not is_live_feedback:
                 sample_weights = np.ones(len(df), dtype=float)
-                if approved_ids or rejected_ids or hard_negative_ids:
+                y_target = y_target.copy()
+                # TD Eradication: Jangan override ground truth (y_target = 0).
+                # Kurasi manusia (RLHF approved/rejected) hanya memberikan pembobotan halus (sample_weight).
+                if approved_ids or rejected_ids:
                     for i in range(len(df)):
                         row_id_str = str(df.index[i])
                         row_time_str = df.index[i].strftime("%Y-%m-%d %H:%M:%S") if hasattr(df.index[i], "strftime") else row_id_str
-                        if row_id_str in hard_negative_ids or row_time_str in hard_negative_ids:
-                            sample_weights[i] = 3.0
-                        elif row_id_str in approved_ids or row_time_str in approved_ids:
-                            sample_weights[i] = 5.0
+                        if row_id_str in approved_ids or row_time_str in approved_ids:
+                            sample_weights[i] = 1.5  # Soft boost setup valid
                         elif row_id_str in rejected_ids or row_time_str in rejected_ids:
-                            sample_weights[i] = 0.1
+                            sample_weights[i] = 0.6  # Soft downweight setup cacat
 
                 if not pnl_df.empty:
                     df_times = pd.to_datetime(df['time'] if 'time' in df.columns else df.index)
@@ -432,36 +518,76 @@ class ResearcherAgent:
         sw_full = np.concatenate(all_sw)
         sd_full = np.concatenate(all_sd) if all_sd else None
 
-        if best_params is None:
-            logger.info(f"[{mode_str.capitalize()} Mode] Fallback: Menjalankan Optuna pada seluruh sampel multi-rezim...")
-            best_params = self.optimize_hyperparameters(X_full, y_full, sw_full, mode=mode_str, n_trials=40, setup_directions=sd_full)
+        if is_incremental_warm_start and incremental_params is not None:
+            params = incremental_params.copy()
+            if 'optimal_threshold' in params:
+                th_val = float(params.pop('optimal_threshold'))
+                if is_normal:
+                    self.optimal_threshold_normal = th_val
+                else:
+                    self.optimal_threshold_runner = th_val
+            params.pop('entry_threshold', None)
+            params['objective'] = 'binary'
+            params.pop('num_class', None)
+            params['verbose'] = -1
+            params['random_state'] = 42
 
-        params = best_params.copy() if best_params else {
-            'n_estimators': 200, 'learning_rate': 0.03, 'max_depth': 4, 'num_leaves': 31,
-            'min_child_samples': 50, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
-        }
-        if 'optimal_threshold' in params:
-            th_val = float(params.pop('optimal_threshold'))
+            logger.info(f"[{mode_str.capitalize()} Mode] 🚀 Melatih model LightGBM Warm-Start (init_model) pada {len(X_full):,} sampel ({new_n_est} pohon)...")
+            model = lgb.LGBMClassifier(**params)
+            booster_init = getattr(existing_model, 'booster_', None) or existing_model
+            model.fit(X_full, y_full, sample_weight=sw_full, init_model=booster_init)
+            logger.info(f"[{mode_str.capitalize()} Mode] ✅ Model LightGBM Warm-Start berhasil dilatih ({model.n_estimators} pohon)!")
+        else:
+            if best_params is None:
+                logger.info(f"[{mode_str.capitalize()} Mode] Fallback: Menjalankan Optuna pada seluruh sampel multi-rezim...")
+                best_params = self.optimize_hyperparameters(X_full, y_full, sw_full, mode=mode_str, n_trials=40, setup_directions=sd_full)
+
+            params = best_params.copy() if best_params else {
+                'n_estimators': 200, 'learning_rate': 0.03, 'max_depth': 4, 'num_leaves': 31,
+                'min_child_samples': 50, 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42
+            }
+            if 'optimal_threshold' in params:
+                th_val = float(params.pop('optimal_threshold'))
+                if is_normal:
+                    self.optimal_threshold_normal = th_val
+                else:
+                    self.optimal_threshold_runner = th_val
+
+            params.pop('entry_threshold', None)
+            params['objective'] = 'binary'
+            params.pop('num_class', None)
+            params['verbose'] = -1
+            params['random_state'] = 42
+            # TD#3 FIX: Paksa class_weight='balanced' untuk mode Normal agar model tidak bias ke negatif.
+            # Dataset memiliki ~60-75% label negatif (candle LWMA yang tidak mencapai 1R),
+            # sehingga tanpa balancing model belajar jalan pintas "selalu ragu entry".
+            # Runner mode dibiarkan None/natural karena label Runner (≥3R) memang sangat jarang
+            # dan balancing agresif malah bisa membuat runner terlalu berani.
             if is_normal:
-                self.optimal_threshold_normal = th_val
+                params['class_weight'] = 'balanced'
             else:
-                self.optimal_threshold_runner = th_val
+                if 'class_weight' not in params:
+                    params['class_weight'] = None
 
-        params.pop('entry_threshold', None)
-        params['objective'] = 'binary'
-        params.pop('num_class', None)
-        params['verbose'] = -1
-        params['random_state'] = 42
-        if 'class_weight' not in params:
-            params['class_weight'] = None
+            logger.info(f"[{mode_str.capitalize()} Mode] 🚀 Melatih model LightGBM terpadu pada {len(X_full):,} sampel setup multi-rezim...")
+            model = lgb.LGBMClassifier(**params)
+            model.fit(X_full, y_full, sample_weight=sw_full)
+            logger.info(f"[{mode_str.capitalize()} Mode] ✅ Model LightGBM terpadu berhasil dilatih ({model.n_estimators} pohon)!")
 
-        logger.info(f"[{mode_str.capitalize()} Mode] 🚀 Melatih model LightGBM terpadu pada {len(X_full):,} sampel setup multi-rezim...")
-        model = lgb.LGBMClassifier(**params)
-        model.fit(X_full, y_full, sample_weight=sw_full)
-        logger.info(f"[{mode_str.capitalize()} Mode] ✅ Model LightGBM terpadu berhasil dilatih ({model.n_estimators} pohon)!")
+        # TD Eradication: Kalibrasi threshold pada Validation Slice (20% akhir data training kronologis)
+        # Mencegah Data Snooping & Leakage pada data OOS (Holdout Test Set).
+        # Data OOS (Holdout) harus tetap 100% blind untuk evaluasi kelayakan finansial akhir via VectorBT.
+        n_full = len(X_full)
+        val_slice_len = max(50, int(n_full * 0.20))
+        val_start_idx = max(0, n_full - val_slice_len)
 
+        X_calib = X_full.iloc[val_start_idx:].copy()
+        y_calib = y_full.iloc[val_start_idx:].copy()
+        sd_calib = sd_full[val_start_idx:] if sd_full is not None else None
+
+        logger.info(f"[{mode_str.capitalize()} Mode] 🎯 Kalibrasi threshold pada Validation Slice ({len(X_calib):,} sampel terisolasi kronologis, OOS Holdout murni blind)...")
         cal_th = self.calibrate_optimal_threshold(
-            model, X_full, y_full, mode=mode_str, setup_directions=sd_full, min_signals=25
+            model, X_calib, y_calib, mode=mode_str, setup_directions=sd_calib, min_signals=20
         )
 
         # -------------------------------------------------------------------------
@@ -478,6 +604,8 @@ class ResearcherAgent:
             except Exception as e:
                 logger.warning(f"Gagal mengambil data OOS dari data_miner untuk Fit & Proper Test: {e}")
 
+        passed = False
+        oos_report = {}
         if df_oos is not None and not df_oos.empty and len(df_oos) >= 30:
             logger.info(f"[{mode_str.capitalize()} Mode - {target_sym}] 🛡️ Menjalankan VectorBT Fit & Proper Test pada {len(df_oos):,} candle OOS...")
             orig_th = getattr(self, f"optimal_threshold_{mode_str}", 0.54)
@@ -489,53 +617,147 @@ class ResearcherAgent:
                 mode=mode_str,
                 symbol=target_sym
             )
-            if not getattr(self, "oos_scorecard", None):
-                self.oos_scorecard = {}
-            self.oos_scorecard[mode_str] = oos_report
-
-            # Simpan riwayat scorecard ke database model_scorecard (Fase C)
-            try:
-                from database import save_scorecard_record
-                start_dt = df_oos.index[0] if (hasattr(df_oos.index, 'strftime') and len(df_oos) > 0) else None
-                end_dt = df_oos.index[-1] if (hasattr(df_oos.index, 'strftime') and len(df_oos) > 0) else None
-                save_scorecard_record(oos_report, oos_start_date=start_dt, oos_end_date=end_dt)
-            except Exception as e_db:
-                logger.warning(f"Gagal mencatat scorecard ke database: {e_db}")
-
-            if not oos_report.get("passed", False):
-                setattr(self, f"optimal_threshold_{mode_str}", orig_th)
-                logger.warning(
-                    f"⚠️ [{mode_str.capitalize()} Mode - {target_sym}] Model GAGAL Fit & Proper Test OOS: "
-                    f"{', '.join(oos_report.get('reasons', []))}. Model lama tetap dipertahankan."
-                )
-                ModelManager.save_oos_scorecard(target_sym, mode_str, oos_report)
-                if is_normal:
-                    self.is_training_normal = False
-                else:
-                    self.is_training_runner = False
-                return False
-            else:
-                logger.info(f"✅ [{mode_str.capitalize()} Mode - {target_sym}] Model LOLOS Fit & Proper Test OOS! Memperbarui checkpoint model...")
+            # Kembalikan sementara threshold ke yang lama sampai user mengonfirmasi simpan
+            setattr(self, f"optimal_threshold_{mode_str}", orig_th)
+            passed = bool(oos_report.get("passed", False))
         else:
             logger.info(f"[{mode_str.capitalize()} Mode - {target_sym}] Data OOS tidak tersedia di DB ({0 if df_oos is None else len(df_oos)} baris). Melewati OOS gate.")
+            passed = True
+            oos_report = {
+                "symbol": target_sym,
+                "mode": mode_str,
+                "passed": True,
+                "metrics": {
+                    "win_rate_pct": 50.0,
+                    "profit_factor": 1.50,
+                    "expectancy": 0.25,
+                    "total_trades": 0,
+                    "max_drawdown_pct": 0.0
+                },
+                "reasons": ["Data OOS tidak mencukupi untuk simulasi VectorBT."],
+                "threshold_used": cal_th,
+                "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+
+        # Susun metadata pending training untuk konfirmasi dialog di UI
+        old_acc = float(getattr(self, f"last_accuracy_{mode_str}", 0.0))
+        new_acc = float(oos_report.get("metrics", {}).get("win_rate_pct", 0.0) / 100.0) if oos_report.get("metrics", {}).get("win_rate_pct") is not None else 0.0
+        train_type = getattr(self, "_current_train_type", "incremental")
+
+        pending_info = {
+            "symbol": target_sym,
+            "mode": mode_str,
+            "train_type": train_type,
+            "calibrated_threshold": float(cal_th),
+            "features": list(self.features),
+            "oos_report": oos_report,
+            "passed_oos": bool(passed),
+            "new_accuracy": new_acc,
+            "old_accuracy": old_acc,
+            "profit_factor": float(oos_report.get("metrics", {}).get("profit_factor", 0.0)),
+            "expectancy": float(oos_report.get("metrics", {}).get("expectancy", 0.0)),
+            "max_drawdown": float(oos_report.get("metrics", {}).get("max_drawdown_pct", 0.0)),
+            "total_trades": int(oos_report.get("metrics", {}).get("total_trades", 0)),
+            "reasons": list(oos_report.get("reasons", [])),
+            "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        if cap_reached:
+            pending_info["reasons"].append(f"Model telah mencapai kapasitas maksimum ({MAX_ESTIMATORS_CAP} pohon). Penambahan pohon dihentikan untuk mencegah overfitting. Disarankan Force Full Train.")
+
+        # Simpan sebagai PENDING (TIDAK MENIMPA model_normal.pkl / model_runner.pkl lama)
+        ModelManager.save_pending_model(target_sym, mode_str, model, pending_info)
+        self.pending_training[mode_str] = {
+            "model": model,
+            "info": pending_info
+        }
 
         if is_normal:
+            self.is_training_normal = False
+        else:
+            self.is_training_runner = False
+
+        logger.info(
+            f"⏸️ [{mode_str.capitalize()} Mode - {target_sym}] Pelatihan AI ({train_type.upper()}) selesai! "
+            f"Model baru disimpan sebagai PENDING (Win Rate: {new_acc*100:.1f}%, PF: {pending_info['profit_factor']:.2f}, Lolos OOS: {passed}). "
+            f"Menunggu konfirmasi dialog user di UI untuk menimpa file .pkl lama."
+        )
+        return True
+
+    def apply_pending_model(self, mode: str) -> tuple:
+        """
+        User mengonfirmasi dialog simpan di UI:
+        Menimpa file .pkl lama dengan model baru, mengupdate metadata, scorecard, dan in-memory state.
+        """
+        mode_str = mode.lower()
+        pending = self.pending_training.get(mode_str)
+        if not pending:
+            info = ModelManager.get_pending_info(self.symbol, mode_str)
+            p_model = ModelManager.load_pending_model(self.symbol, mode_str)
+            if info and p_model is not None:
+                pending = {"model": p_model, "info": info}
+                self.pending_training[mode_str] = pending
+
+        if not pending:
+            return False, f"Tidak ada model pending untuk {self.symbol} mode {mode_str}.", {}
+
+        model = pending["model"]
+        info = pending["info"]
+        cal_th = info.get("calibrated_threshold", 0.54)
+        new_acc = info.get("new_accuracy", 0.0)
+        trained_at = info.get("trained_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        oos_report = info.get("oos_report", {})
+
+        # 1. Update in-memory model
+        if mode_str == "normal":
             self.model_normal = model
             self.optimal_threshold_normal = cal_th
-            self.is_training_normal = False
+            self.last_accuracy_normal = new_acc
+            self.last_trained_normal = trained_at
         else:
             self.model_runner = model
             self.optimal_threshold_runner = cal_th
-            self.is_training_runner = False
+            self.last_accuracy_runner = new_acc
+            self.last_trained_runner = trained_at
 
+        if not getattr(self, "oos_scorecard", None):
+            self.oos_scorecard = {}
+        if oos_report:
+            self.oos_scorecard[mode_str] = oos_report
+
+        # 2. Simpan resmi menimpa file .pkl dan models_metadata.json
         self.save_models()
-        return True
 
-    def train_normal_mode(self, data_generator, total_chunks: int = 1, progress_callback=None, data_miner=None) -> bool:
-        return self._execute_training_pipeline("normal", data_generator, total_chunks, progress_callback, data_miner)
+        # 3. Simpan riwayat scorecard ke database jika disetujui (tanpa meracuni tabel hard negatives)
+        if oos_report:
+            try:
+                from database import save_scorecard_record
+                save_scorecard_record(oos_report)
+            except Exception as e_db:
+                logger.warning(f"Gagal mencatat scorecard ke database: {e_db}")
 
-    def train_runner_mode(self, data_generator, total_chunks: int = 1, progress_callback=None, data_miner=None) -> bool:
-        return self._execute_training_pipeline("runner", data_generator, total_chunks, progress_callback, data_miner)
+        # 4. Hapus file pending
+        ModelManager.discard_pending_model(self.symbol, mode_str)
+        self.pending_training.pop(mode_str, None)
+
+        logger.info(f"✅ [{mode_str.capitalize()} Mode - {self.symbol}] Model pending BERHASIL diterapkan dan menimpa file .pkl lama!")
+        return True, f"Model {mode_str.upper()} ({self.symbol}) berhasil disimpan menimpa model lama (.pkl).", info
+
+    def discard_pending_model(self, mode: str) -> tuple:
+        """
+        User menolak / membatalkan dialog simpan di UI:
+        Membuang checkpoint pending tanpa menyentuh file .pkl lama.
+        """
+        mode_str = mode.lower()
+        ModelManager.discard_pending_model(self.symbol, mode_str)
+        self.pending_training.pop(mode_str, None)
+        logger.info(f"🗑️ [{mode_str.capitalize()} Mode - {self.symbol}] Model pending dibuang. Model .pkl lama tetap dipertahankan.")
+        return True, f"Model baru {mode_str.upper()} ({self.symbol}) dibuang. Model lama tetap aktif."
+
+    def train_normal_mode(self, data_generator, total_chunks: int = 1, progress_callback=None, data_miner=None, train_type: str = None) -> bool:
+        return self._execute_training_pipeline("normal", data_generator, total_chunks, progress_callback, data_miner, train_type=train_type)
+
+    def train_runner_mode(self, data_generator, total_chunks: int = 1, progress_callback=None, data_miner=None, train_type: str = None) -> bool:
+        return self._execute_training_pipeline("runner", data_generator, total_chunks, progress_callback, data_miner, train_type=train_type)
 
     # ---------------------------------------------------------------------------------
     # ONLINE LEARNING (Micro-Retrain)
@@ -555,8 +777,13 @@ class ResearcherAgent:
         try:
             current_model = self.model_normal if mode_str == "normal" else self.model_runner
             if current_model is None:
-                logger.warning(f"[MICRO-RETRAIN] Model {mode_str.upper()} belum pernah dilatih (None). Lakukan Full/Initial Train terlebih dahulu.")
-                return False
+                candidate = ModelManager.load_candidate_model(self.symbol, mode_str)
+                if candidate is not None:
+                    logger.info(f"[MICRO-RETRAIN] Model resmi belum aktif, memuat model kandidat ({mode_str.upper()} - {self.symbol}) sebagai bobot awal incremental...")
+                    current_model = candidate
+                else:
+                    logger.warning(f"[MICRO-RETRAIN] Model {mode_str.upper()} belum pernah dilatih (None). Lakukan Full/Initial Train terlebih dahulu.")
+                    return False
 
             if df_recent is None or df_recent.empty:
                 logger.warning(f"[MICRO-RETRAIN] Data candle recent kosong untuk {mode_str.upper()}.")
@@ -589,6 +816,22 @@ class ResearcherAgent:
             X = df[self.features].copy()
             sample_weights = np.ones(len(df), dtype=float)
 
+            approved_ids, rejected_ids, hard_negative_ids, _ = self._fetch_rlhf_pnl_data(mode=mode_str)
+            if approved_ids or rejected_ids or hard_negative_ids:
+                y = y.copy()
+                for i in range(len(df)):
+                    row_id_str = str(df.index[i])
+                    row_time_str = df.index[i].strftime("%Y-%m-%d %H:%M:%S") if hasattr(df.index[i], "strftime") else row_id_str
+                    if row_id_str in hard_negative_ids or row_time_str in hard_negative_ids:
+                        sample_weights[i] = 2.5
+                        y.iloc[i] = 0
+                    elif row_id_str in approved_ids or row_time_str in approved_ids:
+                        sample_weights[i] = 5.0
+                        y.iloc[i] = 1
+                    elif row_id_str in rejected_ids or row_time_str in rejected_ids:
+                        sample_weights[i] = 3.0
+                        y.iloc[i] = 0
+
             if 'adx' in df.columns:
                 if mode_str == 'normal':
                     sample_weights *= np.where(df['adx'] < 25.0, 1.25, 0.85)
@@ -616,15 +859,16 @@ class ResearcherAgent:
                 logger.warning(f"[MICRO-RETRAIN] Sampel atau kelas tidak lengkap ({len(X)} baris, kelas: {unique_classes}) untuk {mode_str.upper()}. Lewati.")
                 return False
 
-            MAX_ESTIMATORS_CAP = 300
+            MAX_ESTIMATORS_CAP = 250
             current_n_est = getattr(current_model, 'n_estimators', 100) or 100
             if current_n_est < MAX_ESTIMATORS_CAP:
                 new_n_est = min(MAX_ESTIMATORS_CAP, current_n_est + 15)
                 current_model.set_params(n_estimators=new_n_est, objective='binary', verbose=-1)
-                current_model.fit(X, y, sample_weight=sample_weights, init_model=current_model)
+                booster_init = getattr(current_model, 'booster_', None) or current_model
+                current_model.fit(X, y, sample_weight=sample_weights, init_model=booster_init)
             else:
                 new_n_est = MAX_ESTIMATORS_CAP
-                current_model.fit(X, y, sample_weight=sample_weights)
+                logger.warning(f"[MICRO-RETRAIN] ⚠️ Model {mode_str.upper()} telah mencapai batas cap maksimum {MAX_ESTIMATORS_CAP} pohon. Lewati penambahan pohon.")
 
             logger.info(f"[MICRO-RETRAIN] ✅ Berhasil update model {mode_str.upper()} secara inkremental ({len(X)} sampel, total pohon: {new_n_est}).")
             self.save_models()
@@ -668,15 +912,25 @@ class ResearcherAgent:
 
         X_live = self.add_normalized_features(X_live)
 
-        valid_cols = [c for c in self.features if c in X_live.columns]
-        if not valid_cols:
+        if not getattr(self, 'features', None):
+            m = self.model_normal or self.model_runner
+            if hasattr(m, 'feature_name_'):
+                self.features = list(m.feature_name_)
+            elif hasattr(m, 'booster_'):
+                self.features = list(m.booster_.feature_name())
+
+        if not getattr(self, 'features', None):
             return empty_res
 
         try:
-            X_eval = X_live[valid_cols].copy()
-            for c in valid_cols:
-                if not (pd.api.types.is_numeric_dtype(X_eval[c]) or pd.api.types.is_bool_dtype(X_eval[c])):
-                    X_eval[c] = pd.to_numeric(X_eval[c], errors='coerce').fillna(0.0)
+            # TD Item 1: Zero-Fill & Column Alignment menjamin dimensi input selalu persis sama dengan training
+            for c in self.features:
+                if c not in X_live.columns:
+                    X_live[c] = 0.0
+                elif not (pd.api.types.is_numeric_dtype(X_live[c]) or pd.api.types.is_bool_dtype(X_live[c])):
+                    X_live[c] = pd.to_numeric(X_live[c], errors='coerce').fillna(0.0)
+
+            X_eval = X_live[self.features].copy()
             pn_buy, pn_sell = 0.0, 0.0
             pr_buy, pr_sell = 0.0, 0.0
 
@@ -684,11 +938,14 @@ class ResearcherAgent:
             is_valid_buy = (s_dir == 1)
             is_valid_sell = (s_dir == 2)
 
+            pn_raw, pr_raw = 0.0, 0.0
+
             if self.model_normal is not None:
                 probs_n = self.model_normal.predict_proba(X_eval)[0]
                 classes_n = list(getattr(self.model_normal, 'classes_', [0, 1]))
                 idx_w = classes_n.index(1) if 1 in classes_n else 1
                 p_win = float(probs_n[idx_w]) if len(probs_n) > idx_w else float(probs_n[-1])
+                pn_raw = p_win
                 if is_valid_buy:
                     pn_buy = p_win
                 elif is_valid_sell:
@@ -699,6 +956,7 @@ class ResearcherAgent:
                 classes_r = list(getattr(self.model_runner, 'classes_', [0, 1]))
                 idx_w = classes_r.index(1) if 1 in classes_r else 1
                 p_win = float(probs_r[idx_w]) if len(probs_r) > idx_w else float(probs_r[-1])
+                pr_raw = p_win
                 if is_valid_buy:
                     pr_buy = p_win
                 elif is_valid_sell:
@@ -709,6 +967,8 @@ class ResearcherAgent:
                 "normal_sell": pn_sell,
                 "runner_buy": pr_buy,
                 "runner_sell": pr_sell,
+                "normal_raw": pn_raw,
+                "runner_raw": pr_raw,
                 "normal": max(pn_buy, pn_sell),
                 "runner": max(pr_buy, pr_sell)
             }

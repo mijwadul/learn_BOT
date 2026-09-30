@@ -9,6 +9,7 @@ interface ModelInfo {
   is_training: boolean;
   last_accuracy: number;
   is_active?: boolean;
+  has_pending?: boolean;
 }
 
 interface ModelStatusGridProps {
@@ -16,18 +17,25 @@ interface ModelStatusGridProps {
     normal: ModelInfo;
     runner: ModelInfo;
   };
+  pendingModels?: {
+    normal?: any;
+    runner?: any;
+  };
   loading: boolean;
   onTrain: (mode: string, type: "incremental" | "full") => void;
   onForceMode: (mode: string, action: "force_live" | "quarantine") => void;
   onToggleBrain?: (mode: "normal" | "runner" | "all", active: boolean) => void;
+  onReviewPending?: (mode: "normal" | "runner") => void;
 }
 
 export function ModelStatusGrid({
   modelsStatus,
+  pendingModels,
   loading,
   onTrain,
   onForceMode,
   onToggleBrain,
+  onReviewPending,
 }: ModelStatusGridProps) {
   const isNormalActive = modelsStatus.normal.is_active ?? modelsStatus.normal.status.includes("LIVE");
   const isRunnerActive = modelsStatus.runner.is_active ?? modelsStatus.runner.status.includes("LIVE");
@@ -160,6 +168,22 @@ export function ModelStatusGrid({
                 </span>
               </div>
             )}
+
+            {pendingModels?.normal && (
+              <div className="mb-3 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-amber-300 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                  Model Baru ({((pendingModels.normal.new_accuracy || 0) * 100).toFixed(1)}%) Siap Disimpan
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onReviewPending && onReviewPending("normal")}
+                  className="px-2.5 py-1 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-black text-[10px] uppercase tracking-wider transition-all cursor-pointer shrink-0"
+                >
+                  Review &amp; Simpan
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="flex flex-col gap-2.5 pt-2 border-t border-white/5">
@@ -276,6 +300,22 @@ export function ModelStatusGrid({
                 >
                   OOS Validation Score: {(modelsStatus.runner.last_accuracy * 100).toFixed(1)}%
                 </span>
+              </div>
+            )}
+
+            {pendingModels?.runner && (
+              <div className="mb-3 p-2.5 rounded-xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-purple-300 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-purple-400 animate-ping" />
+                  Model Baru ({((pendingModels.runner.new_accuracy || 0) * 100).toFixed(1)}%) Siap Disimpan
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onReviewPending && onReviewPending("runner")}
+                  className="px-2.5 py-1 rounded-lg bg-purple-400 hover:bg-purple-300 text-black font-black text-[10px] uppercase tracking-wider transition-all cursor-pointer shrink-0"
+                >
+                  Review &amp; Simpan
+                </button>
               </div>
             )}
           </div>

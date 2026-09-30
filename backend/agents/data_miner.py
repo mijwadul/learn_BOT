@@ -595,12 +595,7 @@ class DataMinerAgent:
                     df.index = pd.to_datetime(df.index)
 
                     if is_last_chunk:
-                        # 1. Injeksi Hard Negatives & OOS RLHF jika ada
-                        hn_df = self.load_hard_negatives_and_rlhf(mode=mode)
-                        if not hn_df.empty:
-                            logging.info(f"Menginjeksi {len(hn_df)} baris Hard Negatives & OOS RLHF ({mode.upper()}) ke chunk terakhir!")
-                            df = pd.concat([df, hn_df])
-                            df = df[~df.index.duplicated(keep='last')].sort_index()
+                        # Injeksi Live Closed Decisions ke atribut chunk terakhir agar diproses bersamaan (jika ada)
 
                         # 2. Injeksi Live Closed Decisions ke atribut chunk terakhir agar diproses bersamaan
                         live_df = self.load_live_decision_chunk(mode=mode)

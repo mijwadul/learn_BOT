@@ -37,21 +37,21 @@ def calibrate_optimal_threshold(
     idx_win = classes.index(1) if 1 in classes else (1 if probs.shape[1] > 1 else 0)
     p_win = probs[:, idx_win] if probs.shape[1] > idx_win else probs[:, -1]
 
-    rr_ratio = 2.0 if mode == 'normal' else max_runner_rr
-    target_wr = 0.50 if mode == 'normal' else 0.25
+    rr_ratio = 1.5 if mode == 'normal' else 3.0
+    target_wr = 0.52 if mode == 'normal' else 0.28
 
     best_score = -999.0
-    best_th = 0.52 if mode == 'runner' else 0.54
+    best_th = 0.50 if mode == 'runner' else 0.54
     best_stats = {}
 
-    # Candidate threshold disesuaikan dengan profil mode:
-    # Normal (RR 1:2): butuh akurasi >= 50%
-    # Runner (RR 1:5): target akurasi 30-40% dengan volume perdagangan sehat
+    # Candidate threshold disesuaikan dengan distribusi probabilitas realistis:
+    # Normal (RR 1:1.5): target WR >= 52%; threshold candidate ~48-72%
+    # Runner (RR 1:3.0): target WR >= 28%; threshold candidate ~38-65%
     if mode == 'runner':
-        candidate_thresholds = np.linspace(0.45, 0.55, 21)
-        effective_min_signals = max(min_signals, int(len(X_cal) * 0.01))
+        candidate_thresholds = np.linspace(0.38, 0.65, 28)
+        effective_min_signals = max(min_signals, int(len(X_cal) * 0.005))
     else:
-        candidate_thresholds = np.linspace(0.535, 0.63, 20)
+        candidate_thresholds = np.linspace(0.48, 0.72, 25)
         effective_min_signals = max(min_signals, int(len(X_cal) * 0.005))
 
     for th in candidate_thresholds:
@@ -68,17 +68,21 @@ def calibrate_optimal_threshold(
         pf = gross_profit / gross_loss
         expectancy = (wr * rr_ratio) - ((1.0 - wr) * 1.0)
 
-        # Penalti keras jika akurasi di bawah standar kelulusan institusional (Normal: 50%, Runner: 25%)
+        # Penalti keras jika metrik di bawah standar kelulusan OOS (Normal: WR 52%, PF 1.30; Runner: WR 28%, PF 1.20)
         wr_penalty = 0.0
-        if mode == 'normal' and wr < 0.50:
-            wr_penalty = (0.50 - wr) * 20.0
-        elif mode == 'runner' and wr < 0.25:
-            wr_penalty = (0.25 - wr) * 20.0
+        min_crit_wr = 0.52 if mode == 'normal' else 0.28
+        if wr < min_crit_wr:
+            wr_penalty = (min_crit_wr - wr) * 25.0
+
+        pf_penalty = 0.0
+        min_crit_pf = 1.30 if mode == 'normal' else 1.20
+        if pf < min_crit_pf:
+            pf_penalty = (min_crit_pf - pf) * 10.0
 
         # Penalti sampel kecil & bonus signifikansi statistik (SQN proxy)
         sample_weight_factor = min(1.0, n_trades / 120.0)
         sqn_proxy = (expectancy / max(1.0, np.sqrt(rr_ratio))) * np.sqrt(min(n_trades, 500)) / 10.0
-        score = (((expectancy * 2.0) + ((wr - target_wr) * 2.5) + (min(pf, 3.0) * 0.2) - wr_penalty) * sample_weight_factor) + sqn_proxy
+        score = (((expectancy * 2.0) + ((wr - target_wr) * 2.5) + (min(pf, 3.0) * 0.2) - wr_penalty - pf_penalty) * sample_weight_factor) + sqn_proxy
 
         if score > best_score:
             best_score = score

@@ -176,15 +176,31 @@ class ExecutorAgent:
                                             elif adx_val < 20:
                                                 threshold = 0.45
 
-                                        if runner_buys and (p_buy_r < threshold or p_sell_r > 0.50):
-                                            logging.warning(f"[AI_TRAILING] {pair} Probabilitas BUY runner melemah ({p_buy_r*100:.0f}%) atau sinyal SELL kuat ({p_sell_r*100:.0f}%). Melikuidasi BUY RUNNER!")
+                                        # TD Eradication: Dynamic Exhaustion Exit
+                                        # Jangan membunuh runner hanya karena harga sudah running meninggalkan zona LWMA (p_buy_r == 0).
+                                        # Likuidasi runner dini HANYA dilakukan jika ada sinyal reversal kuat arah sebaliknya (>= 0.65)
+                                        # atau candle ditutup melanggar struktur kaedah BBMA (Close tembus Lower BB / EMA 50 untuk Buy).
+                                        last_row_s = df_live.iloc[-1] if len(df_live) > 0 else None
+                                        close_p = float(last_row_s.get('close', 0.0)) if last_row_s is not None else 0.0
+                                        ema_50 = float(last_row_s.get('EMA_50', 0.0)) if last_row_s is not None else 0.0
+                                        bb_low = float(last_row_s.get('BB_Lower', 0.0)) if last_row_s is not None else 0.0
+                                        bb_upp = float(last_row_s.get('BB_Upper', 0.0)) if last_row_s is not None else 0.0
+
+                                        # Exit Buy Runner: sinyal lawan SELL sangat kuat (>= 65%) ATAU close menembus ke bawah Lower BB / EMA 50
+                                        exit_buy_runner = (p_sell_r >= 0.65) or (bb_low > 0 and close_p < bb_low)
+                                        if runner_buys and exit_buy_runner:
+                                            reason_str = "Reversal Sell Sinyal (>=65%)" if p_sell_r >= 0.65 else "CSM Sell Lawan (Close < BB_Lower)"
+                                            logging.warning(f"[AI_TRAILING] {pair} Posisi BUY Runner dilikuidasi dini: {reason_str}!")
                                             for p in runner_buys:
-                                                self.order_router.execute_full_close(p.ticket, reason=f"AI Trailing: Buy Prob {p_buy_r*100:.0f}%", symbol=broker_p)
+                                                self.order_router.execute_full_close(p.ticket, reason=f"AI Trailing: {reason_str}", symbol=broker_p)
                                                     
-                                        if runner_sells and (p_sell_r < threshold or p_buy_r > 0.50):
-                                            logging.warning(f"[AI_TRAILING] {pair} Probabilitas SELL runner melemah ({p_sell_r*100:.0f}%) atau sinyal BUY kuat ({p_buy_r*100:.0f}%). Melikuidasi SELL RUNNER!")
+                                        # Exit Sell Runner: sinyal lawan BUY sangat kuat (>= 65%) ATAU close menembus ke atas Upper BB / EMA 50
+                                        exit_sell_runner = (p_buy_r >= 0.65) or (bb_upp > 0 and close_p > bb_upp)
+                                        if runner_sells and exit_sell_runner:
+                                            reason_str = "Reversal Buy Sinyal (>=65%)" if p_buy_r >= 0.65 else "CSM Buy Lawan (Close > BB_Upper)"
+                                            logging.warning(f"[AI_TRAILING] {pair} Posisi SELL Runner dilikuidasi dini: {reason_str}!")
                                             for p in runner_sells:
-                                                self.order_router.execute_full_close(p.ticket, reason=f"AI Trailing: Sell Prob {p_sell_r*100:.0f}%", symbol=broker_p)
+                                                self.order_router.execute_full_close(p.ticket, reason=f"AI Trailing: {reason_str}", symbol=broker_p)
                     except Exception as e:
                         logging.debug(f"[EXHAUSTION] Gagal cek: {e}")
 

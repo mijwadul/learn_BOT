@@ -59,17 +59,21 @@ def optimize_hyperparameters(
     sample_weights = np.array(sample_weights, dtype=float)
     n_samples = len(X)
 
-    rr_ratio = max_runner_rr if mode == "runner" else 2.0
-    target_wr = 0.50 if mode == 'normal' else 0.25
+    rr_ratio = 3.0 if mode == "runner" else 1.5
+    target_wr = 0.52 if mode == 'normal' else 0.28
 
     logger.info(f"[{mode.upper()} OPTUNA START] 🔬 Memulai Purged Walk-Forward CV & Meta-Model Auto-Tuning ({n_trials} Trials) untuk {symbol}...")
     logger.info(f"[{mode.upper()} OPTUNA METRIK] 🎯 Target: Precision (WR >= {target_wr*100:.0f}%) + Expectancy (+R) + PR-AUC")
 
-    folds = build_purged_folds(n_samples, purge_len=150)
+    # TD#5 FIX: Purge window dinaikkan 150 → 250 bar (~21 jam di M5).
+    # Satu siklus BBMA penuh (Extrem → TPW → MHV → CSA/CSAK → Re-entry) bisa makan
+    # 200–250 candle. Window 150 bar berisiko label leakage ringan antar fold yang membuat
+    # skor Optuna tampak lebih bagus dari kenyataannya di data OOS.
+    folds = build_purged_folds(n_samples, purge_len=250)
     logger.info(f"[{mode.upper()} OPTUNA CV] Membentuk {len(folds)} Purged Walk-Forward Folds (Total: {n_samples:,} baris setup).")
 
     best_so_far = -10.0
-    best_threshold_so_far = 0.55 if mode == 'normal' else 0.50
+    best_threshold_so_far = 0.54 if mode == 'normal' else 0.48
 
     def objective(trial):
         nonlocal best_so_far, best_threshold_so_far
@@ -96,7 +100,7 @@ def optimize_hyperparameters(
             'verbose': -1
         }
 
-        trial_threshold = trial.suggest_float('entry_threshold', 0.45, 0.72)
+        trial_threshold = trial.suggest_float('entry_threshold', 0.38, 0.65) if mode == 'runner' else trial.suggest_float('entry_threshold', 0.48, 0.72)
 
         fold_scores = []
         fold_wrs = []

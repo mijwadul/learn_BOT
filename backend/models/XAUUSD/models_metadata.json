@@ -1,0 +1,1458 @@
+{
+  "symbol": "XAUUSD",
+  "normal": {
+    "last_accuracy": 0.3649,
+    "last_trained_at": "2026-09-30 23:00:25",
+    "trained": true,
+    "optimal_threshold": 0.72,
+    "oos_scorecard": {
+      "symbol": "XAUUSD",
+      "mode": "normal",
+      "evaluated_at": "2026-09-30 23:00:11",
+      "passed": false,
+      "threshold_used": 0.72,
+      "metrics": {
+        "win_rate_pct": 36.49,
+        "profit_factor": 0.58,
+        "sharpe_ratio": -15.8,
+        "max_drawdown_pct": 41.46,
+        "total_trades": 1932,
+        "total_return_pct": -41.02
+      },
+      "criteria": {
+        "min_win_rate": 52.0,
+        "min_profit_factor": 1.3,
+        "min_sharpe_ratio": 0.8,
+        "max_drawdown": 20.0,
+        "min_trades": 30
+      },
+      "checks": {
+        "win_rate_passed": false,
+        "profit_factor_passed": false,
+        "sharpe_ratio_passed": false,
+        "drawdown_passed": false,
+        "trades_passed": true
+      },
+      "reasons": [
+        "Win Rate (36.5%) di bawah kriteria minimum (52.0%)",
+        "Profit Factor (0.58) di bawah kriteria minimum (1.30)",
+        "Sharpe Ratio (-15.80) di bawah kriteria minimum (0.80)",
+        "Max Drawdown (41.5%) melebihi toleransi risiko (20.0%)"
+      ],
+      "equity_curve": [
+        {
+          "time": 1786027260,
+          "value": 100.0
+        },
+        {
+          "time": 1786068480,
+          "value": 100.05
+        },
+        {
+          "time": 1786105980,
+          "value": 99.65
+        },
+        {
+          "time": 1786320060,
+          "value": 98.55
+        },
+        {
+          "time": 1786357560,
+          "value": 97.75
+        },
+        {
+          "time": 1786395060,
+          "value": 97.17
+        },
+        {
+          "time": 1786436280,
+          "value": 96.6
+        },
+        {
+          "time": 1786473780,
+          "value": 95.87
+        },
+        {
+          "time": 1786515000,
+          "value": 94.75
+        },
+        {
+          "time": 1786552500,
+          "value": 93.64
+        },
+        {
+          "time": 1786593720,
+          "value": 93.43
+        },
+        {
+          "time": 1786631220,
+          "value": 92.91
+        },
+        {
+          "time": 1786672440,
+          "value": 92.95
+        },
+        {
+          "time": 1786709940,
+          "value": 92.59
+        },
+        {
+          "time": 1786924020,
+          "value": 91.53
+        },
+        {
+          "time": 1786961520,
+          "value": 90.73
+        },
+        {
+          "time": 1786999020,
+          "value": 90.61
+        },
+        {
+          "time": 1787040240,
+          "value": 90.32
+        },
+        {
+          "time": 1787077740,
+          "value": 89.67
+        },
+        {
+          "time": 1787119200,
+          "value": 88.71
+        },
+        {
+          "time": 1787156700,
+          "value": 88.33
+        },
+        {
+          "time": 1787197920,
+          "value": 87.56
+        },
+        {
+          "time": 1787235420,
+          "value": 87.04
+        },
+        {
+          "time": 1787276640,
+          "value": 87.23
+        },
+        {
+          "time": 1787314140,
+          "value": 86.39
+        },
+        {
+          "time": 1787528220,
+          "value": 85.99
+        },
+        {
+          "time": 1787565720,
+          "value": 84.96
+        },
+        {
+          "time": 1787603220,
+          "value": 83.96
+        },
+        {
+          "time": 1787644440,
+          "value": 83.52
+        },
+        {
+          "time": 1787681940,
+          "value": 82.98
+        },
+        {
+          "time": 1787723160,
+          "value": 82.48
+        },
+        {
+          "time": 1787760660,
+          "value": 81.82
+        },
+        {
+          "time": 1787801880,
+          "value": 81.59
+        },
+        {
+          "time": 1787839380,
+          "value": 81.26
+        },
+        {
+          "time": 1787880600,
+          "value": 80.35
+        },
+        {
+          "time": 1787918100,
+          "value": 79.85
+        },
+        {
+          "time": 1788132180,
+          "value": 80.69
+        },
+        {
+          "time": 1788169680,
+          "value": 80.08
+        },
+        {
+          "time": 1788207180,
+          "value": 78.87
+        },
+        {
+          "time": 1788248400,
+          "value": 78.14
+        },
+        {
+          "time": 1788285900,
+          "value": 77.85
+        },
+        {
+          "time": 1788327120,
+          "value": 77.06
+        },
+        {
+          "time": 1788364620,
+          "value": 77.03
+        },
+        {
+          "time": 1788405840,
+          "value": 76.72
+        },
+        {
+          "time": 1788443340,
+          "value": 75.85
+        },
+        {
+          "time": 1788484560,
+          "value": 75.41
+        },
+        {
+          "time": 1788522060,
+          "value": 74.5
+        },
+        {
+          "time": 1788736140,
+          "value": 73.48
+        },
+        {
+          "time": 1788773640,
+          "value": 72.97
+        },
+        {
+          "time": 1788823920,
+          "value": 72.72
+        },
+        {
+          "time": 1788861420,
+          "value": 71.83
+        },
+        {
+          "time": 1788898920,
+          "value": 71.25
+        },
+        {
+          "time": 1788940140,
+          "value": 71.04
+        },
+        {
+          "time": 1788977640,
+          "value": 70.31
+        },
+        {
+          "time": 1789018860,
+          "value": 69.84
+        },
+        {
+          "time": 1789056360,
+          "value": 69.1
+        },
+        {
+          "time": 1789097580,
+          "value": 68.49
+        },
+        {
+          "time": 1789135080,
+          "value": 67.73
+        },
+        {
+          "time": 1789349400,
+          "value": 66.36
+        },
+        {
+          "time": 1789386900,
+          "value": 66.77
+        },
+        {
+          "time": 1789428120,
+          "value": 66.06
+        },
+        {
+          "time": 1789465620,
+          "value": 65.71
+        },
+        {
+          "time": 1789503120,
+          "value": 65.67
+        },
+        {
+          "time": 1789544340,
+          "value": 65.14
+        },
+        {
+          "time": 1789581840,
+          "value": 65.01
+        },
+        {
+          "time": 1789623060,
+          "value": 66.2
+        },
+        {
+          "time": 1789660560,
+          "value": 65.58
+        },
+        {
+          "time": 1789701780,
+          "value": 64.79
+        },
+        {
+          "time": 1789739280,
+          "value": 64.31
+        },
+        {
+          "time": 1789953360,
+          "value": 63.62
+        },
+        {
+          "time": 1789990860,
+          "value": 62.95
+        },
+        {
+          "time": 1790032080,
+          "value": 62.67
+        },
+        {
+          "time": 1790069580,
+          "value": 62.04
+        },
+        {
+          "time": 1790107080,
+          "value": 61.59
+        },
+        {
+          "time": 1790148300,
+          "value": 61.72
+        },
+        {
+          "time": 1790185800,
+          "value": 61.21
+        },
+        {
+          "time": 1790227020,
+          "value": 60.7
+        },
+        {
+          "time": 1790264520,
+          "value": 59.83
+        },
+        {
+          "time": 1790305740,
+          "value": 59.45
+        },
+        {
+          "time": 1790343240,
+          "value": 59.27
+        },
+        {
+          "time": 1790557260,
+          "value": 58.98
+        }
+      ]
+    }
+  },
+  "runner": {
+    "last_accuracy": 0.3015,
+    "last_trained_at": "2026-09-30 23:09:01",
+    "trained": true,
+    "max_runner_rr": 5.0,
+    "optimal_threshold": 0.64,
+    "oos_scorecard": {
+      "symbol": "XAUUSD",
+      "mode": "runner",
+      "evaluated_at": "2026-09-30 23:10:29",
+      "passed": false,
+      "threshold_used": 0.64,
+      "metrics": {
+        "win_rate_pct": 30.15,
+        "profit_factor": 0.69,
+        "sharpe_ratio": -5.43,
+        "max_drawdown_pct": 10.38,
+        "total_trades": 544,
+        "total_return_pct": -10.34
+      },
+      "criteria": {
+        "min_win_rate": 28.0,
+        "min_profit_factor": 1.2,
+        "min_sharpe_ratio": 0.5,
+        "max_drawdown": 35.0,
+        "min_trades": 20
+      },
+      "checks": {
+        "win_rate_passed": true,
+        "profit_factor_passed": false,
+        "sharpe_ratio_passed": false,
+        "drawdown_passed": true,
+        "trades_passed": true
+      },
+      "reasons": [
+        "Profit Factor (0.69) di bawah kriteria minimum (1.20)",
+        "Sharpe Ratio (-5.43) di bawah kriteria minimum (0.50)"
+      ],
+      "equity_curve": [
+        {
+          "time": 1786027260,
+          "value": 100.0
+        },
+        {
+          "time": 1786068480,
+          "value": 99.87
+        },
+        {
+          "time": 1786105980,
+          "value": 99.62
+        },
+        {
+          "time": 1786320060,
+          "value": 99.54
+        },
+        {
+          "time": 1786357560,
+          "value": 99.79
+        },
+        {
+          "time": 1786395060,
+          "value": 99.79
+        },
+        {
+          "time": 1786436280,
+          "value": 99.46
+        },
+        {
+          "time": 1786473780,
+          "value": 98.71
+        },
+        {
+          "time": 1786515000,
+          "value": 98.63
+        },
+        {
+          "time": 1786552500,
+          "value": 97.85
+        },
+        {
+          "time": 1786593720,
+          "value": 97.72
+        },
+        {
+          "time": 1786631220,
+          "value": 97.24
+        },
+        {
+          "time": 1786672440,
+          "value": 97.54
+        },
+        {
+          "time": 1786709940,
+          "value": 97.25
+        },
+        {
+          "time": 1786924020,
+          "value": 96.92
+        },
+        {
+          "time": 1786961520,
+          "value": 96.9
+        },
+        {
+          "time": 1786999020,
+          "value": 97.44
+        },
+        {
+          "time": 1787040240,
+          "value": 97.27
+        },
+        {
+          "time": 1787077740,
+          "value": 97.17
+        },
+        {
+          "time": 1787119200,
+          "value": 96.86
+        },
+        {
+          "time": 1787156700,
+          "value": 97.0
+        },
+        {
+          "time": 1787197920,
+          "value": 96.72
+        },
+        {
+          "time": 1787235420,
+          "value": 96.37
+        },
+        {
+          "time": 1787276640,
+          "value": 96.12
+        },
+        {
+          "time": 1787314140,
+          "value": 95.71
+        },
+        {
+          "time": 1787528220,
+          "value": 95.52
+        },
+        {
+          "time": 1787565720,
+          "value": 95.17
+        },
+        {
+          "time": 1787603220,
+          "value": 94.75
+        },
+        {
+          "time": 1787644440,
+          "value": 94.67
+        },
+        {
+          "time": 1787681940,
+          "value": 94.31
+        },
+        {
+          "time": 1787723160,
+          "value": 94.04
+        },
+        {
+          "time": 1787760660,
+          "value": 93.56
+        },
+        {
+          "time": 1787801880,
+          "value": 93.35
+        },
+        {
+          "time": 1787839380,
+          "value": 93.5
+        },
+        {
+          "time": 1787880600,
+          "value": 93.41
+        },
+        {
+          "time": 1787918100,
+          "value": 93.57
+        },
+        {
+          "time": 1788132180,
+          "value": 93.89
+        },
+        {
+          "time": 1788169680,
+          "value": 94.75
+        },
+        {
+          "time": 1788207180,
+          "value": 93.97
+        },
+        {
+          "time": 1788248400,
+          "value": 93.53
+        },
+        {
+          "time": 1788285900,
+          "value": 93.47
+        },
+        {
+          "time": 1788327120,
+          "value": 93.38
+        },
+        {
+          "time": 1788364620,
+          "value": 93.59
+        },
+        {
+          "time": 1788405840,
+          "value": 93.35
+        },
+        {
+          "time": 1788443340,
+          "value": 93.53
+        },
+        {
+          "time": 1788484560,
+          "value": 93.26
+        },
+        {
+          "time": 1788522060,
+          "value": 92.9
+        },
+        {
+          "time": 1788736140,
+          "value": 93.26
+        },
+        {
+          "time": 1788773640,
+          "value": 93.02
+        },
+        {
+          "time": 1788823920,
+          "value": 93.08
+        },
+        {
+          "time": 1788861420,
+          "value": 93.26
+        },
+        {
+          "time": 1788898920,
+          "value": 93.65
+        },
+        {
+          "time": 1788940140,
+          "value": 93.53
+        },
+        {
+          "time": 1788977640,
+          "value": 93.74
+        },
+        {
+          "time": 1789018860,
+          "value": 93.76
+        },
+        {
+          "time": 1789056360,
+          "value": 93.5
+        },
+        {
+          "time": 1789097580,
+          "value": 93.4
+        },
+        {
+          "time": 1789135080,
+          "value": 93.05
+        },
+        {
+          "time": 1789349400,
+          "value": 93.31
+        },
+        {
+          "time": 1789386900,
+          "value": 93.61
+        },
+        {
+          "time": 1789428120,
+          "value": 93.37
+        },
+        {
+          "time": 1789465620,
+          "value": 93.0
+        },
+        {
+          "time": 1789503120,
+          "value": 92.96
+        },
+        {
+          "time": 1789544340,
+          "value": 92.95
+        },
+        {
+          "time": 1789581840,
+          "value": 92.83
+        },
+        {
+          "time": 1789623060,
+          "value": 92.48
+        },
+        {
+          "time": 1789660560,
+          "value": 92.08
+        },
+        {
+          "time": 1789701780,
+          "value": 91.41
+        },
+        {
+          "time": 1789739280,
+          "value": 91.2
+        },
+        {
+          "time": 1789953360,
+          "value": 91.01
+        },
+        {
+          "time": 1789990860,
+          "value": 90.86
+        },
+        {
+          "time": 1790032080,
+          "value": 90.75
+        },
+        {
+          "time": 1790069580,
+          "value": 90.49
+        },
+        {
+          "time": 1790107080,
+          "value": 90.56
+        },
+        {
+          "time": 1790148300,
+          "value": 90.67
+        },
+        {
+          "time": 1790185800,
+          "value": 90.09
+        },
+        {
+          "time": 1790227020,
+          "value": 90.07
+        },
+        {
+          "time": 1790264520,
+          "value": 90.22
+        },
+        {
+          "time": 1790305740,
+          "value": 89.73
+        },
+        {
+          "time": 1790343240,
+          "value": 89.93
+        },
+        {
+          "time": 1790557260,
+          "value": 89.66
+        }
+      ]
+    }
+  },
+  "oos_scorecard": {
+    "normal": {
+      "symbol": "XAUUSD",
+      "mode": "normal",
+      "evaluated_at": "2026-09-30 23:00:11",
+      "passed": false,
+      "threshold_used": 0.72,
+      "metrics": {
+        "win_rate_pct": 36.49,
+        "profit_factor": 0.58,
+        "sharpe_ratio": -15.8,
+        "max_drawdown_pct": 41.46,
+        "total_trades": 1932,
+        "total_return_pct": -41.02
+      },
+      "criteria": {
+        "min_win_rate": 52.0,
+        "min_profit_factor": 1.3,
+        "min_sharpe_ratio": 0.8,
+        "max_drawdown": 20.0,
+        "min_trades": 30
+      },
+      "checks": {
+        "win_rate_passed": false,
+        "profit_factor_passed": false,
+        "sharpe_ratio_passed": false,
+        "drawdown_passed": false,
+        "trades_passed": true
+      },
+      "reasons": [
+        "Win Rate (36.5%) di bawah kriteria minimum (52.0%)",
+        "Profit Factor (0.58) di bawah kriteria minimum (1.30)",
+        "Sharpe Ratio (-15.80) di bawah kriteria minimum (0.80)",
+        "Max Drawdown (41.5%) melebihi toleransi risiko (20.0%)"
+      ],
+      "equity_curve": [
+        {
+          "time": 1786027260,
+          "value": 100.0
+        },
+        {
+          "time": 1786068480,
+          "value": 100.05
+        },
+        {
+          "time": 1786105980,
+          "value": 99.65
+        },
+        {
+          "time": 1786320060,
+          "value": 98.55
+        },
+        {
+          "time": 1786357560,
+          "value": 97.75
+        },
+        {
+          "time": 1786395060,
+          "value": 97.17
+        },
+        {
+          "time": 1786436280,
+          "value": 96.6
+        },
+        {
+          "time": 1786473780,
+          "value": 95.87
+        },
+        {
+          "time": 1786515000,
+          "value": 94.75
+        },
+        {
+          "time": 1786552500,
+          "value": 93.64
+        },
+        {
+          "time": 1786593720,
+          "value": 93.43
+        },
+        {
+          "time": 1786631220,
+          "value": 92.91
+        },
+        {
+          "time": 1786672440,
+          "value": 92.95
+        },
+        {
+          "time": 1786709940,
+          "value": 92.59
+        },
+        {
+          "time": 1786924020,
+          "value": 91.53
+        },
+        {
+          "time": 1786961520,
+          "value": 90.73
+        },
+        {
+          "time": 1786999020,
+          "value": 90.61
+        },
+        {
+          "time": 1787040240,
+          "value": 90.32
+        },
+        {
+          "time": 1787077740,
+          "value": 89.67
+        },
+        {
+          "time": 1787119200,
+          "value": 88.71
+        },
+        {
+          "time": 1787156700,
+          "value": 88.33
+        },
+        {
+          "time": 1787197920,
+          "value": 87.56
+        },
+        {
+          "time": 1787235420,
+          "value": 87.04
+        },
+        {
+          "time": 1787276640,
+          "value": 87.23
+        },
+        {
+          "time": 1787314140,
+          "value": 86.39
+        },
+        {
+          "time": 1787528220,
+          "value": 85.99
+        },
+        {
+          "time": 1787565720,
+          "value": 84.96
+        },
+        {
+          "time": 1787603220,
+          "value": 83.96
+        },
+        {
+          "time": 1787644440,
+          "value": 83.52
+        },
+        {
+          "time": 1787681940,
+          "value": 82.98
+        },
+        {
+          "time": 1787723160,
+          "value": 82.48
+        },
+        {
+          "time": 1787760660,
+          "value": 81.82
+        },
+        {
+          "time": 1787801880,
+          "value": 81.59
+        },
+        {
+          "time": 1787839380,
+          "value": 81.26
+        },
+        {
+          "time": 1787880600,
+          "value": 80.35
+        },
+        {
+          "time": 1787918100,
+          "value": 79.85
+        },
+        {
+          "time": 1788132180,
+          "value": 80.69
+        },
+        {
+          "time": 1788169680,
+          "value": 80.08
+        },
+        {
+          "time": 1788207180,
+          "value": 78.87
+        },
+        {
+          "time": 1788248400,
+          "value": 78.14
+        },
+        {
+          "time": 1788285900,
+          "value": 77.85
+        },
+        {
+          "time": 1788327120,
+          "value": 77.06
+        },
+        {
+          "time": 1788364620,
+          "value": 77.03
+        },
+        {
+          "time": 1788405840,
+          "value": 76.72
+        },
+        {
+          "time": 1788443340,
+          "value": 75.85
+        },
+        {
+          "time": 1788484560,
+          "value": 75.41
+        },
+        {
+          "time": 1788522060,
+          "value": 74.5
+        },
+        {
+          "time": 1788736140,
+          "value": 73.48
+        },
+        {
+          "time": 1788773640,
+          "value": 72.97
+        },
+        {
+          "time": 1788823920,
+          "value": 72.72
+        },
+        {
+          "time": 1788861420,
+          "value": 71.83
+        },
+        {
+          "time": 1788898920,
+          "value": 71.25
+        },
+        {
+          "time": 1788940140,
+          "value": 71.04
+        },
+        {
+          "time": 1788977640,
+          "value": 70.31
+        },
+        {
+          "time": 1789018860,
+          "value": 69.84
+        },
+        {
+          "time": 1789056360,
+          "value": 69.1
+        },
+        {
+          "time": 1789097580,
+          "value": 68.49
+        },
+        {
+          "time": 1789135080,
+          "value": 67.73
+        },
+        {
+          "time": 1789349400,
+          "value": 66.36
+        },
+        {
+          "time": 1789386900,
+          "value": 66.77
+        },
+        {
+          "time": 1789428120,
+          "value": 66.06
+        },
+        {
+          "time": 1789465620,
+          "value": 65.71
+        },
+        {
+          "time": 1789503120,
+          "value": 65.67
+        },
+        {
+          "time": 1789544340,
+          "value": 65.14
+        },
+        {
+          "time": 1789581840,
+          "value": 65.01
+        },
+        {
+          "time": 1789623060,
+          "value": 66.2
+        },
+        {
+          "time": 1789660560,
+          "value": 65.58
+        },
+        {
+          "time": 1789701780,
+          "value": 64.79
+        },
+        {
+          "time": 1789739280,
+          "value": 64.31
+        },
+        {
+          "time": 1789953360,
+          "value": 63.62
+        },
+        {
+          "time": 1789990860,
+          "value": 62.95
+        },
+        {
+          "time": 1790032080,
+          "value": 62.67
+        },
+        {
+          "time": 1790069580,
+          "value": 62.04
+        },
+        {
+          "time": 1790107080,
+          "value": 61.59
+        },
+        {
+          "time": 1790148300,
+          "value": 61.72
+        },
+        {
+          "time": 1790185800,
+          "value": 61.21
+        },
+        {
+          "time": 1790227020,
+          "value": 60.7
+        },
+        {
+          "time": 1790264520,
+          "value": 59.83
+        },
+        {
+          "time": 1790305740,
+          "value": 59.45
+        },
+        {
+          "time": 1790343240,
+          "value": 59.27
+        },
+        {
+          "time": 1790557260,
+          "value": 58.98
+        }
+      ]
+    },
+    "runner": {
+      "symbol": "XAUUSD",
+      "mode": "runner",
+      "evaluated_at": "2026-09-30 23:10:29",
+      "passed": false,
+      "threshold_used": 0.64,
+      "metrics": {
+        "win_rate_pct": 30.15,
+        "profit_factor": 0.69,
+        "sharpe_ratio": -5.43,
+        "max_drawdown_pct": 10.38,
+        "total_trades": 544,
+        "total_return_pct": -10.34
+      },
+      "criteria": {
+        "min_win_rate": 28.0,
+        "min_profit_factor": 1.2,
+        "min_sharpe_ratio": 0.5,
+        "max_drawdown": 35.0,
+        "min_trades": 20
+      },
+      "checks": {
+        "win_rate_passed": true,
+        "profit_factor_passed": false,
+        "sharpe_ratio_passed": false,
+        "drawdown_passed": true,
+        "trades_passed": true
+      },
+      "reasons": [
+        "Profit Factor (0.69) di bawah kriteria minimum (1.20)",
+        "Sharpe Ratio (-5.43) di bawah kriteria minimum (0.50)"
+      ],
+      "equity_curve": [
+        {
+          "time": 1786027260,
+          "value": 100.0
+        },
+        {
+          "time": 1786068480,
+          "value": 99.87
+        },
+        {
+          "time": 1786105980,
+          "value": 99.62
+        },
+        {
+          "time": 1786320060,
+          "value": 99.54
+        },
+        {
+          "time": 1786357560,
+          "value": 99.79
+        },
+        {
+          "time": 1786395060,
+          "value": 99.79
+        },
+        {
+          "time": 1786436280,
+          "value": 99.46
+        },
+        {
+          "time": 1786473780,
+          "value": 98.71
+        },
+        {
+          "time": 1786515000,
+          "value": 98.63
+        },
+        {
+          "time": 1786552500,
+          "value": 97.85
+        },
+        {
+          "time": 1786593720,
+          "value": 97.72
+        },
+        {
+          "time": 1786631220,
+          "value": 97.24
+        },
+        {
+          "time": 1786672440,
+          "value": 97.54
+        },
+        {
+          "time": 1786709940,
+          "value": 97.25
+        },
+        {
+          "time": 1786924020,
+          "value": 96.92
+        },
+        {
+          "time": 1786961520,
+          "value": 96.9
+        },
+        {
+          "time": 1786999020,
+          "value": 97.44
+        },
+        {
+          "time": 1787040240,
+          "value": 97.27
+        },
+        {
+          "time": 1787077740,
+          "value": 97.17
+        },
+        {
+          "time": 1787119200,
+          "value": 96.86
+        },
+        {
+          "time": 1787156700,
+          "value": 97.0
+        },
+        {
+          "time": 1787197920,
+          "value": 96.72
+        },
+        {
+          "time": 1787235420,
+          "value": 96.37
+        },
+        {
+          "time": 1787276640,
+          "value": 96.12
+        },
+        {
+          "time": 1787314140,
+          "value": 95.71
+        },
+        {
+          "time": 1787528220,
+          "value": 95.52
+        },
+        {
+          "time": 1787565720,
+          "value": 95.17
+        },
+        {
+          "time": 1787603220,
+          "value": 94.75
+        },
+        {
+          "time": 1787644440,
+          "value": 94.67
+        },
+        {
+          "time": 1787681940,
+          "value": 94.31
+        },
+        {
+          "time": 1787723160,
+          "value": 94.04
+        },
+        {
+          "time": 1787760660,
+          "value": 93.56
+        },
+        {
+          "time": 1787801880,
+          "value": 93.35
+        },
+        {
+          "time": 1787839380,
+          "value": 93.5
+        },
+        {
+          "time": 1787880600,
+          "value": 93.41
+        },
+        {
+          "time": 1787918100,
+          "value": 93.57
+        },
+        {
+          "time": 1788132180,
+          "value": 93.89
+        },
+        {
+          "time": 1788169680,
+          "value": 94.75
+        },
+        {
+          "time": 1788207180,
+          "value": 93.97
+        },
+        {
+          "time": 1788248400,
+          "value": 93.53
+        },
+        {
+          "time": 1788285900,
+          "value": 93.47
+        },
+        {
+          "time": 1788327120,
+          "value": 93.38
+        },
+        {
+          "time": 1788364620,
+          "value": 93.59
+        },
+        {
+          "time": 1788405840,
+          "value": 93.35
+        },
+        {
+          "time": 1788443340,
+          "value": 93.53
+        },
+        {
+          "time": 1788484560,
+          "value": 93.26
+        },
+        {
+          "time": 1788522060,
+          "value": 92.9
+        },
+        {
+          "time": 1788736140,
+          "value": 93.26
+        },
+        {
+          "time": 1788773640,
+          "value": 93.02
+        },
+        {
+          "time": 1788823920,
+          "value": 93.08
+        },
+        {
+          "time": 1788861420,
+          "value": 93.26
+        },
+        {
+          "time": 1788898920,
+          "value": 93.65
+        },
+        {
+          "time": 1788940140,
+          "value": 93.53
+        },
+        {
+          "time": 1788977640,
+          "value": 93.74
+        },
+        {
+          "time": 1789018860,
+          "value": 93.76
+        },
+        {
+          "time": 1789056360,
+          "value": 93.5
+        },
+        {
+          "time": 1789097580,
+          "value": 93.4
+        },
+        {
+          "time": 1789135080,
+          "value": 93.05
+        },
+        {
+          "time": 1789349400,
+          "value": 93.31
+        },
+        {
+          "time": 1789386900,
+          "value": 93.61
+        },
+        {
+          "time": 1789428120,
+          "value": 93.37
+        },
+        {
+          "time": 1789465620,
+          "value": 93.0
+        },
+        {
+          "time": 1789503120,
+          "value": 92.96
+        },
+        {
+          "time": 1789544340,
+          "value": 92.95
+        },
+        {
+          "time": 1789581840,
+          "value": 92.83
+        },
+        {
+          "time": 1789623060,
+          "value": 92.48
+        },
+        {
+          "time": 1789660560,
+          "value": 92.08
+        },
+        {
+          "time": 1789701780,
+          "value": 91.41
+        },
+        {
+          "time": 1789739280,
+          "value": 91.2
+        },
+        {
+          "time": 1789953360,
+          "value": 91.01
+        },
+        {
+          "time": 1789990860,
+          "value": 90.86
+        },
+        {
+          "time": 1790032080,
+          "value": 90.75
+        },
+        {
+          "time": 1790069580,
+          "value": 90.49
+        },
+        {
+          "time": 1790107080,
+          "value": 90.56
+        },
+        {
+          "time": 1790148300,
+          "value": 90.67
+        },
+        {
+          "time": 1790185800,
+          "value": 90.09
+        },
+        {
+          "time": 1790227020,
+          "value": 90.07
+        },
+        {
+          "time": 1790264520,
+          "value": 90.22
+        },
+        {
+          "time": 1790305740,
+          "value": 89.73
+        },
+        {
+          "time": 1790343240,
+          "value": 89.93
+        },
+        {
+          "time": 1790557260,
+          "value": 89.66
+        }
+      ]
+    }
+  }
+}

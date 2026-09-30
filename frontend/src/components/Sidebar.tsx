@@ -9,6 +9,7 @@ import {
   LayoutDashboard, 
   LineChart, 
   Settings2, 
+  Brain,
   BookOpen, 
   Database, 
   AlertOctagon, 
@@ -116,6 +117,7 @@ export default function Sidebar() {
           <NavItem href="/" icon={<LayoutDashboard size={22} />} label="Dashboard" active={pathname === "/"} isCollapsed={isCollapsed} onClick={closeSidebar} />
           <NavItem href="/markets" icon={<LineChart size={22} />} label="Markets" active={pathname === "/markets"} isCollapsed={isCollapsed} onClick={closeSidebar} />
           <NavItem href="/strategies" icon={<Settings2 size={22} />} label="Strategies" active={pathname === "/strategies"} isCollapsed={isCollapsed} onClick={closeSidebar} />
+          <NavItem href="/incubator" icon={<Brain size={22} />} label="AI Incubator" active={pathname === "/incubator"} isCollapsed={isCollapsed} onClick={closeSidebar} />
           <NavItem href="/database" icon={<Database size={22} />} label="Database" active={pathname === "/database"} isCollapsed={isCollapsed} onClick={closeSidebar} />
           <NavItem href="/journal" icon={<BookOpen size={22} />} label="Journal" active={pathname === "/journal"} isCollapsed={isCollapsed} onClick={closeSidebar} />
         </nav>

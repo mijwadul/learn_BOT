@@ -56,6 +56,7 @@ from .repositories.scorecard_repo import (
     save_scorecard_record,
     get_scorecard_history,
     get_latest_scorecards,
+    delete_scorecards_by_symbol,
 )
 
 async def init_db():

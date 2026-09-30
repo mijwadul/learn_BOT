@@ -217,7 +217,7 @@ def bulk_add_hard_negatives(records: list):
         logging.error(f"Gagal menyimpan Hard Negatives (Bulk): {e}")
         return 0
 
-def get_hard_negative_ids(mode: str = None, symbol: str = None):
+def get_hard_negative_ids(mode: str = None, symbol: str = None, limit: int = 80):
     try:
         ensure_schema_migrations()
         conditions = []
@@ -226,7 +226,8 @@ def get_hard_negative_ids(mode: str = None, symbol: str = None):
         if symbol:
             conditions.append(f"UPPER(symbol) = '{symbol.upper()}'")
         where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-        query = f"SELECT setup_id FROM hard_negatives {where_sql}"
+        limit_sql = f" LIMIT {int(limit)}" if limit else ""
+        query = f"SELECT setup_id FROM hard_negatives {where_sql} ORDER BY detected_at DESC{limit_sql}"
         with sync_engine.connect() as conn:
             df = pd.read_sql(text(query), con=conn)
         return df['setup_id'].tolist() if not df.empty else []
