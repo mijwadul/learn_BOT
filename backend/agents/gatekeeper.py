@@ -37,6 +37,10 @@ class GatekeeperAgent:
         all_y_pred = []
         test_chunk_idx = 1
         
+        current_symbol = getattr(self.researcher, 'symbol', getattr(self, 'symbol', 'XAUUSD'))
+        from agents.research import get_profile
+        profile = get_profile(current_symbol)
+
         for df_test in test_generator:
             if df_test.empty:
                 continue
@@ -47,14 +51,21 @@ class GatekeeperAgent:
             df_test = self.researcher.generate_targets(df_test)
             df_test = self.researcher.add_normalized_features(df_test)
             
-            # Filter spasial zona Re-entry BBMA LWMA (Selaras dengan Target Labeler)
+            # Filter spasial zona Re-entry BBMA LWMA & Zon Zero Loss (Selaras dengan Target Labeler)
             lwma_low_zone = np.maximum(df_test['LWMA_5_Low'].values, df_test['LWMA_10_Low'].values)
             lwma_high_zone = np.minimum(df_test['LWMA_5_High'].values, df_test['LWMA_10_High'].values)
             atr_test = df_test['ATR_14'].values if 'ATR_14' in df_test.columns else np.full(len(df_test), 0.001)
-            buffer = 0.35 * atr_test
+            buffer = profile.zone_buffer_ratio * atr_test
 
             reentry_buy_mask = (df_test['low'].values <= (lwma_low_zone + buffer))
             reentry_sell_mask = (df_test['high'].values >= (lwma_high_zone - buffer))
+
+            if profile.mandate_zzl:
+                ema50_vals = df_test['EMA_50'].values if 'EMA_50' in df_test.columns else df_test['close'].values
+                sma20_vals = df_test['SMA_20'].values if 'SMA_20' in df_test.columns else df_test['close'].values
+                reentry_buy_mask = reentry_buy_mask & (df_test['close'].values >= ema50_vals) & (sma20_vals >= ema50_vals)
+                reentry_sell_mask = reentry_sell_mask & (df_test['close'].values <= ema50_vals) & (sma20_vals <= ema50_vals)
+
             df_test = df_test[reentry_buy_mask | reentry_sell_mask].copy()
 
             
@@ -157,8 +168,8 @@ class GatekeeperAgent:
             else:
                 precision_sell = float((y_true_arr[sell_mask] == 1).mean()) if sell_mask.sum() > 0 else 0.0
             
-            # Asumsi Reward-to-Risk ratio: Normal mode 1:2.0 (sesuai target_labeler), Runner mode 1:5.0
-            rr_ratio = 2.0 if mode == 'normal' else getattr(self.researcher, 'max_runner_rr', 5.0)
+            # Asumsi Reward-to-Risk ratio sesuai Quantitative Profile
+            rr_ratio = profile.rr_normal if mode == 'normal' else profile.rr_runner
             gross_profit = trades_correct * rr_ratio
             gross_loss = max(trades_lost * 1.0, 0.001)
             profit_factor = gross_profit / gross_loss
@@ -193,12 +204,12 @@ class GatekeeperAgent:
         )
         
         # Skor akhir validasi: MURNI TRADE WIN RATE (Tanpa modifikasi matematika)
-        # Kelulusan model mengacu langsung pada Trade Win Rate riil di atas batas 50% (Normal) atau 25% (Runner)
-        # Menolak kelulusan semu jika sinyal terlalu sedikit (tidak memenuhi statistical significance)
+        # Kelulusan model mengacu langsung pada Trade Win Rate riil di atas batas Quantitative Profile
+        min_wr_target = profile.oos_criteria_normal["min_win_rate"] / 100.0 if mode == 'normal' else profile.oos_criteria_runner["min_win_rate"] / 100.0
         min_required_signals = 10 if mode == 'runner' else 15
         if total_signals >= min_required_signals:
             return float(trade_win_rate)
-        elif mode == 'runner' and total_signals >= 5 and trade_win_rate >= 0.25 and profit_factor >= 1.5:
+        elif mode == 'runner' and total_signals >= 5 and trade_win_rate >= min_wr_target and profit_factor >= 1.2:
             logging.info(f"✅ Runner Mode OOS lolos dengan sinyal selektif ({total_signals} sinyal, WR: {trade_win_rate*100:.1f}%, PF: {profit_factor:.2f}, Exp: {expectancy:+.2f}R).")
             return float(trade_win_rate)
         else:

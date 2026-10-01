@@ -5,6 +5,7 @@ from .optimizer import optimize_hyperparameters
 from .calibrator import calibrate_optimal_threshold
 from .model_manager import ModelManager
 from .oos_evaluator import run_fit_proper_test, FIT_PROPER_THRESHOLDS
+from .profiles import get_profile, BaseProfile, XAUUSDProfile, DefaultProfile
 
 __all__ = [
     "generate_targets",
@@ -16,5 +17,9 @@ __all__ = [
     "ModelManager",
     "run_fit_proper_test",
     "FIT_PROPER_THRESHOLDS",
+    "get_profile",
+    "BaseProfile",
+    "XAUUSDProfile",
+    "DefaultProfile",
 ]
 

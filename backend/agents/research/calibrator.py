@@ -12,7 +12,8 @@ def calibrate_optimal_threshold(
     mode: str = "normal",
     setup_directions: Optional[np.ndarray] = None,
     min_signals: int = 25,
-    max_runner_rr: float = 5.0
+    max_runner_rr: float = 5.0,
+    symbol: str = "XAUUSD"
 ) -> float:
     """
     Post-Training Dynamic Threshold Calibration (Binary Meta-Model):
@@ -21,7 +22,10 @@ def calibrate_optimal_threshold(
     Menjamin ambang batas menghasilkan volume sinyal yang sehat dan memaksimalkan Expectancy (+R) & Win Rate.
     """
     if model is None or X is None or len(X) == 0:
-        return 0.54 if mode == 'normal' else 0.50
+        return 0.50 if mode == 'runner' else 0.54
+
+    from .profiles import get_profile
+    profile = get_profile(symbol)
 
     n = len(X)
     cal_start = int(n * 0.75)
@@ -37,21 +41,21 @@ def calibrate_optimal_threshold(
     idx_win = classes.index(1) if 1 in classes else (1 if probs.shape[1] > 1 else 0)
     p_win = probs[:, idx_win] if probs.shape[1] > idx_win else probs[:, -1]
 
-    rr_ratio = 1.5 if mode == 'normal' else 3.0
-    target_wr = 0.52 if mode == 'normal' else 0.28
+    rr_ratio = profile.rr_normal if mode == 'normal' else profile.rr_runner
+    target_wr = (profile.oos_criteria_normal["min_win_rate"] if mode == 'normal' else profile.oos_criteria_runner["min_win_rate"]) / 100.0
+    min_crit_wr = target_wr
+    min_crit_pf = (profile.oos_criteria_normal["min_profit_factor"] if mode == 'normal' else profile.oos_criteria_runner["min_profit_factor"])
 
     best_score = -999.0
     best_th = 0.50 if mode == 'runner' else 0.54
     best_stats = {}
 
-    # Candidate threshold disesuaikan dengan distribusi probabilitas realistis:
-    # Normal (RR 1:1.5): target WR >= 52%; threshold candidate ~48-72%
-    # Runner (RR 1:3.0): target WR >= 28%; threshold candidate ~38-65%
+    # Candidate threshold disesuaikan dengan profil instrumen:
     if mode == 'runner':
-        candidate_thresholds = np.linspace(0.38, 0.65, 28)
+        candidate_thresholds = np.linspace(0.35, 0.65, 31)
         effective_min_signals = max(min_signals, int(len(X_cal) * 0.005))
     else:
-        candidate_thresholds = np.linspace(0.48, 0.72, 25)
+        candidate_thresholds = np.linspace(0.42, 0.70, 29)
         effective_min_signals = max(min_signals, int(len(X_cal) * 0.005))
 
     for th in candidate_thresholds:
@@ -68,14 +72,12 @@ def calibrate_optimal_threshold(
         pf = gross_profit / gross_loss
         expectancy = (wr * rr_ratio) - ((1.0 - wr) * 1.0)
 
-        # Penalti keras jika metrik di bawah standar kelulusan OOS (Normal: WR 52%, PF 1.30; Runner: WR 28%, PF 1.20)
+        # Penalti keras jika metrik di bawah standar kelulusan profile
         wr_penalty = 0.0
-        min_crit_wr = 0.52 if mode == 'normal' else 0.28
         if wr < min_crit_wr:
             wr_penalty = (min_crit_wr - wr) * 25.0
 
         pf_penalty = 0.0
-        min_crit_pf = 1.30 if mode == 'normal' else 1.20
         if pf < min_crit_pf:
             pf_penalty = (min_crit_pf - pf) * 10.0
 

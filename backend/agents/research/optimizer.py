@@ -59,11 +59,13 @@ def optimize_hyperparameters(
     sample_weights = np.array(sample_weights, dtype=float)
     n_samples = len(X)
 
-    rr_ratio = 3.0 if mode == "runner" else 1.5
-    target_wr = 0.52 if mode == 'normal' else 0.28
+    from .profiles import get_profile
+    profile = get_profile(symbol)
+    rr_ratio = profile.rr_runner if mode == "runner" else profile.rr_normal
+    target_wr = (profile.oos_criteria_runner["min_win_rate"] if mode == 'runner' else profile.oos_criteria_normal["min_win_rate"]) / 100.0
 
     logger.info(f"[{mode.upper()} OPTUNA START] 🔬 Memulai Purged Walk-Forward CV & Meta-Model Auto-Tuning ({n_trials} Trials) untuk {symbol}...")
-    logger.info(f"[{mode.upper()} OPTUNA METRIK] 🎯 Target: Precision (WR >= {target_wr*100:.0f}%) + Expectancy (+R) + PR-AUC")
+    logger.info(f"[{mode.upper()} OPTUNA METRIK] 🎯 Target: Precision (WR >= {target_wr*100:.0f}%) + Expectancy (+R) + PR-AUC pada RR 1:{rr_ratio:.1f}")
 
     # TD#5 FIX: Purge window dinaikkan 150 → 250 bar (~21 jam di M5).
     # Satu siklus BBMA penuh (Extrem → TPW → MHV → CSA/CSAK → Re-entry) bisa makan
@@ -73,7 +75,7 @@ def optimize_hyperparameters(
     logger.info(f"[{mode.upper()} OPTUNA CV] Membentuk {len(folds)} Purged Walk-Forward Folds (Total: {n_samples:,} baris setup).")
 
     best_so_far = -10.0
-    best_threshold_so_far = 0.54 if mode == 'normal' else 0.48
+    best_threshold_so_far = 0.48 if mode == 'runner' else 0.52
 
     def objective(trial):
         nonlocal best_so_far, best_threshold_so_far
@@ -100,7 +102,7 @@ def optimize_hyperparameters(
             'verbose': -1
         }
 
-        trial_threshold = trial.suggest_float('entry_threshold', 0.38, 0.65) if mode == 'runner' else trial.suggest_float('entry_threshold', 0.48, 0.72)
+        trial_threshold = trial.suggest_float('entry_threshold', 0.35, 0.65) if mode == 'runner' else trial.suggest_float('entry_threshold', 0.42, 0.70)
 
         fold_scores = []
         fold_wrs = []

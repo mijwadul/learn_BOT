@@ -17,6 +17,7 @@ from .research import (
     optimize_hyperparameters,
     calibrate_optimal_threshold,
     ModelManager,
+    get_profile,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class ResearcherAgent:
 
     def __init__(self, symbol: str = "XAUUSD"):
         self.symbol = str(symbol or "XAUUSD").upper()
+        self.profile = get_profile(self.symbol)
         self.model_normal = None
         self.model_runner = None
         self.features: List[str] = []
@@ -42,7 +44,7 @@ class ResearcherAgent:
         self.last_trained_runner = None
         self.optimal_threshold_normal = 0.54
         self.optimal_threshold_runner = 0.54
-        self.max_runner_rr = 5.0
+        self.max_runner_rr = getattr(self.profile, "rr_runner", 3.5)
         self.pending_training: Dict[str, Dict[str, Any]] = {}
         self._current_train_type: str = "incremental"
         self._models_cache: Dict[str, Dict[str, Any]] = {}
@@ -71,6 +73,8 @@ class ResearcherAgent:
             }
 
         self.symbol = clean_sym
+        self.profile = get_profile(self.symbol)
+        self.max_runner_rr = getattr(self.profile, "rr_runner", 3.5)
 
         if clean_sym in self._models_cache:
             c = self._models_cache[clean_sym]
@@ -227,7 +231,8 @@ class ResearcherAgent:
             mode=mode,
             setup_directions=setup_directions,
             min_signals=min_signals,
-            max_runner_rr=getattr(self, 'max_runner_rr', 5.0)
+            max_runner_rr=getattr(self, 'max_runner_rr', 5.0),
+            symbol=self.symbol
         )
         if mode == 'normal':
             self.optimal_threshold_normal = float(th)

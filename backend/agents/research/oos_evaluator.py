@@ -83,8 +83,10 @@ def run_fit_proper_test(
     sym_clean = str(symbol).strip().upper()
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Ambil kriteria kelulusan
-    base_criteria = FIT_PROPER_THRESHOLDS.get(mode_str, FIT_PROPER_THRESHOLDS["normal"]).copy()
+    # Ambil kriteria kelulusan berbasis Quantitative Profile instrumen
+    from .profiles import get_profile
+    profile = get_profile(sym_clean)
+    base_criteria = profile.get_criteria(mode_str)
     if custom_thresholds:
         base_criteria.update(custom_thresholds)
 
@@ -165,10 +167,17 @@ def run_fit_proper_test(
         lwma_high_zone = np.minimum(df_calc['LWMA_5_High'].values, df_calc['LWMA_10_High'].values) if 'LWMA_5_High' in df_calc.columns else df_calc['high'].values
         atrs = df_calc['ATR_14'].values if 'ATR_14' in df_calc.columns else np.full(len(df_calc), 0.001)
         atrs = np.where(np.isnan(atrs) | (atrs <= 0), 0.001, atrs)
-        buffer = 0.35 * atrs
+        buffer = profile.zone_buffer_ratio * atrs
 
         is_valid_buy = (df_calc['low'].values <= (lwma_low_zone + buffer))
         is_valid_sell = (df_calc['high'].values >= (lwma_high_zone - buffer))
+
+        # Filter Zon Zero Loss (ZZL) Wajib jika dimandatkan oleh profile aset (misal XAUUSD)
+        if profile.mandate_zzl:
+            ema_val = df_calc['EMA_50'].values if 'EMA_50' in df_calc.columns else df_calc['close'].values
+            sma_val = df_calc['SMA_20'].values if 'SMA_20' in df_calc.columns else df_calc['close'].values
+            is_valid_buy = is_valid_buy & (df_calc['close'].values >= ema_val) & (sma_val >= ema_val)
+            is_valid_sell = is_valid_sell & (df_calc['close'].values <= ema_val) & (sma_val <= ema_val)
 
         # 4b. Filter Trigger BBMA — Sinkronisasi dengan target_labeler
         # target_labeler HANYA memberi label positif jika ada CSA/CSAK/CSM dalam 30 bar
@@ -231,26 +240,17 @@ def run_fit_proper_test(
             buy_signals = buy_signals & (~both_mask | (close_val >= ema_val))
             sell_signals = sell_signals & (~both_mask | (close_val < ema_val))
 
-        # 6. Kalkulasi SL & TP Adaptif per Candle dari ATR
-        # PENTING: Formula SL & TP diselaraskan presisi dengan target_labeler v2:
-        # - SL: 1.2 * ATR
-        # - Normal Mode TP: 1.3R * SL (~1.56 ATR, selaras dengan labeler MFE >= 1.0R)
-        # - Runner Mode TP: 3.0R * SL (~3.60 ATR, selaras dengan labeler MFE >= 3.0R)
-        # Mencegah mismatch fatal di mana labeler menargetkan 3.0R tetapi VectorBT menuntut 5.0R-15.0R.
+        # 6. Kalkulasi SL & TP Adaptif per Candle dari ATR sesuai Profile
         close_prices = df_calc['close'].values
-        sl_pct = np.clip((1.2 * atrs) / close_prices, 0.0005, 0.15)
+        sl_pct = np.clip((profile.sl_atr_mult * atrs) / close_prices, 0.0005, 0.15)
 
         if mode_str == "normal":
-            tp_pct = np.clip((1.3 * 1.2 * atrs) / close_prices, 0.001, 0.80)
+            tp_pct = np.clip((profile.rr_normal * profile.sl_atr_mult * atrs) / close_prices, 0.001, 0.80)
         else:
-            # Runner Mode: 3.0R selaras dengan Target_Runner (MFE >= 3.0R)
-            tp_pct = np.clip((3.0 * 1.2 * atrs) / close_prices, 0.001, 0.80)
+            tp_pct = np.clip((profile.rr_runner * profile.sl_atr_mult * atrs) / close_prices, 0.001, 0.80)
 
         # 7. Cooldown State Machine — mencegah spam sinyal di zona yang sama
-        # Setelah satu sinyal aktif, abaikan MIN_COOLDOWN_BARS berikutnya.
-        # TD#4 FIX: Dinaikkan dari 10 → 18 bar (~1.5 jam di M5) agar siklus ayunan
-        # harga selesai sebelum membuka posisi baru di zona LWMA yang sama.
-        MIN_COOLDOWN_BARS = 18  # ~90 menit di M5 setelah entry
+        MIN_COOLDOWN_BARS = profile.min_cooldown_bars
         cooldown_remaining = 0
         buy_signals_filtered  = np.zeros(len(buy_signals), dtype=bool)
         sell_signals_filtered = np.zeros(len(sell_signals), dtype=bool)
@@ -267,33 +267,60 @@ def run_fit_proper_test(
         buy_signals  = buy_signals_filtered
         sell_signals = sell_signals_filtered
 
+        # 7a. Simulasi Trailing Breakeven Realistis (Harmonisasi dengan target_labeler & PositionTracker Live)
+        # Posisi yang sudah mengamankan profit >= 1.0R dilindungi dari false -1.0R full loss saat harga pullback ke entry
+        highs = df_calc['high'].values if 'high' in df_calc.columns else close_prices
+        lows = df_calc['low'].values if 'low' in df_calc.columns else close_prices
+        buy_exits = np.zeros(len(df_calc), dtype=bool)
+        sell_exits = np.zeros(len(df_calc), dtype=bool)
+        n_bars = len(df_calc)
+        current_rr = profile.rr_normal if mode_str == "normal" else profile.rr_runner
+
+        buy_indices = np.where(buy_signals)[0]
+        for b_idx in buy_indices:
+            e_p = close_prices[b_idx]
+            sl_dist = profile.sl_atr_mult * atrs[b_idx]
+            tp_dist = current_rr * sl_dist
+            be_trig_p = e_p + profile.breakeven_r * sl_dist
+            hard_sl_p = e_p - sl_dist
+
+            secured = False
+            for j in range(b_idx + 1, min(b_idx + 240, n_bars)):
+                if highs[j] >= e_p + tp_dist or lows[j] <= hard_sl_p:
+                    break
+                if not secured and highs[j] >= be_trig_p:
+                    secured = True
+                if secured and lows[j] <= e_p:
+                    buy_exits[j] = True
+                    break
+
+        sell_indices = np.where(sell_signals)[0]
+        for s_idx in sell_indices:
+            e_p = close_prices[s_idx]
+            sl_dist = profile.sl_atr_mult * atrs[s_idx]
+            tp_dist = current_rr * sl_dist
+            be_trig_p = e_p - profile.breakeven_r * sl_dist
+            hard_sl_p = e_p + sl_dist
+
+            secured = False
+            for j in range(s_idx + 1, min(s_idx + 240, n_bars)):
+                if lows[j] <= e_p - tp_dist or highs[j] >= hard_sl_p:
+                    break
+                if not secured and lows[j] <= be_trig_p:
+                    secured = True
+                if secured and highs[j] >= e_p:
+                    sell_exits[j] = True
+                    break
+
         import vectorbt as vbt
-
-        # 7b. Body Rejection Exit Signals — Sinkronisasi Invalidasi Labeler vs VectorBT
-        # target_labeler membatalkan (invalidate) posisi buy jika `close < BB_Lower` sebelum secured,
-        # dan posisi sell jika `close > BB_Upper` sebelum secured. VectorBT tidak punya mekanisme
-        # ini secara native. Kita tambahkan sebagai `exits`/`short_exits` yang bersaing dengan SL/TP —
-        # mana yang duluan terpicu, itulah yang dieksekusi (konsisten dengan aturan BBMA body rejection).
-        bb_lower_arr = df_calc['BB_Lower'].values if 'BB_Lower' in df_calc.columns else (close_prices - 2.0 * atrs)
-        bb_upper_arr = df_calc['BB_Upper'].values if 'BB_Upper' in df_calc.columns else (close_prices + 2.0 * atrs)
-
-        # Close di bawah Lower BB → CSM Sell berlawanan → exit posisi Buy
-        body_reject_buy_exit  = pd.Series((close_prices < bb_lower_arr), index=df_calc.index)
-        # Close di atas Upper BB → CSM Buy berlawanan → exit posisi Sell
-        body_reject_sell_exit = pd.Series((close_prices > bb_upper_arr), index=df_calc.index)
-
-        logger.debug(
-            f"[BODY REJECTION EXIT] Potensi exit buy (CSM Sell): {body_reject_buy_exit.sum()} bar | "
-            f"Potensi exit sell (CSM Buy): {body_reject_sell_exit.sum()} bar"
-        )
 
         spread_fee = 0.00015 # Standar spread institusional ~30 poin pada emas/forex
         portfolio = vbt.Portfolio.from_signals(
             close=pd.Series(close_prices, index=df_calc.index),
             entries=pd.Series(buy_signals, index=df_calc.index),
             short_entries=pd.Series(sell_signals, index=df_calc.index),
-            exits=body_reject_buy_exit,
-            short_exits=body_reject_sell_exit,
+            exits=pd.Series(buy_exits, index=df_calc.index),
+            short_exits=pd.Series(sell_exits, index=df_calc.index),
             sl_stop=pd.Series(sl_pct, index=df_calc.index),
             tp_stop=pd.Series(tp_pct, index=df_calc.index),
             fees=spread_fee,

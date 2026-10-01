@@ -309,27 +309,31 @@ async def trigger_validate(req: ValidateRequest = None):
                 return
             logging.info(f"Memulai validasi OOS on-demand untuk {target_symbol} - {target_mode.upper()}...")
             accuracy = bot.gatekeeper.validate_model(target_mode, test_generator, total_test_chunks)
+            from agents.research import get_profile
+            profile = get_profile(target_symbol)
+            min_normal_wr = profile.oos_criteria_normal["min_win_rate"] / 100.0
+            min_runner_wr = profile.oos_criteria_runner["min_win_rate"] / 100.0
+
             if target_mode == 'normal':
                 bot.researcher.last_accuracy_normal = float(accuracy)
                 bot.researcher.last_trained_normal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 bot.researcher.save_metadata()
-                if accuracy >= 0.50:
-                    bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid())
-                    logging.info(f"✅ Model Normal ({target_symbol}) lulus validasi (Win Rate: {accuracy*100:.2f}% >= 50%). Supervisor Normal Mode = VALID.")
+                if accuracy >= min_normal_wr:
+                    bot.supervisor.set_model_validity(True, bot.supervisor.is_runner_valid(target_symbol), symbol=target_symbol)
+                    logging.info(f"✅ Model Normal ({target_symbol}) lulus validasi (Win Rate: {accuracy*100:.2f}% >= {min_normal_wr*100:.0f}%). Supervisor Normal Mode = VALID.")
                 else:
-                    bot.supervisor.set_model_validity(False, bot.supervisor.is_runner_valid())
-                    logging.warning(f"❌ Model Normal ({target_symbol}) gagal validasi (Win Rate: {accuracy*100:.2f}% < 50%). Supervisor Normal Mode = QUARANTINE.")
+                    bot.supervisor.set_model_validity(False, bot.supervisor.is_runner_valid(target_symbol), symbol=target_symbol)
+                    logging.warning(f"❌ Model Normal ({target_symbol}) gagal validasi (Win Rate: {accuracy*100:.2f}% < {min_normal_wr*100:.0f}%). Supervisor Normal Mode = QUARANTINE.")
             elif target_mode == 'runner':
                 bot.researcher.last_accuracy_runner = float(accuracy)
                 bot.researcher.last_trained_runner = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 bot.researcher.save_metadata()
-                RUNNER_MIN_WIN_RATE = 0.25
-                if accuracy >= RUNNER_MIN_WIN_RATE:
-                    bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), True)
-                    logging.info(f"✅ Model Runner ({target_symbol}) lulus validasi (Win Rate: {accuracy*100:.2f}% >= {RUNNER_MIN_WIN_RATE*100:.0f}% pada RR 1:5). Supervisor Runner Mode = VALID.")
+                if accuracy >= min_runner_wr:
+                    bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(target_symbol), True, symbol=target_symbol)
+                    logging.info(f"✅ Model Runner ({target_symbol}) lulus validasi (Win Rate: {accuracy*100:.2f}% >= {min_runner_wr*100:.0f}% pada RR 1:{profile.rr_runner}). Supervisor Runner Mode = VALID.")
                 else:
-                    bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(), False)
-                    logging.warning(f"❌ Model Runner ({target_symbol}) gagal validasi (Win Rate: {accuracy*100:.2f}% < {RUNNER_MIN_WIN_RATE*100:.0f}%). Supervisor Runner Mode = QUARANTINE.")
+                    bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(target_symbol), False, symbol=target_symbol)
+                    logging.warning(f"❌ Model Runner ({target_symbol}) gagal validasi (Win Rate: {accuracy*100:.2f}% < {min_runner_wr*100:.0f}%). Supervisor Runner Mode = QUARANTINE.")
         except Exception as e:
             logging.error(f"[VALIDATE] Gagal: {e}")
 

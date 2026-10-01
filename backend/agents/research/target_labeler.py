@@ -2,6 +2,7 @@ import logging
 import numpy as np
 import pandas as pd
 from utils.indicators import calculate_atr, calculate_ema, calculate_lwma
+from .profiles import get_profile
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +98,8 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
         or getattr(df, 'attrs', {}).get('symbol')
         or (df['symbol'].iloc[0] if 'symbol' in df.columns and len(df) > 0 else 'XAUUSD')
     ).upper()
-    struct_buf_ratio = _get_sym_buffer(sym_name)
+    profile = get_profile(sym_name)
+    struct_buf_ratio = profile.zone_buffer_ratio
 
     # --- Deteksi fractal origin dari kolom hasil calculate_fractal_origin() ---
     frac_buy  = df['fractal_origin_buy'].values  if 'fractal_origin_buy'  in df.columns else np.ones(len(df))
@@ -124,17 +126,23 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
         if np.isnan(lwma_low_zone[i]) or np.isnan(lwma_high_zone[i]):
             continue
 
-        buf = 0.35 * atr_i
+        buf = profile.zone_buffer_ratio * atr_i
         eval_buy  = (lows[i]  <= lwma_low_zone[i]  + buf)
         eval_sell = (highs[i] >= lwma_high_zone[i] - buf)
+
+        # Filter Zon Zero Loss (ZZL) Wajib jika diatur pada profil instrumen (misal XAUUSD)
+        if profile.mandate_zzl:
+            eval_buy = eval_buy and (closes[i] >= ema50[i]) and (sma20[i] >= ema50[i])
+            eval_sell = eval_sell and (closes[i] <= ema50[i]) and (sma20[i] <= ema50[i])
+
         if not eval_buy and not eval_sell:
             continue
 
         entry_price = closes[i]
         struct_tol  = struct_buf_ratio * atr_i
 
-        # --- SL Distance (konsisten dengan OOS evaluator: 1.2 * ATR) ---
-        sl_dist_i = max(0.4 * atr_i, min(2.5 * atr_i, 1.2 * atr_i))
+        # --- SL Distance (konsisten dengan profile: profile.sl_atr_mult * ATR) ---
+        sl_dist_i = max(0.4 * atr_i, min(2.5 * atr_i, profile.sl_atr_mult * atr_i))
 
         # ---------------------------------------------------------------
         # BUY SETUP
@@ -180,8 +188,8 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
                 if excursion_r > max_mfe:
                     max_mfe = excursion_r
 
-                # Secured breakeven ketika hit ≥ 1R
-                if not secured and excursion_r >= 1.0:
+                # Secured breakeven ketika hit >= breakeven_r (default 1.0R)
+                if not secured and excursion_r >= profile.breakeven_r:
                     secured = True
 
                 # Early exit if we already captured max_runner_rr
@@ -194,9 +202,9 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
 
             if not invalidated:
                 mfe_r_arr[i] = max(mfe_r_arr[i], float(max_mfe))
-                if max_mfe >= 1.0:
+                if max_mfe >= profile.rr_normal:
                     labels_normal[i] = 1
-                if max_mfe >= 3.0:
+                if max_mfe >= profile.rr_runner:
                     labels_runner[i] = 1
 
         # ---------------------------------------------------------------
@@ -243,7 +251,8 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
                 if excursion_r > max_mfe:
                     max_mfe = excursion_r
 
-                if not secured and excursion_r >= 1.0:
+                # Secured breakeven ketika hit >= breakeven_r (default 1.0R)
+                if not secured and excursion_r >= profile.breakeven_r:
                     secured = True
 
                 if max_mfe >= max_runner_rr:
@@ -255,9 +264,9 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
             if not invalidated:
                 cur = mfe_r_arr[i]
                 mfe_r_arr[i] = max(cur, float(max_mfe))
-                if max_mfe >= 1.0:
+                if max_mfe >= profile.rr_normal:
                     labels_normal[i] = 1
-                if max_mfe >= 3.0:
+                if max_mfe >= profile.rr_runner:
                     labels_runner[i] = 1
 
     df['Target_Normal']   = labels_normal.astype(int)
