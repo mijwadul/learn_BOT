@@ -126,8 +126,13 @@ def run_fit_proper_test(
                 pass
 
         # 1. Generate Indikator, Target, dan Fitur Normalisasi
+        regime_cols = ('BB_Upper', 'forbid_buy', 'is_CSA_Buy', 'is_breakout_bull', 'is_running_bull', 'is_bb_squeeze', 'is_bb_expanding')
+        if any(c not in df_calc.columns or (c in df_calc.columns and df_calc[c].isna().all()) for c in regime_cols):
+            from utils.indicators import calculate_bbma
+            df_calc = calculate_bbma(df_calc)
+
         if hasattr(researcher, "generate_targets"):
-            df_calc = researcher.generate_targets(df_calc)
+            df_calc = researcher.generate_targets(df_calc, symbol=sym_clean)
         if hasattr(researcher, "add_normalized_features"):
             df_calc = researcher.add_normalized_features(df_calc)
 
@@ -163,21 +168,32 @@ def run_fit_proper_test(
             raise ValueError("Model tidak memiliki method predict atau predict_proba")
 
         # 4. Filter Spasial Zona Re-entry BBMA LWMA
-        lwma_low_zone = np.maximum(df_calc['LWMA_5_Low'].values, df_calc['LWMA_10_Low'].values) if 'LWMA_5_Low' in df_calc.columns else df_calc['low'].values
-        lwma_high_zone = np.minimum(df_calc['LWMA_5_High'].values, df_calc['LWMA_10_High'].values) if 'LWMA_5_High' in df_calc.columns else df_calc['high'].values
-        atrs = df_calc['ATR_14'].values if 'ATR_14' in df_calc.columns else np.full(len(df_calc), 0.001)
+        low_s = pd.to_numeric(df_calc['low'], errors='coerce').fillna(0.0)
+        high_s = pd.to_numeric(df_calc['high'], errors='coerce').fillna(0.0)
+        lw5l = pd.to_numeric(df_calc['LWMA_5_Low'], errors='coerce').fillna(low_s).values if 'LWMA_5_Low' in df_calc.columns else low_s.values
+        lw10l = pd.to_numeric(df_calc['LWMA_10_Low'], errors='coerce').fillna(low_s).values if 'LWMA_10_Low' in df_calc.columns else low_s.values
+        lw5h = pd.to_numeric(df_calc['LWMA_5_High'], errors='coerce').fillna(high_s).values if 'LWMA_5_High' in df_calc.columns else high_s.values
+        lw10h = pd.to_numeric(df_calc['LWMA_10_High'], errors='coerce').fillna(high_s).values if 'LWMA_10_High' in df_calc.columns else high_s.values
+
+        lwma_low_zone = np.maximum(lw5l, lw10l)
+        lwma_high_zone = np.minimum(lw5h, lw10h)
+        atrs = pd.to_numeric(df_calc['ATR_14'], errors='coerce').fillna(0.001).values if 'ATR_14' in df_calc.columns else np.full(len(df_calc), 0.001)
         atrs = np.where(np.isnan(atrs) | (atrs <= 0), 0.001, atrs)
         buffer = profile.zone_buffer_ratio * atrs
 
-        is_valid_buy = (df_calc['low'].values <= (lwma_low_zone + buffer))
-        is_valid_sell = (df_calc['high'].values >= (lwma_high_zone - buffer))
+        low_oos = low_s.values
+        high_oos = high_s.values
+        is_valid_buy = (low_oos <= (lwma_low_zone + buffer))
+        is_valid_sell = (high_oos >= (lwma_high_zone - buffer))
 
         # Filter Zon Zero Loss (ZZL) Wajib jika dimandatkan oleh profile aset (misal XAUUSD)
         if profile.mandate_zzl:
-            ema_val = df_calc['EMA_50'].values if 'EMA_50' in df_calc.columns else df_calc['close'].values
-            sma_val = df_calc['SMA_20'].values if 'SMA_20' in df_calc.columns else df_calc['close'].values
-            is_valid_buy = is_valid_buy & (df_calc['close'].values >= ema_val) & (sma_val >= ema_val)
-            is_valid_sell = is_valid_sell & (df_calc['close'].values <= ema_val) & (sma_val <= ema_val)
+            close_s = pd.to_numeric(df_calc['close'], errors='coerce').fillna(0.0)
+            close_oos = close_s.values
+            ema_val = pd.to_numeric(df_calc['EMA_50'], errors='coerce').fillna(close_s).values if 'EMA_50' in df_calc.columns else close_oos
+            sma_val = pd.to_numeric(df_calc['SMA_20'], errors='coerce').fillna(close_s).values if 'SMA_20' in df_calc.columns else close_oos
+            is_valid_buy = is_valid_buy & (close_oos >= ema_val) & (sma_val >= ema_val)
+            is_valid_sell = is_valid_sell & (close_oos <= ema_val) & (sma_val <= ema_val)
 
         # 4b. Filter Trigger BBMA — Sinkronisasi dengan target_labeler
         # target_labeler HANYA memberi label positif jika ada CSA/CSAK/CSM dalam 30 bar
@@ -224,13 +240,31 @@ def run_fit_proper_test(
             has_trigger_buy  = np.ones(len(df_calc), dtype=bool)
             has_trigger_sell = np.ones(len(df_calc), dtype=bool)
 
-        # 5. Threshold Masuk
+        # 5. Threshold Masuk & Anti Counter-Trend Topography Guard
         cal_th = getattr(researcher, f"optimal_threshold_{mode_str}", 0.54) or 0.54
         if cal_th > 1.0:
             cal_th /= 100.0
 
-        buy_signals  = (p_win >= cal_th) & is_valid_buy  & has_trigger_buy
-        sell_signals = (p_win >= cal_th) & is_valid_sell & has_trigger_sell
+        forbid_b = pd.to_numeric(df_calc['forbid_buy'], errors='coerce').fillna(0).values.astype(bool) if 'forbid_buy' in df_calc.columns else np.zeros(len(df_calc), dtype=bool)
+        forbid_s = pd.to_numeric(df_calc['forbid_sell'], errors='coerce').fillna(0).values.astype(bool) if 'forbid_sell' in df_calc.columns else np.zeros(len(df_calc), dtype=bool)
+        sq_b = pd.to_numeric(df_calc['is_squeeze_buy_allowed'], errors='coerce').fillna(1).values.astype(bool) if 'is_squeeze_buy_allowed' in df_calc.columns else np.ones(len(df_calc), dtype=bool)
+        sq_s = pd.to_numeric(df_calc['is_squeeze_sell_allowed'], errors='coerce').fillna(1).values.astype(bool) if 'is_squeeze_sell_allowed' in df_calc.columns else np.ones(len(df_calc), dtype=bool)
+
+        # Partisi Rezim Pasar Spesifik per Mode (Regime-Specialized Filtering)
+        is_sq = pd.to_numeric(df_calc['is_bb_squeeze'], errors='coerce').fillna(0).values.astype(bool) if 'is_bb_squeeze' in df_calc.columns else np.zeros(len(df_calc), dtype=bool)
+        is_exp = pd.to_numeric(df_calc['is_bb_expanding'], errors='coerce').fillna(0).values.astype(bool) if 'is_bb_expanding' in df_calc.columns else np.zeros(len(df_calc), dtype=bool)
+        is_brk_b = pd.to_numeric(df_calc['is_breakout_bull'], errors='coerce').fillna(0).values.astype(bool) if 'is_breakout_bull' in df_calc.columns else np.zeros(len(df_calc), dtype=bool)
+        is_brk_s = pd.to_numeric(df_calc['is_breakout_bear'], errors='coerce').fillna(0).values.astype(bool) if 'is_breakout_bear' in df_calc.columns else np.zeros(len(df_calc), dtype=bool)
+        is_run_b = pd.to_numeric(df_calc['is_running_bull'], errors='coerce').fillna(0).values.astype(bool) if 'is_running_bull' in df_calc.columns else np.zeros(len(df_calc), dtype=bool)
+        is_run_s = pd.to_numeric(df_calc['is_running_bear'], errors='coerce').fillna(0).values.astype(bool) if 'is_running_bear' in df_calc.columns else np.zeros(len(df_calc), dtype=bool)
+
+        runner_regime_mask = is_brk_b | is_brk_s | is_run_b | is_run_s | (is_exp & ~is_sq)
+        normal_regime_mask = is_sq | (~runner_regime_mask)
+
+        regime_mask = runner_regime_mask if mode_str == "runner" else normal_regime_mask
+
+        buy_signals  = (p_win >= cal_th) & is_valid_buy  & has_trigger_buy  & (~forbid_b) & sq_b & regime_mask
+        sell_signals = (p_win >= cal_th) & is_valid_sell & has_trigger_sell & (~forbid_s) & sq_s & regime_mask
 
         # Resolusi sinyal ganda di bar yang sama (Mutual Exclusion via EMA 50)
         both_mask = buy_signals & sell_signals
@@ -267,51 +301,6 @@ def run_fit_proper_test(
         buy_signals  = buy_signals_filtered
         sell_signals = sell_signals_filtered
 
-        # 7a. Simulasi Trailing Breakeven Realistis (Harmonisasi dengan target_labeler & PositionTracker Live)
-        # Posisi yang sudah mengamankan profit >= 1.0R dilindungi dari false -1.0R full loss saat harga pullback ke entry
-        highs = df_calc['high'].values if 'high' in df_calc.columns else close_prices
-        lows = df_calc['low'].values if 'low' in df_calc.columns else close_prices
-        buy_exits = np.zeros(len(df_calc), dtype=bool)
-        sell_exits = np.zeros(len(df_calc), dtype=bool)
-        n_bars = len(df_calc)
-        current_rr = profile.rr_normal if mode_str == "normal" else profile.rr_runner
-
-        buy_indices = np.where(buy_signals)[0]
-        for b_idx in buy_indices:
-            e_p = close_prices[b_idx]
-            sl_dist = profile.sl_atr_mult * atrs[b_idx]
-            tp_dist = current_rr * sl_dist
-            be_trig_p = e_p + profile.breakeven_r * sl_dist
-            hard_sl_p = e_p - sl_dist
-
-            secured = False
-            for j in range(b_idx + 1, min(b_idx + 240, n_bars)):
-                if highs[j] >= e_p + tp_dist or lows[j] <= hard_sl_p:
-                    break
-                if not secured and highs[j] >= be_trig_p:
-                    secured = True
-                if secured and lows[j] <= e_p:
-                    buy_exits[j] = True
-                    break
-
-        sell_indices = np.where(sell_signals)[0]
-        for s_idx in sell_indices:
-            e_p = close_prices[s_idx]
-            sl_dist = profile.sl_atr_mult * atrs[s_idx]
-            tp_dist = current_rr * sl_dist
-            be_trig_p = e_p - profile.breakeven_r * sl_dist
-            hard_sl_p = e_p + sl_dist
-
-            secured = False
-            for j in range(s_idx + 1, min(s_idx + 240, n_bars)):
-                if lows[j] <= e_p - tp_dist or highs[j] >= hard_sl_p:
-                    break
-                if not secured and lows[j] <= be_trig_p:
-                    secured = True
-                if secured and highs[j] >= e_p:
-                    sell_exits[j] = True
-                    break
-
         import vectorbt as vbt
 
         spread_fee = 0.00015 # Standar spread institusional ~30 poin pada emas/forex
@@ -319,8 +308,6 @@ def run_fit_proper_test(
             close=pd.Series(close_prices, index=df_calc.index),
             entries=pd.Series(buy_signals, index=df_calc.index),
             short_entries=pd.Series(sell_signals, index=df_calc.index),
-            exits=pd.Series(buy_exits, index=df_calc.index),
-            short_exits=pd.Series(sell_exits, index=df_calc.index),
             sl_stop=pd.Series(sl_pct, index=df_calc.index),
             tp_stop=pd.Series(tp_pct, index=df_calc.index),
             fees=spread_fee,

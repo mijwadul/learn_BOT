@@ -50,16 +50,41 @@ def calibrate_optimal_threshold(
     best_th = 0.50 if mode == 'runner' else 0.54
     best_stats = {}
 
+    # Filter habitat rezim saat kalibrasi
+    if mode == 'runner':
+        col_rb = 'is_running_bull' if 'is_running_bull' in X_cal.columns else ('feat_is_running_bull' if 'feat_is_running_bull' in X_cal.columns else None)
+        col_rs = 'is_running_bear' if 'is_running_bear' in X_cal.columns else ('feat_is_running_bear' if 'feat_is_running_bear' in X_cal.columns else None)
+        col_bb = 'is_breakout_bull' if 'is_breakout_bull' in X_cal.columns else ('feat_is_breakout_bull' if 'feat_is_breakout_bull' in X_cal.columns else None)
+        col_bs = 'is_breakout_bear' if 'is_breakout_bear' in X_cal.columns else ('feat_is_breakout_bear' if 'feat_is_breakout_bear' in X_cal.columns else None)
+
+        f_run_b = (X_cal[col_rb] == 1) if col_rb else np.zeros(len(X_cal), dtype=bool)
+        f_run_s = (X_cal[col_rs] == 1) if col_rs else np.zeros(len(X_cal), dtype=bool)
+        f_brk_b = (X_cal[col_bb] == 1) if col_bb else np.zeros(len(X_cal), dtype=bool)
+        f_brk_s = (X_cal[col_bs] == 1) if col_bs else np.zeros(len(X_cal), dtype=bool)
+        feat_run = (f_run_b | f_run_s | f_brk_b | f_brk_s)
+
+        if feat_run.sum() >= 10:
+            regime_filter = feat_run.values if hasattr(feat_run, 'values') else np.array(feat_run, dtype=bool)
+        else:
+            regime_filter = np.ones(len(X_cal), dtype=bool)
+    else:
+        col_sq = 'is_bb_squeeze' if 'is_bb_squeeze' in X_cal.columns else ('feat_is_bb_squeeze' if 'feat_is_bb_squeeze' in X_cal.columns else None)
+        f_sq = (X_cal[col_sq] == 1) if col_sq else np.zeros(len(X_cal), dtype=bool)
+        if f_sq.sum() >= 10:
+            regime_filter = f_sq.values if hasattr(f_sq, 'values') else np.array(f_sq, dtype=bool)
+        else:
+            regime_filter = np.ones(len(X_cal), dtype=bool)
+
     # Candidate threshold disesuaikan dengan profil instrumen:
     if mode == 'runner':
         candidate_thresholds = np.linspace(0.35, 0.65, 31)
-        effective_min_signals = max(min_signals, int(len(X_cal) * 0.005))
+        effective_min_signals = max(min_signals, int(regime_filter.sum() * 0.02))
     else:
         candidate_thresholds = np.linspace(0.42, 0.70, 29)
-        effective_min_signals = max(min_signals, int(len(X_cal) * 0.005))
+        effective_min_signals = max(min_signals, int(regime_filter.sum() * 0.02))
 
     for th in candidate_thresholds:
-        pred_trade = p_win >= th
+        pred_trade = (p_win >= th) & regime_filter
         n_trades = int(pred_trade.sum())
         if n_trades < effective_min_signals:
             continue

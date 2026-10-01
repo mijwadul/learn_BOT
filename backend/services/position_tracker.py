@@ -395,18 +395,28 @@ class PositionTracker:
                     continue
             else:
                 # --- RUNNER LOGIC ---
-                # 1. Milestone 1:2 -> Partial close 50% & BE at 2R (Hanya 1x per tiket)
+                from agents.research import get_profile
+                profile = get_profile(pos_sym)
+                be_target_r = getattr(profile, "breakeven_r", 1.0)
+
+                # 1. Early Break-Even Protection pada +1.0R (Selaras dengan Target Labeler & VectorBT OOS)
+                if current_r >= be_target_r and not is_already_be:
+                    logging.info(f"[RUNNER] Break-Even Milestone ({current_r:.2f}R >= {be_target_r:.1f}R) tercapai untuk tiket #{ticket} ({pos_sym}). Geser SL ke BE.")
+                    self.order_router.modify_sl_to_break_even(ticket, pos_sym)
+                    is_already_be = True
+
+                # 2. Milestone 1:2 -> Partial close 50% (Hanya 1x per tiket) & konfirmasi BE
                 if current_r >= 2.0:
                     if ticket not in self.partially_closed_tickets:
-                        logging.info(f"[RUNNER] Milestone RR 1:2 tercapai ({current_r:.2f}R) untuk tiket #{ticket} ({pos_sym}). Partial Close 50% & SL ke BE.")
+                        logging.info(f"[RUNNER] Milestone RR 1:2 tercapai ({current_r:.2f}R) untuk tiket #{ticket} ({pos_sym}). Partial Close 50% & konfirmasi SL ke BE.")
                         if self.order_router.execute_partial_close_50(ticket, pos_sym):
                             self.partially_closed_tickets.add(ticket)
                         self.order_router.modify_sl_to_break_even(ticket, pos_sym)
                     elif not is_already_be:
                         self.order_router.modify_sl_to_break_even(ticket, pos_sym)
 
-                # 2. Maximum learned RR Exit
-                max_runner_rr = getattr(self.researcher, 'max_runner_rr', 5.0) if self.researcher else 5.0
+                # 3. Maximum learned RR Exit
+                max_runner_rr = getattr(self.researcher, 'max_runner_rr', getattr(profile, 'rr_runner', 3.5)) if self.researcher else getattr(profile, 'rr_runner', 3.5)
                 if current_r >= max_runner_rr:
                     logging.info(f"[RUNNER EXIT] 🎯 Maximum RR ({max_runner_rr:.1f}R) tercapai ({current_r:.2f}R) untuk tiket #{ticket} ({pos_sym}). Menjalankan Full Close.")
                     success = self.order_router.execute_full_close(

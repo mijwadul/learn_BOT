@@ -193,17 +193,15 @@ export function ModelScorecardSection({ selectedPair }: ModelScorecardSectionPro
     const sc = latestScorecards[mode];
     const isNormal = mode === "normal";
     const modeTitle = isNormal ? "Normal Mode" : "Runner Mode";
-    const targetRr = isNormal ? "RR 1:1.5" : "RR 1:5.0";
-
     const isEvaluated = sc !== null && (sc.passed !== undefined || sc.metrics !== undefined);
     const passed = sc?.passed === true;
 
-    // Minimum targets per blueprint
-    const targetWr = isNormal ? 52 : 28;
-    const targetPf = isNormal ? 1.3 : 1.2;
-    const targetSharpe = isNormal ? 0.8 : 0.5;
-    const targetMaxDd = isNormal ? 20 : 35;
-    const targetMinTrades = isNormal ? 30 : 20;
+    const targetWr = sc?.criteria?.min_win_rate ?? (isNormal ? 40 : 28);
+    const targetPf = sc?.criteria?.min_profit_factor ?? (isNormal ? 1.3 : 1.2);
+    const targetSharpe = sc?.criteria?.min_sharpe_ratio ?? (isNormal ? 0.8 : 0.5);
+    const targetMaxDd = sc?.criteria?.max_drawdown ?? (isNormal ? 20 : 35);
+    const targetMinTrades = sc?.criteria?.min_trades ?? (isNormal ? 25 : 20);
+    const targetRr = sc?.criteria?.rr_ratio ? `RR 1:${sc.criteria.rr_ratio.toFixed(1)}` : (isNormal ? "RR 1:2.0" : "RR 1:3.5");
 
     const wr = getMetricVal(sc, "win_rate_pct");
     const pf = getMetricVal(sc, "profit_factor");

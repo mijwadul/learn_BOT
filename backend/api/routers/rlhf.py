@@ -314,11 +314,9 @@ async def get_rlhf_setups(
                     con=sync_engine, index_col='time'
                 )
                 df_full_oos.index = pd.to_datetime(df_full_oos.index)
-                df_full_oos = df_full_oos.sort_index()  # kembalikan urutan ASC
-                df_oos = df_full_oos.copy()
-
-                df_full_oos = bot.researcher.generate_targets(df_full_oos)
+                df_full_oos = bot.researcher.generate_targets(df_full_oos, symbol=sym)
                 df_full_oos = bot.researcher.add_normalized_features(df_full_oos)
+                df_oos = df_full_oos.copy()
                 features = []
                 if hasattr(target_model, 'feature_name_') and target_model.feature_name_ is not None:
                     features = list(target_model.feature_name_)
@@ -334,24 +332,40 @@ async def get_rlhf_setups(
                         if not (pd.api.types.is_numeric_dtype(X_oos[c]) or pd.api.types.is_bool_dtype(X_oos[c])):
                             X_oos[c] = pd.to_numeric(X_oos[c], errors='coerce').fillna(0.0)
                     proba_matrix = target_model.predict_proba(X_oos)
-                
+
+                    s_dir = df_oos['setup_dir'].values if 'setup_dir' in df_oos.columns else np.zeros(len(df_oos))
+                    forbid_b = df_oos['forbid_buy'].values if 'forbid_buy' in df_oos.columns else np.zeros(len(df_oos))
+                    forbid_s = df_oos['forbid_sell'].values if 'forbid_sell' in df_oos.columns else np.zeros(len(df_oos))
+
                     if len(classes) == 2 or proba_matrix.shape[1] == 2:
                         idx_win = classes.index(1) if 1 in classes else 1
                         p_win = proba_matrix[:, idx_win] if proba_matrix.shape[1] > idx_win else proba_matrix[:, -1]
-                        open_c = df_oos['open'].values if 'open' in df_oos.columns else df_oos['close'].values
-                        close_c = df_oos['close'].values
-                        is_bull = close_c >= open_c
-                        p_buy = np.where(is_bull, p_win, 0.0)
-                        p_sell = np.where(~is_bull, p_win, 0.0)
+                        
+                        # Tentukan arah aksi berbasis struktur BBMA & setup_dir (bukan warna candle)
+                        is_buy = (s_dir == 1) | ((s_dir == 0) & (forbid_s == 1))
+                        is_sell = (s_dir == 2) | ((s_dir == 0) & (forbid_b == 1))
+                        
+                        c_val = df_oos['close'].values
+                        e_val = df_oos['EMA_50'].values if 'EMA_50' in df_oos.columns else c_val
+                        is_buy = np.where((is_buy & ~is_sell), True, np.where((~is_buy & is_sell), False, (c_val >= e_val)))
+
+                        # Terapkan Anti Counter-Trend Guard
+                        is_buy = np.where(forbid_s == 1, True, np.where(forbid_b == 1, False, is_buy))
+
+                        p_buy = np.where(is_buy & (forbid_b == 0), p_win, 0.0)
+                        p_sell = np.where((~is_buy) & (forbid_s == 0), p_win, 0.0)
+
                         df_oos['prob_buy'] = p_buy
                         df_oos['prob_sell'] = p_sell
-                        df_oos['prob'] = p_win
-                        df_oos['predicted_action'] = np.where(is_bull, "BUY", "SELL")
+                        df_oos['prob'] = np.maximum(p_buy, p_sell)
+                        df_oos['predicted_action'] = np.where(is_buy, "BUY", "SELL")
                     else:
                         idx_buy = classes.index(1) if 1 in classes else (1 if proba_matrix.shape[1] > 1 else None)
                         idx_sell = classes.index(2) if 2 in classes else None
                         p_buy = proba_matrix[:, idx_buy] if idx_buy is not None else np.zeros(len(df_oos))
                         p_sell = proba_matrix[:, idx_sell] if idx_sell is not None else np.zeros(len(df_oos))
+                        p_buy = np.where(forbid_b == 0, p_buy, 0.0)
+                        p_sell = np.where(forbid_s == 0, p_sell, 0.0)
                         df_oos['prob_buy'] = p_buy
                         df_oos['prob_sell'] = p_sell
                         df_oos['prob'] = np.maximum(p_buy, p_sell)
@@ -389,7 +403,12 @@ async def get_rlhf_setups(
                 get_rejected_setup_ids(mode=mode_str, symbol=sym) |
                 get_ignored_setup_ids(mode=mode_str, symbol=sym)
             )
-            high_prob  = df_oos[df_oos['prob'] >= min_prob].copy()
+            # Filter hanya setup yang valid dan tidak terlarang secara topografi
+            if 'setup_dir' in df_oos.columns:
+                valid_mask = (df_oos['prob'] >= min_prob) & (df_oos['setup_dir'] > 0)
+            else:
+                valid_mask = (df_oos['prob'] >= min_prob)
+            high_prob = df_oos[valid_mask].copy()
             candidates = [
                 idx for idx in high_prob.index
                 if (idx.strftime("%Y-%m-%d %H:%M:%S") if hasattr(idx, 'strftime') else str(idx)) not in processed

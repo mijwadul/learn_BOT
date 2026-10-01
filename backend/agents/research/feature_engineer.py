@@ -57,19 +57,15 @@ FORBIDDEN_BASE_COLS = [
 
 
 def add_normalized_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Menambahkan fitur topografi dan karakteristik candle yang dinormalisasi berbasis ATR (Dimensionless Ratios).
-    Diperkaya dengan Institutional Alpha Features:
-    1. Sesi & Waktu (London, NY, Asian, Overlap, Sin/Cos Hour & DOW)
-    2. Volatilitas & Kompresi (Bollinger Squeeze Percentile & ATR Burst)
-    3. Anatomi Rejection Candle (Wick & Body Ratios)
-    4. Relative Volume (Tick Volume vs Rolling MA)
-    5. Direction-Aligned Symmetric Setup Features
-    """
     if df is None or df.empty:
         return df
 
     df = df.copy()
+    regime_cols = ('BB_Upper', 'forbid_buy', 'is_CSA_Buy', 'is_breakout_bull', 'is_running_bull', 'is_bb_squeeze', 'is_bb_expanding')
+    if any(c not in df.columns or (c in df.columns and df[c].isna().all()) for c in regime_cols):
+        from utils.indicators import calculate_bbma
+        df = calculate_bbma(df)
+
     atr_series = df['ATR_14'] if 'ATR_14' in df.columns else calculate_atr(df, 14)
     atr_safe = np.maximum(pd.to_numeric(atr_series, errors='coerce').fillna(0.01).values, 1e-4)
 
@@ -91,19 +87,24 @@ def add_normalized_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- CROSS-TIMEFRAME CONFLUENCE & AUTONOMOUS ALIGNMENT ---
     # Memungkinkan model AI secara mandiri menemukan korelasi / pengaruh antar timeframe per pair
-    setup_col = 'dist_Close_EMA50_setup' if 'dist_Close_EMA50_setup' in df.columns else 'dist_Close_EMA50_m5'
-    trend_col = 'dist_Close_EMA50_trend' if 'dist_Close_EMA50_trend' in df.columns else 'dist_Close_EMA50_m15'
+    setup_col = 'dist_Close_EMA50_setup' if 'dist_Close_EMA50_setup' in df.columns else ('dist_Close_EMA50_m5' if 'dist_Close_EMA50_m5' in df.columns else None)
+    trend_col = 'dist_Close_EMA50_trend' if 'dist_Close_EMA50_trend' in df.columns else ('dist_Close_EMA50_m15' if 'dist_Close_EMA50_m15' in df.columns else None)
     
-    if 'dist_Close_EMA50' in df.columns and setup_col in df.columns:
-        base_bull = (df['dist_Close_EMA50'] > 0).astype(float)
-        setup_bull = (df[setup_col] > 0).astype(float)
-        trend_bull = (df[trend_col] > 0).astype(float) if trend_col in df.columns else setup_bull
+    if 'dist_Close_EMA50' in df.columns and setup_col is not None and setup_col in df.columns:
+        base_dist = pd.to_numeric(df['dist_Close_EMA50'], errors='coerce').fillna(0.0).values
+        setup_s = pd.to_numeric(df[setup_col], errors='coerce').fillna(0.0)
+        trend_s = pd.to_numeric(df[trend_col], errors='coerce').fillna(setup_s) if (trend_col and trend_col in df.columns) else setup_s
+        base_bull = (base_dist > 0).astype(float)
+        setup_bull = (setup_s.values > 0).astype(float)
+        trend_bull = (trend_s.values > 0).astype(float)
         df['mtf_trend_alignment'] = (base_bull + setup_bull + trend_bull - 1.5) / 1.5
 
     if 'adx' in df.columns:
-        adx_setup_col = 'adx_setup' if 'adx_setup' in df.columns else 'adx_m5'
-        if adx_setup_col in df.columns:
-            df['mtf_adx_momentum_ratio'] = df['adx'] / np.maximum(df[adx_setup_col], 1.0)
+        adx_setup_col = 'adx_setup' if 'adx_setup' in df.columns else ('adx_m5' if 'adx_m5' in df.columns else None)
+        if adx_setup_col is not None and adx_setup_col in df.columns:
+            base_adx = pd.to_numeric(df['adx'], errors='coerce').fillna(20.0).values
+            setup_adx = pd.to_numeric(df[adx_setup_col], errors='coerce').fillna(20.0).values
+            df['mtf_adx_momentum_ratio'] = base_adx / np.maximum(setup_adx, 1.0)
 
     # --- 1. FITUR SESI PASAR & SIKLIKAL TEMPORAL ---
     try:
@@ -150,18 +151,58 @@ def add_normalized_features(df: pd.DataFrame) -> pd.DataFrame:
         vol_ma = vol.rolling(20, min_periods=5).mean().fillna(vol).replace(0, 1.0)
         df['norm_relative_volume'] = np.clip(vol.values / vol_ma.values, 0.1, 10.0)
 
+    # --- 6. FITUR TOPOGRAFI & REGIME BOLLINGER BANDS (ML Alpha) ---
+    if 'is_running_bull' in df.columns:
+        df['feat_is_running_bull'] = pd.to_numeric(df['is_running_bull'], errors='coerce').fillna(0.0).values.astype(float)
+    if 'is_running_bear' in df.columns:
+        df['feat_is_running_bear'] = pd.to_numeric(df['is_running_bear'], errors='coerce').fillna(0.0).values.astype(float)
+    if 'is_bb_squeeze' in df.columns:
+        df['feat_is_bb_squeeze'] = pd.to_numeric(df['is_bb_squeeze'], errors='coerce').fillna(0.0).values.astype(float)
+    if 'is_breakout_bull' in df.columns:
+        df['feat_is_breakout_bull'] = pd.to_numeric(df['is_breakout_bull'], errors='coerce').fillna(0.0).values.astype(float)
+    if 'is_breakout_bear' in df.columns:
+        df['feat_is_breakout_bear'] = pd.to_numeric(df['is_breakout_bear'], errors='coerce').fillna(0.0).values.astype(float)
+    if 'BB_Width_Slope' in df.columns:
+        df['norm_bb_width_slope'] = pd.to_numeric(df['BB_Width_Slope'], errors='coerce').fillna(0.0).values / atr_safe
+    if 'SMA_20_Slope' in df.columns:
+        df['norm_sma20_slope'] = pd.to_numeric(df['SMA_20_Slope'], errors='coerce').fillna(0.0).values / atr_safe
+
     # --- DIRECTION-ALIGNED SETUP FEATURES ---
     if 'setup_dir' not in df.columns:
-        lwma_low_zone = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values) if 'LWMA_5_Low' in df.columns else df['low'].values
-        lwma_high_zone = np.minimum(df['LWMA_5_High'].values, df['LWMA_10_High'].values) if 'LWMA_5_High' in df.columns else df['high'].values
-        atr_vals = df['ATR_14'].values if 'ATR_14' in df.columns else np.full(len(df), 0.001)
-        buffer = 0.35 * atr_vals
+        low_s = pd.to_numeric(df['low'], errors='coerce').fillna(0.0)
+        high_s = pd.to_numeric(df['high'], errors='coerce').fillna(0.0)
+        close_s = pd.to_numeric(df['close'], errors='coerce').fillna(0.0)
+        lwma_5_l = pd.to_numeric(df['LWMA_5_Low'], errors='coerce').fillna(low_s).values if 'LWMA_5_Low' in df.columns else low_s.values
+        lwma_10_l = pd.to_numeric(df['LWMA_10_Low'], errors='coerce').fillna(low_s).values if 'LWMA_10_Low' in df.columns else low_s.values
+        lwma_5_h = pd.to_numeric(df['LWMA_5_High'], errors='coerce').fillna(high_s).values if 'LWMA_5_High' in df.columns else high_s.values
+        lwma_10_h = pd.to_numeric(df['LWMA_10_High'], errors='coerce').fillna(high_s).values if 'LWMA_10_High' in df.columns else high_s.values
 
-        reentry_buy_mask = (df['low'].values <= (lwma_low_zone + buffer))
-        reentry_sell_mask = (df['high'].values >= (lwma_high_zone - buffer))
+        lwma_low_zone = np.maximum(lwma_5_l, lwma_10_l)
+        lwma_high_zone = np.minimum(lwma_5_h, lwma_10_h)
+        atr_vals = pd.to_numeric(df['ATR_14'], errors='coerce').fillna(0.001).values if 'ATR_14' in df.columns else np.full(len(df), 0.001)
+        buffer = 0.25 * atr_vals
+
+        forbid_b = pd.to_numeric(df['forbid_buy'], errors='coerce').fillna(0.0).values if 'forbid_buy' in df.columns else np.zeros(len(df))
+        forbid_s = pd.to_numeric(df['forbid_sell'], errors='coerce').fillna(0.0).values if 'forbid_sell' in df.columns else np.zeros(len(df))
+        sq_b = pd.to_numeric(df['is_squeeze_buy_allowed'], errors='coerce').fillna(1.0).values if 'is_squeeze_buy_allowed' in df.columns else np.ones(len(df))
+        sq_s = pd.to_numeric(df['is_squeeze_sell_allowed'], errors='coerce').fillna(1.0).values if 'is_squeeze_sell_allowed' in df.columns else np.ones(len(df))
+
+        low_vals = low_s.values
+        high_vals = high_s.values
+        close_vals = close_s.values
+
+        reentry_buy_mask = (low_vals <= (lwma_low_zone + buffer)) & (forbid_b == 0) & (sq_b == 1)
+        reentry_sell_mask = (high_vals >= (lwma_high_zone - buffer)) & (forbid_s == 0) & (sq_s == 1)
+
+        if 'EMA_50' in df.columns and 'SMA_20' in df.columns:
+            ema50_vals = pd.to_numeric(df['EMA_50'], errors='coerce').fillna(close_s).values
+            sma20_vals = pd.to_numeric(df['SMA_20'], errors='coerce').fillna(close_s).values
+            reentry_buy_mask = reentry_buy_mask & (close_vals >= ema50_vals) & (sma20_vals >= ema50_vals)
+            reentry_sell_mask = reentry_sell_mask & (close_vals <= ema50_vals) & (sma20_vals <= ema50_vals)
+
         df['setup_dir'] = np.where(reentry_buy_mask, 1, np.where(reentry_sell_mask, 2, 0))
 
-    s_dir = df['setup_dir'].values
+    s_dir = pd.to_numeric(df['setup_dir'], errors='coerce').fillna(0).values
     df['is_buy_setup'] = (s_dir == 1).astype(float)
     if 'lower_wick_ratio' in df.columns and 'upper_wick_ratio' in df.columns:
         df['norm_rejection_wick'] = np.where(s_dir == 1, df['lower_wick_ratio'], df['upper_wick_ratio'])
@@ -191,11 +232,6 @@ def add_normalized_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def extract_and_lock_features(df: pd.DataFrame, mode: str = "normal") -> List[str]:
-    """
-    Mengisolasi fitur invarian rezim (regime-invariant features) yang aman untuk generalisasi ML.
-    Menghindari non-stationarity harga absolut dan indikator statis.
-    Menyertakan fitur sekuensial BBMA dan fractal origin yang sudah dimensionless.
-    """
     forbidden_cols: Set[str] = set()
     tf_list = ['', '_setup', '_trend', '_m5', '_m15'] if mode == 'normal' else ['', '_setup', '_trend', '_m5', '_m15', '_h1', '_h4']
     for tf in tf_list:

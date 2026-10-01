@@ -55,17 +55,18 @@ def optimize_hyperparameters(
     Optuna Auto-Tuning berbasis Purged Walk-Forward Cross Validation.
     Memaksimalkan Expectancy (+R), Win Rate, PR-AUC, dan kestabilan Profit Factor.
     """
+    mode_str = mode.lower()
     y = np.array(y, dtype=int)
     sample_weights = np.array(sample_weights, dtype=float)
     n_samples = len(X)
 
     from .profiles import get_profile
     profile = get_profile(symbol)
-    rr_ratio = profile.rr_runner if mode == "runner" else profile.rr_normal
-    target_wr = (profile.oos_criteria_runner["min_win_rate"] if mode == 'runner' else profile.oos_criteria_normal["min_win_rate"]) / 100.0
+    rr_ratio = profile.rr_runner if mode_str == "runner" else profile.rr_normal
+    target_wr = (profile.oos_criteria_runner["min_win_rate"] if mode_str == 'runner' else profile.oos_criteria_normal["min_win_rate"]) / 100.0
 
-    logger.info(f"[{mode.upper()} OPTUNA START] 🔬 Memulai Purged Walk-Forward CV & Meta-Model Auto-Tuning ({n_trials} Trials) untuk {symbol}...")
-    logger.info(f"[{mode.upper()} OPTUNA METRIK] 🎯 Target: Precision (WR >= {target_wr*100:.0f}%) + Expectancy (+R) + PR-AUC pada RR 1:{rr_ratio:.1f}")
+    logger.info(f"[{mode_str.upper()} OPTUNA START] 🔬 Memulai Purged Walk-Forward CV & Meta-Model Auto-Tuning ({n_trials} Trials) untuk {symbol}...")
+    logger.info(f"[{mode_str.upper()} OPTUNA METRIK] 🎯 Target: Precision (WR >= {target_wr*100:.0f}%) + Expectancy (+R) + PR-AUC pada RR 1:{rr_ratio:.1f}")
 
     # TD#5 FIX: Purge window dinaikkan 150 → 250 bar (~21 jam di M5).
     # Satu siklus BBMA penuh (Extrem → TPW → MHV → CSA/CSAK → Re-entry) bisa makan
@@ -133,7 +134,28 @@ def optimize_hyperparameters(
             else:
                 p_win = model.predict(X_va)
 
-            pred_trades = p_win >= trial_threshold
+            # Filter habitat rezim saat evaluasi Optuna
+            if mode_str == 'runner':
+                col_rb = 'is_running_bull' if 'is_running_bull' in X_va.columns else ('feat_is_running_bull' if 'feat_is_running_bull' in X_va.columns else None)
+                col_rs = 'is_running_bear' if 'is_running_bear' in X_va.columns else ('feat_is_running_bear' if 'feat_is_running_bear' in X_va.columns else None)
+                col_bb = 'is_breakout_bull' if 'is_breakout_bull' in X_va.columns else ('feat_is_breakout_bull' if 'feat_is_breakout_bull' in X_va.columns else None)
+                col_bs = 'is_breakout_bear' if 'is_breakout_bear' in X_va.columns else ('feat_is_breakout_bear' if 'feat_is_breakout_bear' in X_va.columns else None)
+
+                f_run_b = (X_va[col_rb] == 1) if col_rb else np.zeros(len(X_va), dtype=bool)
+                f_run_s = (X_va[col_rs] == 1) if col_rs else np.zeros(len(X_va), dtype=bool)
+                f_brk_b = (X_va[col_bb] == 1) if col_bb else np.zeros(len(X_va), dtype=bool)
+                f_brk_s = (X_va[col_bs] == 1) if col_bs else np.zeros(len(X_va), dtype=bool)
+                reg_mask = (f_run_b | f_run_s | f_brk_b | f_brk_s)
+                regime_filter = reg_mask.values if hasattr(reg_mask, 'values') else np.array(reg_mask, dtype=bool)
+            else:
+                col_sq = 'is_bb_squeeze' if 'is_bb_squeeze' in X_va.columns else ('feat_is_bb_squeeze' if 'feat_is_bb_squeeze' in X_va.columns else None)
+                f_sq = (X_va[col_sq] == 1) if col_sq else np.zeros(len(X_va), dtype=bool)
+                regime_filter = f_sq.values if hasattr(f_sq, 'values') else np.array(f_sq, dtype=bool)
+
+            if np.sum(regime_filter) < 5:
+                regime_filter = np.ones(len(X_va), dtype=bool)
+
+            pred_trades = (p_win >= trial_threshold) & regime_filter
             n_tr = int(pred_trades.sum())
             fold_signals.append(n_tr)
 

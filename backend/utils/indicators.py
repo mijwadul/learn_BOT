@@ -169,40 +169,80 @@ def calculate_bbma(df):
     
     # Drop temp columns used for engulfing
     df.drop(columns=['prev_open', 'prev_close'], inplace=True)
-    
+
+    # -----------------------------------------------------------------------
+    # TOPOGRAFI & REGIME BOLLINGER BANDS (Anti Counter-Trend & Squeeze Shield)
+    # -----------------------------------------------------------------------
+    # 1. Slope batas BB (Upper & Lower ROC 3 candle)
+    df['BB_Upper_Slope'] = df['BB_Upper'] - df['BB_Upper'].shift(3)
+    df['BB_Lower_Slope'] = df['BB_Lower'] - df['BB_Lower'].shift(3)
+
+    # 2. Volatilitas & Deteksi Squeeze (BB Mengecil / Menguncup / Sideways)
+    bb_width_ma50 = df['BB_Width'].rolling(50, min_periods=5).mean().replace(0, 1e-4)
+    df['bb_squeeze_ratio'] = df['BB_Width'] / bb_width_ma50
+    bb_width_pct = df['BB_Width'].rolling(100, min_periods=10).rank(pct=True).fillna(0.5)
+
+    # BB Squeeze terkonfirmasi jika rasio sempit (< 0.85) atau persentil < 0.35
+    df['is_bb_squeeze'] = np.where((df['bb_squeeze_ratio'] < 0.85) | (bb_width_pct < 0.35), 1, 0)
+
+    # 3. BB Mengembang (Expansion)
+    df['is_bb_expanding'] = np.where((df['BB_Width_Slope'] > 0) & (df['bb_squeeze_ratio'] > 1.05), 1, 0)
+
+    # 4. Deteksi Running Momentum (CSM aktif dalam 15 candle terakhir)
+    csm_buy_active = df['is_CSM_Buy'].rolling(15, min_periods=1).max().fillna(0)
+    csm_sell_active = df['is_CSM_Sell'].rolling(15, min_periods=1).max().fillna(0)
+
+    # 5. Deteksi Break Structure dari Squeeze (Transisi Squeeze -> Real Trend)
+    # Pernah squeeze dalam 15 candle sebelumnya, lalu candle close menembus BB Upper/Lower dan BB mulai mengembang
+    recent_squeeze = df['is_bb_squeeze'].shift(1).rolling(15, min_periods=1).max().fillna(0)
+    df['is_breakout_bull'] = np.where(
+        (recent_squeeze == 1) & (df['close'] > df['BB_Upper']) & (df['BB_Width_Slope'] > 0), 1, 0
+    )
+    df['is_breakout_bear'] = np.where(
+        (recent_squeeze == 1) & (df['close'] < df['BB_Lower']) & (df['BB_Width_Slope'] > 0), 1, 0
+    )
+
+    brk_buy_recent = df['is_breakout_bull'].rolling(15, min_periods=1).max().fillna(0)
+    brk_sell_recent = df['is_breakout_bear'].rolling(15, min_periods=1).max().fillna(0)
+
+    # 6. Status Running Trend Sejati (Running Bullish & Running Bearish)
+    # Bullish: BB mengembang ke atas, SMA 20 miring naik, harga di atas Mid BB, atau CSM Buy aktif, atau Breakout Bull
+    df['is_running_bull'] = np.where(
+        ((df['is_bb_expanding'] == 1) & (df['SMA_20_Slope'] > 0) & (df['close'] >= df['SMA_20'])) |
+        (csm_buy_active == 1) | (brk_buy_recent == 1),
+        1, 0
+    )
+    # Bearish: BB mengembang ke bawah, SMA 20 miring turun, harga di bawah Mid BB, atau CSM Sell aktif, atau Breakout Bear
+    df['is_running_bear'] = np.where(
+        ((df['is_bb_expanding'] == 1) & (df['SMA_20_Slope'] < 0) & (df['close'] <= df['SMA_20'])) |
+        (csm_sell_active == 1) | (brk_sell_recent == 1),
+        1, 0
+    )
+
+    # 7. Hukum Larangan Counter Trend (Anti Counter-Trend Shield)
+    # Saat running bull atau breakout bull: HARAM SELL!
+    df['forbid_sell'] = np.where((df['is_running_bull'] == 1) | (df['is_breakout_bull'] == 1), 1, 0)
+    # Saat running bear atau breakout bear: HARAM BUY!
+    df['forbid_buy'] = np.where((df['is_running_bear'] == 1) | (df['is_breakout_bear'] == 1), 1, 0)
+
+    # 8. Filter Squeeze Extreme Only (Di fase squeeze, HANYA boleh buy di Lower BB & sell di Upper BB)
+    atr_est = (df['BB_Width'] / 4.0).replace(0, 1e-4)
+    squeeze_buffer = 0.20 * atr_est
+    df['is_squeeze_buy_allowed'] = np.where(
+        (df['is_bb_squeeze'] == 0) | (df['low'] <= (df['BB_Lower'] + squeeze_buffer)), 1, 0
+    )
+    df['is_squeeze_sell_allowed'] = np.where(
+        (df['is_bb_squeeze'] == 0) | (df['high'] >= (df['BB_Upper'] - squeeze_buffer)), 1, 0
+    )
+
     return df
 
 
-# ---------------------------------------------------------------------------
-# BBMA SEQUENCE DETECTION
-# Mengidentifikasi berapa candle yang lalu terjadi event BBMA tertentu,
-# seberapa kuat, dan apakah masih dalam momentum yang valid.
-# Digunakan sebagai fitur n-candle history untuk model AI.
-# ---------------------------------------------------------------------------
-
 def calculate_bbma_sequence_features(df: pd.DataFrame, lookback: int = 30) -> pd.DataFrame:
-    """
-    Menghitung fitur sekuensial BBMA yang merekam:
-    1. Berapa candle lalu muncul CSA / CSAK / CSM (Buy & Sell)
-    2. Kekuatan / momentum candle pemicu tersebut (body ratio vs ATR)
-    3. Jenis trigger terkuat yang terakhir terjadi
-    4. Ruang gerak harga (distance to opposite BB)
-    5. MHV likelihood (BB lebar tapi price diam) -- momentum habis
-
-    Hasil fitur ini bersifat kontinu dan TIDAK hardcode batas kaku,
-    sehingga model AI bisa belajar sendiri ambang batas per pair.
-
-    Args:
-        df: DataFrame yang sudah memiliki output calculate_bbma() dan ATR_14
-        lookback: Jumlah candle ke belakang maksimal untuk mencari event
-
-    Returns:
-        df dengan kolom fitur sekuensial tambahan
-    """
     df = df.copy()
     n = len(df)
     atr_safe = np.maximum(
-        df['ATR_14'].values if 'ATR_14' in df.columns else np.full(n, 0.001),
+        pd.to_numeric(df['ATR_14'], errors='coerce').fillna(0.001).values if 'ATR_14' in df.columns else np.full(n, 0.001),
         1e-5
     )
 
@@ -224,7 +264,7 @@ def calculate_bbma_sequence_features(df: pd.DataFrame, lookback: int = 30) -> pd
             df[result_col] = float(lookback + 1)
             continue
 
-        flags = df[col_flag].values.astype(float)
+        flags = pd.to_numeric(df[col_flag], errors='coerce').fillna(0.0).values.astype(float)
         result = np.full(n, float(lookback + 1))
         for i in range(n):
             for lag in range(1, min(lookback + 1, i + 1)):
@@ -251,9 +291,13 @@ def calculate_bbma_sequence_features(df: pd.DataFrame, lookback: int = 30) -> pd
     # 3. TRIGGER CANDLE MOMENTUM RATIO
     # Kekuatan body candle pemicu relatif terhadap ATR saat itu terjadi.
     # ----------------------------------------------------------------
+    close_s = pd.to_numeric(df['close'], errors='coerce').fillna(0.0)
+    open_s  = pd.to_numeric(df['open'], errors='coerce').fillna(close_s)
+    body_diff_s = (close_s - open_s).abs()
     body_sizes = (
-        df['body_size'].values if 'body_size' in df.columns
-        else np.abs(df['close'].values - df['open'].values)
+        pd.to_numeric(df['body_size'], errors='coerce').fillna(body_diff_s).values
+        if 'body_size' in df.columns
+        else body_diff_s.values
     )
 
     for bars_col, result_col in [
@@ -292,18 +336,24 @@ def calculate_bbma_sequence_features(df: pd.DataFrame, lookback: int = 30) -> pd
     # ----------------------------------------------------------------
     # 5. DISTANCE TO OPPOSITE BB (Ruang gerak tersedia, dimensionless)
     # ----------------------------------------------------------------
+    atr_safe_s = pd.Series(atr_safe, index=df.index)
+    close_v = close_s.values
     if 'BB_Upper' in df.columns and 'BB_Lower' in df.columns:
-        df['room_to_bb_upper'] = (df['BB_Upper'].values - df['close'].values) / atr_safe
-        df['room_to_bb_lower'] = (df['close'].values   - df['BB_Lower'].values) / atr_safe
+        bb_u = pd.to_numeric(df['BB_Upper'], errors='coerce').fillna(close_s + atr_safe_s * 2.0).values
+        bb_l = pd.to_numeric(df['BB_Lower'], errors='coerce').fillna(close_s - atr_safe_s * 2.0).values
+        df['room_to_bb_upper'] = (bb_u - close_v) / atr_safe
+        df['room_to_bb_lower'] = (close_v - bb_l) / atr_safe
 
     # ----------------------------------------------------------------
     # 6. MHV LIKELIHOOD SCORE
     # Pasar Hilang Volume: BB melebar tapi harga tidak bergerak dari Mid.
     # ----------------------------------------------------------------
     if 'BB_Width' in df.columns and 'SMA_20' in df.columns:
-        bb_width     = df['BB_Width'].values
-        bb_width_ma  = pd.Series(bb_width).rolling(20, min_periods=5).mean().fillna(bb_width.mean()).values
-        price_dist   = np.abs(df['close'].values - df['SMA_20'].values)
+        bb_width_s   = pd.to_numeric(df['BB_Width'], errors='coerce').fillna(atr_safe_s * 4.0)
+        bb_width     = bb_width_s.values
+        bb_width_ma  = bb_width_s.rolling(20, min_periods=5).mean().fillna(float(np.mean(bb_width))).values
+        sma20_v      = pd.to_numeric(df['SMA_20'], errors='coerce').fillna(close_s).values
+        price_dist   = np.abs(close_v - sma20_v)
         bb_expansion = bb_width / np.maximum(bb_width_ma, 1e-5)
         price_compr  = 1.0 - np.clip(price_dist / np.maximum(bb_width * 0.5, 1e-5), 0.0, 1.0)
         df['mhv_likelihood'] = np.clip(bb_expansion * price_compr, 0.0, 3.0)
@@ -313,19 +363,18 @@ def calculate_bbma_sequence_features(df: pd.DataFrame, lookback: int = 30) -> pd
     # Wick panjang ke zona MA + Body tidak tembus Mid BB ke arah berlawanan.
     # ----------------------------------------------------------------
     if all(c in df.columns for c in ['lower_wick', 'upper_wick', 'body_size', 'SMA_20']):
-        lower_wick = df['lower_wick'].values
-        upper_wick = df['upper_wick'].values
-        close_arr  = df['close'].values
-        sma20      = df['SMA_20'].values
-        bb_upper   = df['BB_Upper'].values if 'BB_Upper' in df.columns else close_arr + atr_safe * 2
-        bb_lower   = df['BB_Lower'].values if 'BB_Lower' in df.columns else close_arr - atr_safe * 2
+        lower_wick = pd.to_numeric(df['lower_wick'], errors='coerce').fillna(0.0).values
+        upper_wick = pd.to_numeric(df['upper_wick'], errors='coerce').fillna(0.0).values
+        sma20      = pd.to_numeric(df['SMA_20'], errors='coerce').fillna(close_s).values
+        bb_upper   = pd.to_numeric(df['BB_Upper'], errors='coerce').fillna(close_s + atr_safe_s * 2.0).values if 'BB_Upper' in df.columns else (close_s + atr_safe_s * 2.0).values
+        bb_lower   = pd.to_numeric(df['BB_Lower'], errors='coerce').fillna(close_s - atr_safe_s * 2.0).values if 'BB_Lower' in df.columns else (close_s - atr_safe_s * 2.0).values
 
         buy_wick_ratio = lower_wick / np.maximum(atr_safe, 1e-5)
-        buy_body_ok    = ((close_arr >= sma20) & (close_arr <= bb_upper)).astype(float)
+        buy_body_ok    = ((close_v >= sma20) & (close_v <= bb_upper)).astype(float)
         df['reentry_quality_buy']  = np.clip(buy_wick_ratio * buy_body_ok, 0.0, 3.0)
 
         sell_wick_ratio = upper_wick / np.maximum(atr_safe, 1e-5)
-        sell_body_ok    = ((close_arr <= sma20) & (close_arr >= bb_lower)).astype(float)
+        sell_body_ok    = ((close_v <= sma20) & (close_v >= bb_lower)).astype(float)
         df['reentry_quality_sell'] = np.clip(sell_wick_ratio * sell_body_ok, 0.0, 3.0)
 
     return df
@@ -368,10 +417,12 @@ def calculate_fractal_origin(df: pd.DataFrame) -> pd.DataFrame:
 
     def _col(base, sfx, fallback):
         col = f"{base}{sfx}"
-        return df[col].values.astype(float) if col in df.columns else np.full(n, float(fallback))
+        if col in df.columns:
+            return pd.to_numeric(df[col], errors='coerce').fillna(float(fallback)).values.astype(float)
+        return np.full(n, float(fallback))
 
-    low_b  = df['low'].values  if 'low'  in df.columns else np.zeros(n)
-    high_b = df['high'].values if 'high' in df.columns else np.zeros(n)
+    low_b  = pd.to_numeric(df['low'], errors='coerce').fillna(0.0).values  if 'low'  in df.columns else np.zeros(n)
+    high_b = pd.to_numeric(df['high'], errors='coerce').fillna(0.0).values if 'high' in df.columns else np.zeros(n)
 
     # ---- BASE TF ----
     atr_b  = np.maximum(_col('ATR_14', '', 0.001), 1e-5)

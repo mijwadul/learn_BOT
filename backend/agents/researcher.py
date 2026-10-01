@@ -172,8 +172,9 @@ class ResearcherAgent:
     # ---------------------------------------------------------------------------------
     # RESEARCH HELPERS (Delegates to Submodules)
     # ---------------------------------------------------------------------------------
-    def generate_targets(self, df: pd.DataFrame) -> pd.DataFrame:
-        return generate_targets(df, max_runner_rr=getattr(self, 'max_runner_rr', 5.0), symbol=self.symbol)
+    def generate_targets(self, df: pd.DataFrame, symbol: str = None) -> pd.DataFrame:
+        target_sym = symbol or self.symbol
+        return generate_targets(df, max_runner_rr=getattr(self, 'max_runner_rr', 5.0), symbol=target_sym)
 
     def add_normalized_features(self, df: pd.DataFrame) -> pd.DataFrame:
         return add_normalized_features(df)
@@ -287,7 +288,25 @@ class ResearcherAgent:
 
         # TD Item 2 & 3: Incremental Train Sejati (Warm-Start init_model) + Hard Cap 250 Pohon
         MAX_ESTIMATORS_CAP = 250
+        existing_features = []
+        if hasattr(existing_model, 'feature_name_') and existing_model.feature_name_ is not None:
+            existing_features = list(existing_model.feature_name_)
+        elif hasattr(existing_model, 'booster_') and hasattr(existing_model.booster_, 'feature_name'):
+            existing_features = list(existing_model.booster_.feature_name())
+
+        key_regime_features = {'is_bb_squeeze', 'is_running_bull', 'is_breakout_bull'}
+        missing_in_old_model = key_regime_features - set(existing_features)
+
         is_incremental_warm_start = (actual_train_type == "incremental" and existing_model is not None)
+        if is_incremental_warm_start and missing_in_old_model:
+            logger.warning(
+                f"[{mode_str.capitalize()} Mode - {target_sym}] ⚠️ Terdeteksi pembaruan fitur arsitektur baru "
+                f"({missing_in_old_model} tidak ada di model .pkl lama). "
+                f"Incremental warm-start dialihkan otomatis ke FULL TRAIN agar model dapat mempelajari seluruh fitur rezim baru!"
+            )
+            is_incremental_warm_start = False
+            self.features = []
+
         cap_reached = False
         new_n_est = 200
         incremental_params = None
@@ -334,10 +353,7 @@ class ResearcherAgent:
                     incremental_params['class_weight'] = None
 
             # Kunci urutan & nama fitur agar konsisten dengan model yang ada
-            if hasattr(existing_model, 'feature_name_'):
-                self.features = list(existing_model.feature_name_)
-            elif hasattr(existing_model, 'booster_'):
-                self.features = list(existing_model.booster_.feature_name())
+            self.features = list(existing_features)
         else:
             logger.info(f"Training LightGBM {mode_str.capitalize()} Mode with RLHF & PnL Feedback (Optuna Auto-Tuning) untuk {target_sym}.")
 
@@ -363,7 +379,8 @@ class ResearcherAgent:
                         sample_df = self.generate_targets(sample_df)
                         sample_df = self.add_normalized_features(sample_df)
 
-                        sample_df = sample_df[sample_df['setup_dir'] > 0].copy() if 'setup_dir' in sample_df.columns else sample_df
+                        setup_dir_num = pd.to_numeric(sample_df['setup_dir'], errors='coerce').fillna(0).values if 'setup_dir' in sample_df.columns else np.zeros(len(sample_df))
+                        sample_df = sample_df[setup_dir_num > 0].copy() if 'setup_dir' in sample_df.columns else sample_df
 
                         if len(sample_df) >= 60 and len(np.unique(sample_df[target_col])) >= 2:
                             if not getattr(self, 'features', None):
@@ -379,12 +396,13 @@ class ResearcherAgent:
                             y_sample = sample_df[target_col]
                             sw_sample = np.ones(len(sample_df), dtype=float)
                             if 'adx' in sample_df.columns:
+                                adx_s = pd.to_numeric(sample_df['adx'], errors='coerce').fillna(20.0).values
                                 if is_normal:
-                                    sw_sample *= np.where(sample_df['adx'] < 25.0, 1.25, 0.85)
+                                    sw_sample *= np.where(adx_s < 25.0, 1.25, 0.85)
                                 else:
-                                    sw_sample *= np.where(sample_df['adx'] >= 25.0, 1.35, 0.75)
+                                    sw_sample *= np.where(adx_s >= 25.0, 1.35, 0.75)
 
-                            s_dir = sample_df['setup_dir'].values if 'setup_dir' in sample_df.columns else None
+                            s_dir = pd.to_numeric(sample_df['setup_dir'], errors='coerce').fillna(0).values if 'setup_dir' in sample_df.columns else None
                             best_params = self.optimize_hyperparameters(
                                 X_sample, y_sample, sw_sample, mode=mode_str, n_trials=40, setup_directions=s_dir
                             )
@@ -411,13 +429,13 @@ class ResearcherAgent:
                 logger.info(f"[{mode_str.capitalize()} Mode] Menginjeksi Real-Trade Live Feedback ({len(df)} sampel tertutup)...")
                 sample_weights = df['_sample_weight'].to_numpy(dtype=float)
                 y_target = df[target_col]
-                setup_dir = df['setup_dir'].values if 'setup_dir' in df.columns else np.zeros(len(df), dtype=int)
+                setup_dir = pd.to_numeric(df['setup_dir'], errors='coerce').fillna(0).values.astype(int) if 'setup_dir' in df.columns else np.zeros(len(df), dtype=int)
             else:
                 df = self.generate_targets(df)
                 df = self.add_normalized_features(df)
-                active_mask = (df['setup_dir'] > 0) if 'setup_dir' in df.columns else np.ones(len(df), dtype=bool)
+                active_mask = (pd.to_numeric(df['setup_dir'], errors='coerce').fillna(0).values > 0) if 'setup_dir' in df.columns else np.ones(len(df), dtype=bool)
                 df = df[active_mask].copy()
-                setup_dir = df['setup_dir'].values if 'setup_dir' in df.columns else np.zeros(len(df), dtype=int)
+                setup_dir = pd.to_numeric(df['setup_dir'], errors='coerce').fillna(0).values.astype(int) if 'setup_dir' in df.columns else np.zeros(len(df), dtype=int)
 
                 if df.empty or len(df) < 20:
                     chunk_idx += 1
@@ -470,10 +488,11 @@ class ResearcherAgent:
                                     sample_weights[min_idx] = 1.5
 
                 if 'adx' in df.columns:
+                    adx_vals = pd.to_numeric(df['adx'], errors='coerce').fillna(20.0).values
                     if is_normal:
-                        regime_weights = np.where(df['adx'] < 25.0, 1.25, 0.85)
+                        regime_weights = np.where(adx_vals < 25.0, 1.25, 0.85)
                     else:
-                        regime_weights = np.where(df['adx'] >= 25.0, 1.35, 0.75)
+                        regime_weights = np.where(adx_vals >= 25.0, 1.35, 0.75)
                     sample_weights *= regime_weights
 
             # Injeksi live trade feedback bila disematkan pada batch
@@ -496,8 +515,7 @@ class ResearcherAgent:
                     y_target = pd.concat([y_target, y_fb], ignore_index=True)
                     sample_weights = np.concatenate([sample_weights, sw_fb])
 
-            unique_classes = np.unique(y_target)
-            if len(unique_classes) >= 2 and len(X) >= 10:
+            if len(X) >= 10:
                 all_X.append(X)
                 all_y.append(y_target)
                 all_sw.append(sample_weights)
@@ -511,7 +529,7 @@ class ResearcherAgent:
             gc.collect()
 
         if not all_X:
-            logger.warning(f"⚠️ Batal Training ({mode_str.capitalize()} Mode): Database market_data KOSONG. Silakan tekan tombol 'Force Backfill MT5'!")
+            logger.warning(f"⚠️ Batal Training ({mode_str.capitalize()} Mode): Tidak ditemukan setup Re-entry yang memenuhi filter teknikal pada database {target_sym}.")
             if is_normal:
                 self.is_training_normal = False
             else:
@@ -522,6 +540,18 @@ class ResearcherAgent:
         y_full = pd.concat(all_y, ignore_index=True)
         sw_full = np.concatenate(all_sw)
         sd_full = np.concatenate(all_sd) if all_sd else None
+
+        unique_classes_full = np.unique(y_full)
+        if len(unique_classes_full) < 2:
+            logger.warning(
+                f"⚠️ Batal Training ({mode_str.capitalize()} Mode): Dari {len(y_full):,} setup yang diekstrak, "
+                f"seluruhnya hanya memiliki satu kelas ({unique_classes_full}). Dibutuhkan minimal 2 kelas (Win & Loss) untuk melatih model."
+            )
+            if is_normal:
+                self.is_training_normal = False
+            else:
+                self.is_training_runner = False
+            return False
 
         if is_incremental_warm_start and incremental_params is not None:
             params = incremental_params.copy()
@@ -796,7 +826,7 @@ class ResearcherAgent:
 
             df = self.generate_targets(df_recent.copy())
             df = self.add_normalized_features(df)
-            active_mask = (df['setup_dir'] > 0) if 'setup_dir' in df.columns else np.ones(len(df), dtype=bool)
+            active_mask = (pd.to_numeric(df['setup_dir'], errors='coerce').fillna(0).values > 0) if 'setup_dir' in df.columns else np.ones(len(df), dtype=bool)
             df = df[active_mask].copy()
 
             if df.empty or len(df) < 20:
@@ -838,10 +868,11 @@ class ResearcherAgent:
                         y.iloc[i] = 0
 
             if 'adx' in df.columns:
+                adx_v = pd.to_numeric(df['adx'], errors='coerce').fillna(20.0).values
                 if mode_str == 'normal':
-                    sample_weights *= np.where(df['adx'] < 25.0, 1.25, 0.85)
+                    sample_weights *= np.where(adx_v < 25.0, 1.25, 0.85)
                 else:
-                    sample_weights *= np.where(df['adx'] >= 25.0, 1.35, 0.75)
+                    sample_weights *= np.where(adx_v >= 25.0, 1.35, 0.75)
 
             if live_feedback_df is not None and not live_feedback_df.empty:
                 fb_df = self.add_normalized_features(live_feedback_df.copy())
@@ -940,8 +971,10 @@ class ResearcherAgent:
             pr_buy, pr_sell = 0.0, 0.0
 
             s_dir = int(X_live['setup_dir'].iloc[0]) if 'setup_dir' in X_live.columns else 0
-            is_valid_buy = (s_dir == 1)
-            is_valid_sell = (s_dir == 2)
+            forbid_b = bool(X_live['forbid_buy'].iloc[0]) if 'forbid_buy' in X_live.columns else False
+            forbid_s = bool(X_live['forbid_sell'].iloc[0]) if 'forbid_sell' in X_live.columns else False
+            is_valid_buy = (s_dir == 1) and not forbid_b
+            is_valid_sell = (s_dir == 2) and not forbid_s
 
             pn_raw, pr_raw = 0.0, 0.0
 

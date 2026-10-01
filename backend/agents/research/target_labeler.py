@@ -9,6 +9,13 @@ from .profiles import get_profile
 # TARGET LABELER v2 — Fractal-Aware MFE (Maximum Favorable Excursion)
 # ---------------------------------------------------------------------------
 
+HORIZON_BY_FRACTAL = {
+    0: 60,
+    1: 60,   # Base timeframe only  → 60 candle
+    2: 120,  # Setup + Base         → 120 candle
+    3: 240   # Trend + Setup + Base → 240 candle
+}
+
 
 def _get_sym_buffer(sym_name: str) -> float:
     """Mengembalikan buffer LWMA zona berdasarkan profil pair."""
@@ -56,7 +63,12 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
     """
     logging.info("Generating Fractal-Aware MFE Targets (v2 — No Fixed RR, Contextual Sequence)...")
 
-    # --- Pastikan kolom indikator tersedia ---
+    # --- Pastikan kolom indikator & topografi BB tersedia ---
+    regime_cols = ('BB_Upper', 'forbid_buy', 'is_CSA_Buy', 'is_breakout_bull', 'is_running_bull', 'is_bb_squeeze', 'is_bb_expanding')
+    if any(c not in df.columns or (c in df.columns and df[c].isna().all()) for c in regime_cols):
+        from utils.indicators import calculate_bbma
+        df = calculate_bbma(df)
+
     if 'ATR_14' not in df.columns:
         df['ATR_14'] = calculate_atr(df, 14)
     if 'EMA_50' not in df.columns:
@@ -68,27 +80,48 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
     if 'LWMA_5_High'  not in df.columns: df['LWMA_5_High']  = calculate_lwma(df['high'], 5)
     if 'LWMA_10_High' not in df.columns: df['LWMA_10_High'] = calculate_lwma(df['high'], 10)
 
-    # --- Array NumPy untuk kecepatan ---
-    closes   = df['close'].values
-    highs    = df['high'].values
-    lows     = df['low'].values
-    opens    = df['open'].values if 'open' in df.columns else closes
-    atrs     = df['ATR_14'].values
-    ema50    = df['EMA_50'].values if 'EMA_50' in df.columns else closes
-    sma20    = df['SMA_20'].values if 'SMA_20' in df.columns else closes
-    bb_upper = df['BB_Upper'].values if 'BB_Upper' in df.columns else (closes + atrs * 2.0)
-    bb_lower = df['BB_Lower'].values if 'BB_Lower' in df.columns else (closes - atrs * 2.0)
+    # --- Array NumPy untuk kecepatan (sanitized numeric) ---
+    close_s  = pd.to_numeric(df['close'], errors='coerce').fillna(0.0)
+    high_s   = pd.to_numeric(df['high'], errors='coerce').fillna(close_s)
+    low_s    = pd.to_numeric(df['low'], errors='coerce').fillna(close_s)
+    open_s   = pd.to_numeric(df['open'], errors='coerce').fillna(close_s) if 'open' in df.columns else close_s
+    atr_s    = pd.to_numeric(df['ATR_14'], errors='coerce').fillna(0.01) if 'ATR_14' in df.columns else pd.Series(0.01, index=df.index)
+    ema50_s  = pd.to_numeric(df['EMA_50'], errors='coerce').fillna(close_s) if 'EMA_50' in df.columns else close_s
+    sma20_s  = pd.to_numeric(df['SMA_20'], errors='coerce').fillna(close_s) if 'SMA_20' in df.columns else close_s
+    bb_u_s   = pd.to_numeric(df['BB_Upper'], errors='coerce').fillna(close_s + atr_s * 2.0) if 'BB_Upper' in df.columns else (close_s + atr_s * 2.0)
+    bb_l_s   = pd.to_numeric(df['BB_Lower'], errors='coerce').fillna(close_s - atr_s * 2.0) if 'BB_Lower' in df.columns else (close_s - atr_s * 2.0)
 
-    lwma_low_zone  = np.maximum(df['LWMA_5_Low'].values, df['LWMA_10_Low'].values)
-    lwma_high_zone = np.minimum(df['LWMA_5_High'].values, df['LWMA_10_High'].values)
+    lw5l_s   = pd.to_numeric(df['LWMA_5_Low'], errors='coerce').fillna(low_s) if 'LWMA_5_Low' in df.columns else low_s
+    lw10l_s  = pd.to_numeric(df['LWMA_10_Low'], errors='coerce').fillna(low_s) if 'LWMA_10_Low' in df.columns else low_s
+    lw5h_s   = pd.to_numeric(df['LWMA_5_High'], errors='coerce').fillna(high_s) if 'LWMA_5_High' in df.columns else high_s
+    lw10h_s  = pd.to_numeric(df['LWMA_10_High'], errors='coerce').fillna(high_s) if 'LWMA_10_High' in df.columns else high_s
+
+    closes   = close_s.values
+    highs    = high_s.values
+    lows     = low_s.values
+    opens    = open_s.values
+    atrs     = atr_s.values
+    ema50    = ema50_s.values
+    sma20    = sma20_s.values
+    bb_upper = bb_u_s.values
+    bb_lower = bb_l_s.values
+
+    lwma_low_zone  = np.maximum(lw5l_s.values, lw10l_s.values)
+    lwma_high_zone = np.minimum(lw5h_s.values, lw10h_s.values)
+
+    # Topografi & Anti Counter-Trend Arrays
+    forbid_buy  = pd.to_numeric(df['forbid_buy'], errors='coerce').fillna(0.0).values if 'forbid_buy' in df.columns else np.zeros(len(df))
+    forbid_sell = pd.to_numeric(df['forbid_sell'], errors='coerce').fillna(0.0).values if 'forbid_sell' in df.columns else np.zeros(len(df))
+    sq_buy_ok   = pd.to_numeric(df['is_squeeze_buy_allowed'], errors='coerce').fillna(1.0).values if 'is_squeeze_buy_allowed' in df.columns else np.ones(len(df))
+    sq_sell_ok  = pd.to_numeric(df['is_squeeze_sell_allowed'], errors='coerce').fillna(1.0).values if 'is_squeeze_sell_allowed' in df.columns else np.ones(len(df))
 
     # --- Trigger event arrays ---
-    is_csa_buy   = df['is_CSA_Buy'].values   if 'is_CSA_Buy'   in df.columns else np.zeros(len(df))
-    is_csa_sell  = df['is_CSA_Sell'].values  if 'is_CSA_Sell'  in df.columns else np.zeros(len(df))
-    is_csak_buy  = df['is_CSAK_Buy'].values  if 'is_CSAK_Buy'  in df.columns else np.zeros(len(df))
-    is_csak_sell = df['is_CSAK_Sell'].values if 'is_CSAK_Sell' in df.columns else np.zeros(len(df))
-    is_csm_buy   = df['is_CSM_Buy'].values   if 'is_CSM_Buy'   in df.columns else np.zeros(len(df))
-    is_csm_sell  = df['is_CSM_Sell'].values  if 'is_CSM_Sell'  in df.columns else np.zeros(len(df))
+    is_csa_buy   = pd.to_numeric(df['is_CSA_Buy'], errors='coerce').fillna(0.0).values   if 'is_CSA_Buy'   in df.columns else np.zeros(len(df))
+    is_csa_sell  = pd.to_numeric(df['is_CSA_Sell'], errors='coerce').fillna(0.0).values  if 'is_CSA_Sell'  in df.columns else np.zeros(len(df))
+    is_csak_buy  = pd.to_numeric(df['is_CSAK_Buy'], errors='coerce').fillna(0.0).values  if 'is_CSAK_Buy'  in df.columns else np.zeros(len(df))
+    is_csak_sell = pd.to_numeric(df['is_CSAK_Sell'], errors='coerce').fillna(0.0).values if 'is_CSAK_Sell' in df.columns else np.zeros(len(df))
+    is_csm_buy   = pd.to_numeric(df['is_CSM_Buy'], errors='coerce').fillna(0.0).values   if 'is_CSM_Buy'   in df.columns else np.zeros(len(df))
+    is_csm_sell  = pd.to_numeric(df['is_CSM_Sell'], errors='coerce').fillna(0.0).values  if 'is_CSM_Sell'  in df.columns else np.zeros(len(df))
 
     body_sizes = np.abs(closes - opens)
 
@@ -102,10 +135,10 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
     struct_buf_ratio = profile.zone_buffer_ratio
 
     # --- Deteksi fractal origin dari kolom hasil calculate_fractal_origin() ---
-    frac_buy  = df['fractal_origin_buy'].values  if 'fractal_origin_buy'  in df.columns else np.ones(len(df))
-    frac_sell = df['fractal_origin_sell'].values if 'fractal_origin_sell' in df.columns else np.ones(len(df))
-    frac_cap_buy  = df['fractal_capacity_buy'].values  if 'fractal_capacity_buy'  in df.columns else np.ones(len(df))
-    frac_cap_sell = df['fractal_capacity_sell'].values if 'fractal_capacity_sell' in df.columns else np.ones(len(df))
+    frac_buy      = pd.to_numeric(df['fractal_origin_buy'], errors='coerce').fillna(1.0).values  if 'fractal_origin_buy'  in df.columns else np.ones(len(df))
+    frac_sell     = pd.to_numeric(df['fractal_origin_sell'], errors='coerce').fillna(1.0).values if 'fractal_origin_sell' in df.columns else np.ones(len(df))
+    frac_cap_buy  = pd.to_numeric(df['fractal_capacity_buy'], errors='coerce').fillna(1.0).values  if 'fractal_capacity_buy'  in df.columns else np.ones(len(df))
+    frac_cap_sell = pd.to_numeric(df['fractal_capacity_sell'], errors='coerce').fillna(1.0).values if 'fractal_capacity_sell' in df.columns else np.ones(len(df))
 
     n = len(df)
 
@@ -113,10 +146,32 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
     # fractal_origin score 1 (base only)  → 60 candle
     # fractal_origin score 2 (setup+base) → 120 candle
     # fractal_origin score 3 (all three)  → 240 candle
-    HORIZON_BY_FRACTAL = {0: 60, 1: 60, 2: 120, 3: 240}
+    # --- Partisi Rezim Pasar untuk Spesialisasi Model Dual AI ---
+    is_bb_sq_arr      = pd.to_numeric(df['is_bb_squeeze'], errors='coerce').fillna(0.0).values if 'is_bb_squeeze' in df.columns else np.zeros(n)
+    is_bb_exp_arr     = pd.to_numeric(df['is_bb_expanding'], errors='coerce').fillna(0.0).values if 'is_bb_expanding' in df.columns else np.zeros(n)
+    is_breakout_b_arr = pd.to_numeric(df['is_breakout_bull'], errors='coerce').fillna(0.0).values if 'is_breakout_bull' in df.columns else np.zeros(n)
+    is_breakout_s_arr = pd.to_numeric(df['is_breakout_bear'], errors='coerce').fillna(0.0).values if 'is_breakout_bear' in df.columns else np.zeros(n)
+    is_running_b_arr  = pd.to_numeric(df['is_running_bull'], errors='coerce').fillna(0.0).values if 'is_running_bull' in df.columns else np.zeros(n)
+    is_running_s_arr  = pd.to_numeric(df['is_running_bear'], errors='coerce').fillna(0.0).values if 'is_running_bear' in df.columns else np.zeros(n)
+
+    # Jendela pasca-breakout (re-entry yang terjadi dalam 20 candle setelah breakout dari squeeze adalah habitat primer Runner)
+    recent_brk_b = pd.Series(is_breakout_b_arr).rolling(20, min_periods=1).max().fillna(0).values
+    recent_brk_s = pd.Series(is_breakout_s_arr).rolling(20, min_periods=1).max().fillna(0).values
+
+    # Habitat Runner: Breakout dari Squeeze (recent), Running Trend CSM/EMA, atau BB Mengembang
+    is_runner_habitat = (
+        (is_breakout_b_arr == 1) | (is_breakout_s_arr == 1) |
+        (recent_brk_b == 1)      | (recent_brk_s == 1) |
+        (is_running_b_arr == 1)  | (is_running_s_arr == 1) |
+        ((is_bb_exp_arr == 1) & (is_bb_sq_arr == 0))
+    )
+
+    # Habitat Hit & Run (Normal): Sideways / Squeeze / Reversal Ekstrem Band
+    is_normal_habitat = (is_bb_sq_arr == 1) | (~is_runner_habitat)
 
     labels_normal  = np.zeros(n, dtype=np.int8)
     labels_runner  = np.zeros(n, dtype=np.int8)
+    setup_dir_arr  = np.zeros(n, dtype=np.int8)
     mfe_r_arr      = np.zeros(n, dtype=np.float32)
     trigger_scores = np.zeros(n, dtype=np.float32)
     frac_horizons  = np.zeros(n, dtype=np.int16)
@@ -135,8 +190,20 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
             eval_buy = eval_buy and (closes[i] >= ema50[i]) and (sma20[i] >= ema50[i])
             eval_sell = eval_sell and (closes[i] <= ema50[i]) and (sma20[i] <= ema50[i])
 
+        # Anti Counter-Trend & Squeeze Extreme Guard
+        eval_buy  = eval_buy and (forbid_buy[i] == 0) and (sq_buy_ok[i] == 1)
+        eval_sell = eval_sell and (forbid_sell[i] == 0) and (sq_sell_ok[i] == 1)
+
         if not eval_buy and not eval_sell:
             continue
+
+        # Tentukan setup direction tunggal
+        if eval_buy and not eval_sell:
+            setup_dir_arr[i] = 1
+        elif eval_sell and not eval_buy:
+            setup_dir_arr[i] = 2
+        elif eval_buy and eval_sell:
+            setup_dir_arr[i] = 1 if closes[i] >= ema50[i] else 2
 
         entry_price = closes[i]
         struct_tol  = struct_buf_ratio * atr_i
@@ -196,15 +263,11 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
                 if max_mfe >= max_runner_rr:
                     break
 
-                # Trailing: if secured and pulls back to entry, done
-                if secured and c_l <= entry_price:
-                    break
-
-            if not invalidated:
+            if not invalidated and t_score > 0:
                 mfe_r_arr[i] = max(mfe_r_arr[i], float(max_mfe))
-                if max_mfe >= profile.rr_normal:
+                if max_mfe >= profile.rr_normal and is_normal_habitat[i]:
                     labels_normal[i] = 1
-                if max_mfe >= profile.rr_runner:
+                if max_mfe >= profile.rr_runner and is_runner_habitat[i]:
                     labels_runner[i] = 1
 
         # ---------------------------------------------------------------
@@ -258,17 +321,15 @@ def generate_targets(df: pd.DataFrame, max_runner_rr: float = 5.0, symbol: str =
                 if max_mfe >= max_runner_rr:
                     break
 
-                if secured and c_h >= entry_price:
-                    break
-
-            if not invalidated:
+            if not invalidated and t_score > 0:
                 cur = mfe_r_arr[i]
                 mfe_r_arr[i] = max(cur, float(max_mfe))
-                if max_mfe >= profile.rr_normal:
+                if max_mfe >= profile.rr_normal and is_normal_habitat[i]:
                     labels_normal[i] = 1
-                if max_mfe >= profile.rr_runner:
+                if max_mfe >= profile.rr_runner and is_runner_habitat[i]:
                     labels_runner[i] = 1
 
+    df['setup_dir']       = setup_dir_arr       # 1 = Buy, 2 = Sell, 0 = Inactive
     df['Target_Normal']   = labels_normal.astype(int)
     df['Target_Runner']   = labels_runner.astype(int)
     df['max_mfe_r']       = mfe_r_arr           # label regresi kontinu (opsional)

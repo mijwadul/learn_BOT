@@ -149,8 +149,55 @@ Seluruh aturan di atas diterjemahkan ke dalam komponen algoritma bot:
 
 | Modul Codebase | Implementasi Aturan BBMA |
 |---|---|
-| `backend/utils/indicators.py` | Perhitungan matematis LWMA 5/10 (High & Low), Bollinger Bands, EMA 50, deteksi CSM, Extrem, CSAK, dan status Zon Zero Loss. |
-| `backend/agents/research/target_labeler.py` | Pelabelan target pelatihan berbasis Triple Barrier Method di level LWMA dengan aturan Body Rejection (Slide 33) & Zon Zero Loss (Slide 51-56). |
-| `backend/agents/researcher.py` | Filter kandidat dataset pelatihan, eliminasi data *noise*, dan kalibrasi Optuna dengan bobot seimbang (*balanced*). |
-| `backend/agents/gatekeeper.py` | Validasi Out-Of-Sample (OOS) yang menguji keabsahan sinyal murni berdasarkan aturan Re-entry BBMA dan threshold keyakinan AI. |
-| `backend/agents/executor.py` | Eksekutor live order dengan sekring *Body Rejection*, *No-CSM Filter*, dan proteksi pembatalan order jika harga menembus EMA 50. |
+| `backend/utils/indicators.py` | Perhitungan matematis LWMA 5/10 (High & Low), Bollinger Bands, EMA 50, deteksi CSM, Extrem, CSAK, status Zon Zero Loss, serta Topografi BB (Squeeze, Breakout, Running Trend, Forbid Counter-Trend). |
+| `backend/agents/research/target_labeler.py` | Pelabelan target pelatihan berbasis Fractal-Aware MFE dengan aturan Body Rejection, Zon Zero Loss (ZZL), Anti Counter-Trend Shield, dan Filter Ekstrem Squeeze. |
+| `backend/agents/research/feature_engineer.py` | Ekstraksi fitur sekuensial, rasio kompresi BB, arah tren topografi (`feat_is_running_bull/bear`, `feat_is_bb_squeeze`, `feat_is_breakout`), serta arah setup (`setup_dir`). |
+| `backend/agents/research/oos_evaluator.py` | Fit & Proper Test OOS simulasi VectorBT dengan penegakan filter trigger CSA/CSAK/CSM 30-candle, Anti Counter-Trend Gate, dan Trailing Breakeven (+1.0R). |
+| `backend/agents/executor.py` | Eksekutor live order dengan sekring Anti Counter-Trend Topography Guard, Squeeze Filter, Zon Zero Loss, dan Dynamic Structural SL. |
+
+---
+
+## 8. Topografi Bentuk Bollinger Bands & Anti Counter-Trend Shield
+
+Berdasarkan evaluasi kurasi RLHF dan prinsip murni BBMA Oma Ally, algoritma dilengkapi dengan aturan topografi bentuk Bollinger Bands untuk mengeliminasi kesalahan fatal:
+
+### A. BB Mengembang (Expansion) & Running Trend
+1. **Karakteristik:** Upper BB dan Lower BB membuka lebar saling menjauhi (`BB_Width_Slope > 0`), Mid BB (SMA 20) miring tegas, dan didahului oleh Candle Momentum (CSM) yang Close di luar BB.
+2. **Hukum Mutlak Anti Counter-Trend:**
+   * **Running Bullish:** DILARANG KERAS membuka posisi SELL (`forbid_sell = 1`). Jangan mencoba menebak pucuk (*topping*). Hanya boleh mengambil Re-entry BUY saat harga pullback ke MA 5/10 Low.
+   * **Running Bearish:** DILARANG KERAS membuka posisi BUY (`forbid_buy = 1`). Jangan mencoba menebak dasar (*bottoming*). Hanya boleh mengambil Re-entry SELL saat harga pullback ke MA 5/10 High.
+
+### B. BB Mengecil / Menguncup (Squeeze / Sideways)
+1. **Karakteristik:** Volatilitas terkompresi (`bb_squeeze_ratio < 0.85` atau persentil < 35%), Upper BB dan Lower BB saling mendekat, Mid BB mendatar.
+2. **Hukum Squeeze / Sideways:**
+   * MA 5/10 Low dan MA 5/10 High berhimpitan di sekitar Mid BB. **DILARANG Re-entry di tengah band** karena ruang gerak terjepit dan rasio Risk:Reward tidak memadai.
+   * **Hanya Boleh Entry di Batas Ekstrem:** BUY hanya jika harga menyentuh / di bawah Lower BB (`low <= BB_Lower`). SELL hanya jika harga menyentuh / di atas Upper BB (`high >= BB_Upper`).
+
+### C. Break Structure dari Squeeze (Awal Trend Baru)
+1. **Karakteristik:** Dari kondisi Squeeze, muncul candle CSAK atau CSM yang menembus keluar dari BB disertai mulut BB yang mulai mengembang kembali.
+2. **Hukum Transisi Squeeze ke Trend:**
+   * Fase sideways resmi berakhir dan **trend sesungguhnya telah dimulai**.
+   * DILARANG melakukan counter-trend terhadap candle breakout (misal: jangan Sell saat breakout ke atas karena mengira harga "terlalu tinggi").
+   * Sistem otomatis mengaktifkan Anti Counter-Trend Shield ke arah breakout untuk memutus siklus looping kerugian.
+
+---
+
+## 9. Spesialisasi Rezim Pasar & Estafet Dual AI (Hit & Run vs Runner)
+
+Untuk mencegah degradasi Win Rate akibat salah habitat, Trading BOT membagi mandat pasar secara absolut:
+
+1. **Mode Hit & Run (Normal) — Spesialis Sideways / Konsolidasi:**
+   * **Habitat:** BB Squeeze (`bb_squeeze_ratio < 0.85`), pasar ranging, atau bouncing antar batas band.
+   * **Mandat Eksekusi:** Menangkap osilasi cepat (*bouncing*) dengan target moderat ($\text{RR } 1:1.5\text{ s.d. } 1:2.0$) di level Mid BB atau band seberang.
+   * **Prinsip:** *"Sideways nih, giliran gua maju!"*
+
+2. **Mode Runner — Spesialis Breakout & Running Trend:**
+   * **Habitat:** Penembusan struktur dari squeeze (`is_breakout_bull/bear == 1`), BB Mengembang tajam (`is_bb_expanding == 1`), atau tren CSM aktif (`is_running_bull/bear == 1`).
+   * **Mandat Eksekusi:** Menunggangi gelombang tren besar (*ride the momentum*) dengan target jauh ($\text{RR } 1:3.5\text{ s.d. } 1:5.0$) dan Trailing Breakeven setelah mencapai $+1.0\text{R}$.
+   * **Perlindungan:** DILARANG KERAS mengeksekusi Runner saat pasar sedang Sideways mati karena target 3.5R secara fisik mustahil tercapai di range sempit.
+   * **Prinsip:** *"Trend sudah jalan, giliran gua lari!"*
+
+3. **Hand-off Estafet Otomatis di Live Trading:**
+   * Di saat pasar berkonsolidasi, Agen Hit & Run memegang kendali eksekusi.
+   * Begitu terdeteksi candle CSAK/CSM menembus BB Squeeze, tongkat estafet langsung berpindah ke Agen Runner secara instan.
+

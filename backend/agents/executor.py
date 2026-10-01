@@ -214,6 +214,8 @@ class ExecutorAgent:
                             broker_p = resolve_broker_symbol(clean_pair)
                             self.data_miner.set_symbol(clean_pair)
                             self.researcher.set_symbol(clean_pair)
+                            from agents.research import get_profile
+                            profile = get_profile(clean_pair)
 
                             df_live = await asyncio.to_thread(self.data_miner.fetch_and_merge_data, 30)
                             if df_live is not None and not df_live.empty:
@@ -263,8 +265,9 @@ class ExecutorAgent:
                                 }
 
                                 if best_prob >= entry_threshold:
-                                    # Major Trend Resolution (EMA 50)
+                                    # Major Trend Resolution & Kaedah Zon Zero Loss (ZZL)
                                     ema_50_val = row_data.get('EMA_50', 0.0)
+                                    sma_20_val = row_data.get('SMA_20', 0.0)
                                     close_val = row_data.get('close', 0.0)
 
                                     if abs(max_buy - max_sell) < 1e-4:
@@ -285,22 +288,79 @@ class ExecutorAgent:
                                         preferred_mode = "RUNNER" if p_sell_r >= p_sell_n else "HIT_RUN"
                                         used_prob = p_sell_r if preferred_mode == "RUNNER" else p_sell_n
 
+                                    # Filter Zon Zero Loss (ZZL) Wajib jika dimandatkan oleh profile instrumen (misal XAUUSD)
+                                    is_zzl_valid = True
+                                    if profile.mandate_zzl:
+                                        if action_type == mt5.ORDER_TYPE_BUY and (close_val < ema_50_val or (sma_20_val > 0 and sma_20_val < ema_50_val)):
+                                            is_zzl_valid = False
+                                            logging.info(f"[{clean_pair}] Sinyal BUY ({used_prob*100:.1f}%) dibatalkan: Melanggar Kaedah Zon Zero Loss (Close < EMA 50 atau Mid BB < EMA 50).")
+                                        elif action_type == mt5.ORDER_TYPE_SELL and (close_val > ema_50_val or (sma_20_val > 0 and sma_20_val > ema_50_val)):
+                                            is_zzl_valid = False
+                                            logging.info(f"[{clean_pair}] Sinyal SELL ({used_prob*100:.1f}%) dibatalkan: Melanggar Kaedah Zon Zero Loss (Close > EMA 50 atau Mid BB > EMA 50).")
+
+                                    # Anti Counter-Trend Topography Guard & Squeeze Filter
+                                    forbid_b = bool(row_data.get('forbid_buy', 0))
+                                    forbid_s = bool(row_data.get('forbid_sell', 0))
+                                    sq_b = bool(row_data.get('is_squeeze_buy_allowed', 1))
+                                    sq_s = bool(row_data.get('is_squeeze_sell_allowed', 1))
+                                    is_topography_valid = True
+
+                                    if action_type == mt5.ORDER_TYPE_BUY:
+                                        if forbid_b:
+                                            is_topography_valid = False
+                                            logging.info(f"[{clean_pair}] Sinyal BUY ({used_prob*100:.1f}%) dibatalkan: Anti Counter-Trend Guard (Market sedang Running Bearish / Breakdown).")
+                                        elif not sq_b:
+                                            is_topography_valid = False
+                                            logging.info(f"[{clean_pair}] Sinyal BUY ({used_prob*100:.1f}%) dibatalkan: Squeeze Filter (Hanya boleh Buy di Lower BB saat sideways).")
+                                    elif action_type == mt5.ORDER_TYPE_SELL:
+                                        if forbid_s:
+                                            is_topography_valid = False
+                                            logging.info(f"[{clean_pair}] Sinyal SELL ({used_prob*100:.1f}%) dibatalkan: Anti Counter-Trend Guard (Market sedang Running Bullish / Breakout).")
+                                        elif not sq_s:
+                                            is_topography_valid = False
+                                            logging.info(f"[{clean_pair}] Sinyal SELL ({used_prob*100:.1f}%) dibatalkan: Squeeze Filter (Hanya boleh Sell di Upper BB saat sideways).")
+
                                     # Hitung Dynamic Structural SL (Support/Resistance terdekat & Setup Invalidation)
                                     sl_dist = self.calculate_dynamic_structural_sl(
                                         broker_p, action_type, close_val, df_live, row_data
                                     )
 
-                                    # Regime-Aware Routing
-                                    trade_mode = preferred_mode
-                                    if preferred_mode == "RUNNER" and regime_name == "RANGING/CHOPPY":
-                                        trade_mode = "HIT_RUN"
-                                        used_prob = p_buy_n if action_type == mt5.ORDER_TYPE_BUY else p_sell_n
-                                    elif regime_name == "TRENDING" and preferred_mode == "HIT_RUN" and ((action_type == mt5.ORDER_TYPE_BUY and p_buy_r >= 0.65) or (action_type == mt5.ORDER_TYPE_SELL and p_sell_r >= 0.65)):
+                                    # ---------------------------------------------------------------
+                                    # Dynamic Regime Hand-off State Machine (Hit & Run vs Runner)
+                                    # ---------------------------------------------------------------
+                                    is_sq = bool(row_data.get('is_bb_squeeze', 0))
+                                    is_exp = bool(row_data.get('is_bb_expanding', 0))
+                                    is_brk_b = bool(row_data.get('is_breakout_bull', 0))
+                                    is_brk_s = bool(row_data.get('is_breakout_bear', 0))
+                                    is_run_b = bool(row_data.get('is_running_bull', 0))
+                                    is_run_s = bool(row_data.get('is_running_bear', 0))
+
+                                    is_runner_habitat = is_brk_b or is_brk_s or is_run_b or is_run_s or (is_exp and not is_sq) or (regime_name == "TRENDING")
+
+                                    if is_runner_habitat and not is_sq:
+                                        # Pasar Breakout / Trending: Mandat eksekusi dipegang oleh RUNNER
                                         trade_mode = "RUNNER"
                                         used_prob = p_buy_r if action_type == mt5.ORDER_TYPE_BUY else p_sell_r
+                                        logging.info(
+                                            f"[{clean_pair}] 🚀 [REGIME HAND-OFF] Pasar BREAKOUT & TRENDING: "
+                                            f"Mandat dipegang RUNNER (Prob: {used_prob*100:.1f}%)"
+                                        )
+                                    else:
+                                        # Pasar Sideways / Squeeze / Bouncing Range: Mandat eksekusi dipegang oleh HIT_RUN
+                                        trade_mode = "HIT_RUN"
+                                        used_prob = p_buy_n if action_type == mt5.ORDER_TYPE_BUY else p_sell_n
+                                        logging.info(
+                                            f"[{clean_pair}] 🛡️ [REGIME HAND-OFF] Pasar SIDEWAYS / SQUEEZE: "
+                                            f"Mandat dipegang HIT_RUN (Prob: {used_prob*100:.1f}%)"
+                                        )
+
+                                    # Runner Protection: Dilarang keras mengeksekusi RUNNER di dalam Squeeze mati
+                                    if trade_mode == "RUNNER" and is_sq:
+                                        allow_execution = False
+                                        logging.info(f"[{clean_pair}] Sinyal RUNNER dibatalkan: Pasar sedang Squeeze (Bukan habitat Runner).")
 
                                     # Partial Live check (Pair-aware Brain Activation)
-                                    allow_execution = True
+                                    allow_execution = is_zzl_valid and is_topography_valid
                                     if trade_mode == "RUNNER" and not self.supervisor.is_runner_valid(clean_pair):
                                         allow_execution = False
                                         logging.info(f"[{clean_pair}] Sinyal RUNNER dibatalkan karena Otak Runner untuk {clean_pair} nonaktif/quarantine.")
@@ -332,7 +392,7 @@ class ExecutorAgent:
                                         lwma_10_l = row_data.get('LWMA_10_Low', 0)
                                         high_price = row_data.get('high', 0)
                                         low_price = row_data.get('low', 0)
-                                        reentry_buffer = 0.35 * (atr_val if atr_val > 0 else (50 * point))
+                                        reentry_buffer = profile.zone_buffer_ratio * (atr_val if atr_val > 0 else (50 * point))
 
                                         # Evaluasi jendela 3 candle terakhir agar konfirmasi pasca-sentuhan MA tetap sah
                                         recent_min_low = float(df_live['low'].tail(3).min()) if (df_live is not None and len(df_live) >= 3) else low_price
@@ -510,13 +570,16 @@ class ExecutorAgent:
         lot = self.risk_service.calculate_lot_size(target_symbol, sl_distance)
         sl_abs = float(sl_distance)
         
+        from agents.research import get_profile
+        profile = get_profile(target_symbol)
+
         is_runner_mode = "RUNNER" in (trade_mode or "").upper()
         if is_runner_mode:
-            max_learned_rr = getattr(self.researcher, 'max_runner_rr', 5.0) if self.researcher else 5.0
-            runner_rr = min(4.0, max_learned_rr)
+            max_learned_rr = getattr(self.researcher, 'max_runner_rr', profile.rr_runner) if self.researcher else profile.rr_runner
+            runner_rr = min(profile.rr_runner, max_learned_rr)
             tp_abs = float(sl_distance * runner_rr)
         else:
-            tp_abs = float(sl_distance * 2.0)
+            tp_abs = float(sl_distance * profile.rr_normal)
             
         digits = 2
         sym_info = mt5.symbol_info(target_symbol)
