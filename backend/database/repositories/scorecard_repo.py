@@ -140,10 +140,10 @@ def get_latest_scorecards(symbol: str = "XAUUSD") -> Dict[str, Any]:
     try:
         ensure_schema_migrations()
         sym_clean = str(symbol or "XAUUSD").strip().upper()
-        latest = {"normal": None, "runner": None}
+        latest = {"unified": None, "normal": None, "runner": None}
 
         with Session(sync_engine) as session:
-            for m in ["normal", "runner"]:
+            for m in ["unified", "normal", "runner"]:
                 r = session.query(ModelScorecard).filter(
                     ModelScorecard.symbol == sym_clean,
                     ModelScorecard.mode == m
@@ -174,7 +174,7 @@ def get_latest_scorecards(symbol: str = "XAUUSD") -> Dict[str, Any]:
             from agents.research.model_manager import ModelManager
             loaded = ModelManager.load_models(sym_clean)
             json_scorecards = loaded.get("oos_scorecard", {})
-            for m in ["normal", "runner"]:
+            for m in ["unified", "normal", "runner"]:
                 if latest[m] is None and json_scorecards.get(m):
                     latest[m] = json_scorecards[m]
                 elif latest[m] is not None and json_scorecards.get(m):
@@ -184,6 +184,8 @@ def get_latest_scorecards(symbol: str = "XAUUSD") -> Dict[str, Any]:
                         latest[m]["criteria"] = json_scorecards[m]["criteria"]
                     if "checks" in json_scorecards[m] and "checks" not in latest[m]:
                         latest[m]["checks"] = json_scorecards[m]["checks"]
+            if latest["unified"] is None and latest["normal"] is not None:
+                latest["unified"] = latest["normal"]
         except Exception as e_meta:
             logger.debug(f"Could not read metadata scorecard fallback: {e_meta}")
 

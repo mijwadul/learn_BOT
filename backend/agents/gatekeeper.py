@@ -28,7 +28,7 @@ class GatekeeperAgent:
         """
         logging.info(f"Memulai validasi Out-Of-Sample (OOS) Institusional [{mode.capitalize()} Mode]...")
         
-        model = self.researcher.model_normal if mode == 'normal' else self.researcher.model_runner
+        model = getattr(self.researcher, 'model_unified', None) or (self.researcher.model_normal if mode == 'normal' else self.researcher.model_runner)
         if model is None:
             logging.error(f"Model {mode} belum dilatih.")
             return 0.0
@@ -51,22 +51,25 @@ class GatekeeperAgent:
             df_test = self.researcher.generate_targets(df_test)
             df_test = self.researcher.add_normalized_features(df_test)
             
-            # Filter spasial zona Re-entry BBMA LWMA & Zon Zero Loss (Selaras dengan Target Labeler)
-            lwma_low_zone = np.maximum(df_test['LWMA_5_Low'].values, df_test['LWMA_10_Low'].values)
-            lwma_high_zone = np.minimum(df_test['LWMA_5_High'].values, df_test['LWMA_10_High'].values)
-            atr_test = df_test['ATR_14'].values if 'ATR_14' in df_test.columns else np.full(len(df_test), 0.001)
-            buffer = profile.zone_buffer_ratio * atr_test
+            # Untuk Pure Forward Realized Profit / Unified Model: evaluasi seluruh bar tanpa distorsi filter spasial lama
+            is_unified = ('Target_Class' in df_test.columns) or (getattr(self.researcher, 'model_unified', None) is not None)
+            if not is_unified:
+                # Filter spasial zona Re-entry BBMA LWMA legacy
+                lwma_low_zone = np.maximum(df_test['LWMA_5_Low'].values, df_test['LWMA_10_Low'].values) if 'LWMA_5_Low' in df_test.columns else None
+                lwma_high_zone = np.minimum(df_test['LWMA_5_High'].values, df_test['LWMA_10_High'].values) if 'LWMA_5_High' in df_test.columns else None
+                atr_test = pd.to_numeric(df_test['ATR_14'], errors='coerce').fillna(0.001).values if 'ATR_14' in df_test.columns else np.full(len(df_test), 0.001)
+                buffer = profile.zone_buffer_ratio * atr_test
 
-            reentry_buy_mask = (df_test['low'].values <= (lwma_low_zone + buffer))
-            reentry_sell_mask = (df_test['high'].values >= (lwma_high_zone - buffer))
+                reentry_buy_mask = (df_test['low'].values <= (lwma_low_zone + buffer)) if lwma_low_zone is not None else np.ones(len(df_test), dtype=bool)
+                reentry_sell_mask = (df_test['high'].values >= (lwma_high_zone - buffer)) if lwma_high_zone is not None else np.ones(len(df_test), dtype=bool)
 
-            if profile.mandate_zzl:
-                ema50_vals = df_test['EMA_50'].values if 'EMA_50' in df_test.columns else df_test['close'].values
-                sma20_vals = df_test['SMA_20'].values if 'SMA_20' in df_test.columns else df_test['close'].values
-                reentry_buy_mask = reentry_buy_mask & (df_test['close'].values >= ema50_vals) & (sma20_vals >= ema50_vals)
-                reentry_sell_mask = reentry_sell_mask & (df_test['close'].values <= ema50_vals) & (sma20_vals <= ema50_vals)
+                if profile.mandate_zzl:
+                    ema50_vals = df_test['EMA_50'].values if 'EMA_50' in df_test.columns else df_test['close'].values
+                    sma20_vals = df_test['SMA_20'].values if 'SMA_20' in df_test.columns else df_test['close'].values
+                    reentry_buy_mask = reentry_buy_mask & (df_test['close'].values >= ema50_vals) & (sma20_vals >= ema50_vals)
+                    reentry_sell_mask = reentry_sell_mask & (df_test['close'].values <= ema50_vals) & (sma20_vals <= ema50_vals)
 
-            df_test = df_test[reentry_buy_mask | reentry_sell_mask].copy()
+                df_test = df_test[reentry_buy_mask | reentry_sell_mask].copy()
 
             
             if df_test.empty:
@@ -86,7 +89,10 @@ class GatekeeperAgent:
                 if not (pd.api.types.is_numeric_dtype(X_test[col]) or pd.api.types.is_bool_dtype(X_test[col])):
                     X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0.0)
 
-            target_col = 'Target_Normal' if mode == 'normal' else 'Target_Runner'
+            if 'Target_Class' in df_test.columns:
+                target_col = 'Target_Class'
+            else:
+                target_col = 'Target_Normal' if mode == 'normal' else 'Target_Runner'
             y_test = df_test[target_col]
             
             # Evaluasi probabilitas menggunakan batas threshold AI (dinamis membaca konfigurasi dari SettingsManager / Config)
@@ -108,7 +114,7 @@ class GatekeeperAgent:
                 high_vals = df_test['high'].values if 'high' in df_test.columns else df_test['close'].values
                 lwma_low_zone = np.maximum(df_test['LWMA_5_Low'].values, df_test['LWMA_10_Low'].values) if 'LWMA_5_Low' in df_test.columns else None
                 lwma_high_zone = np.minimum(df_test['LWMA_5_High'].values, df_test['LWMA_10_High'].values) if 'LWMA_5_High' in df_test.columns else None
-                atrs = df_test['ATR_14'].values if 'ATR_14' in df_test.columns else np.full(len(df_test), 0.001)
+                atrs = pd.to_numeric(df_test['ATR_14'], errors='coerce').fillna(0.001).values if 'ATR_14' in df_test.columns else np.full(len(df_test), 0.001)
                 buffer_zone = 0.35 * atrs
 
                 # Pemicu Spasial Dinamis (Selaras dengan Target Labeler)
@@ -119,15 +125,18 @@ class GatekeeperAgent:
                 if is_binary:
                     idx_w = classes.index(1) if 1 in classes else 1
                     p_win = probs[:, idx_w] if probs.shape[1] > idx_w else probs[:, -1]
-                    preds[(p_win >= entry_thresh) & is_valid_buy] = 1
-                    preds[(p_win >= entry_thresh) & is_valid_sell] = 2
+                    preds[p_win >= entry_thresh] = 1
                 else:
                     idx_buy = classes.index(1) if 1 in classes else -1
                     idx_sell = classes.index(2) if 2 in classes else -1
                     p_buy = probs[:, idx_buy] if idx_buy != -1 else np.zeros(len(df_test))
                     p_sell = probs[:, idx_sell] if idx_sell != -1 else np.zeros(len(df_test))
-                    preds[(p_buy >= entry_thresh) & (p_buy > p_sell) & is_valid_buy] = 1
-                    preds[(p_sell >= entry_thresh) & (p_sell > p_buy) & is_valid_sell] = 2
+                    if is_unified:
+                        preds[(p_buy >= entry_thresh) & (p_buy > p_sell)] = 1
+                        preds[(p_sell >= entry_thresh) & (p_sell > p_buy)] = 2
+                    else:
+                        preds[(p_buy >= entry_thresh) & (p_buy > p_sell) & is_valid_buy] = 1
+                        preds[(p_sell >= entry_thresh) & (p_sell > p_buy) & is_valid_sell] = 2
             else:
                 preds = model.predict(X_test)
             

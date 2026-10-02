@@ -41,8 +41,13 @@ class OrderRouter:
         """
         Pengiriman order transaksi MT5 dengan dynamic slippage dan smart retry saat requote.
         """
-        is_runner = ("RUNNER" in trade_mode.upper())
-        magic = Config.MAGIC_NUMBER_RUNNER if is_runner else Config.MAGIC_NUMBER_NORMAL
+        mode_upper = (trade_mode or "PROFIT").upper()
+        if "PROFIT" in mode_upper or "UNIFIED" in mode_upper:
+            magic = getattr(Config, 'MAGIC_NUMBER_UNIFIED', 234003)
+        elif "RUNNER" in mode_upper:
+            magic = Config.MAGIC_NUMBER_RUNNER
+        else:
+            magic = Config.MAGIC_NUMBER_NORMAL
         filling_mode = get_symbol_filling_mode(symbol)
         
         max_retries = getattr(Config, 'REQUOTE_MAX_RETRIES', 2)

@@ -131,6 +131,12 @@ def run_fit_proper_test(
             from utils.indicators import calculate_bbma
             df_calc = calculate_bbma(df_calc)
 
+        from utils.indicators import calculate_atr
+        if 'ATR_14' not in df_calc.columns or df_calc['ATR_14'].isna().all():
+            df_calc['ATR_14'] = calculate_atr(df_calc, 14)
+        if 'atr_14' not in df_calc.columns or df_calc['atr_14'].isna().all():
+            df_calc['atr_14'] = df_calc['ATR_14']
+
         if hasattr(researcher, "generate_targets"):
             df_calc = researcher.generate_targets(df_calc, symbol=sym_clean)
         if hasattr(researcher, "add_normalized_features"):
@@ -148,37 +154,54 @@ def run_fit_proper_test(
             model_features = list(researcher.features)
 
         if not model_features:
-            excluded = {'open', 'high', 'low', 'close', 'tick_volume', 'Target_Normal', 'Target_Runner', 'setup_dir', 'symbol', 'max_mfe_r', 'fractal_horizon'}
-            model_features = [c for c in df_calc.columns if c not in excluded and 'mfe' not in c.lower() and 'Target' not in c and 'horizon' not in c.lower()]
+            excluded = {'open', 'high', 'low', 'close', 'tick_volume', 'Target_Normal', 'Target_Runner', 'setup_dir', 'symbol', 'max_mfe_r', 'forward_mfe_r', 'fractal_horizon'}
+            model_features = [c for c in df_calc.columns if c not in excluded and not any(kw in c.lower() for kw in ['target', 'mfe', 'forward', 'future', 'pnl', 'profit', 'horizon'])]
 
         X_oos = df_calc.reindex(columns=model_features, fill_value=0.0).copy()
         for col in model_features:
             if not (pd.api.types.is_numeric_dtype(X_oos[col]) or pd.api.types.is_bool_dtype(X_oos[col])):
                 X_oos[col] = pd.to_numeric(X_oos[col], errors='coerce').fillna(0.0)
 
-        # 3. Prediksi Probabilitas Kemenangan
+        # 3. Prediksi Probabilitas Kemenangan (Multiclass 3-Class & Binary Compatible)
         if hasattr(model, "predict_proba"):
             probs = model.predict_proba(X_oos)
-            classes = list(getattr(model, 'classes_', [0, 1]))
-            idx_w = classes.index(1) if 1 in classes else (1 if probs.shape[1] > 1 else 0)
-            p_win = probs[:, idx_w] if probs.shape[1] > idx_w else probs[:, -1]
+            classes = list(getattr(model, 'classes_', [0, 1, 2]))
+            if len(classes) == 3:
+                idx_buy = classes.index(1) if 1 in classes else -1
+                idx_sell = classes.index(2) if 2 in classes else -1
+                p_buy = probs[:, idx_buy] if idx_buy >= 0 else np.zeros(len(X_oos))
+                p_sell = probs[:, idx_sell] if idx_sell >= 0 else np.zeros(len(X_oos))
+                p_win = np.maximum(p_buy, p_sell)
+            else:
+                idx_w = classes.index(1) if 1 in classes else (1 if probs.shape[1] > 1 else 0)
+                p_win = probs[:, idx_w] if probs.shape[1] > idx_w else probs[:, -1]
+                p_buy = p_win
+                p_sell = p_win
         elif hasattr(model, "predict"):
             p_win = model.predict(X_oos)
+            p_buy = p_win
+            p_sell = p_win
         else:
             raise ValueError("Model tidak memiliki method predict atau predict_proba")
 
         # 4. Filter Spasial Zona Re-entry BBMA LWMA
         low_s = pd.to_numeric(df_calc['low'], errors='coerce').fillna(0.0)
         high_s = pd.to_numeric(df_calc['high'], errors='coerce').fillna(0.0)
-        lw5l = pd.to_numeric(df_calc['LWMA_5_Low'], errors='coerce').fillna(low_s).values if 'LWMA_5_Low' in df_calc.columns else low_s.values
-        lw10l = pd.to_numeric(df_calc['LWMA_10_Low'], errors='coerce').fillna(low_s).values if 'LWMA_10_Low' in df_calc.columns else low_s.values
-        lw5h = pd.to_numeric(df_calc['LWMA_5_High'], errors='coerce').fillna(high_s).values if 'LWMA_5_High' in df_calc.columns else high_s.values
-        lw10h = pd.to_numeric(df_calc['LWMA_10_High'], errors='coerce').fillna(high_s).values if 'LWMA_10_High' in df_calc.columns else high_s.values
+        lw5l = pd.to_numeric(df_calc.get('LWMA_5_Low', df_calc.get('lwma_5_low', low_s)), errors='coerce').fillna(low_s).values
+        lw10l = pd.to_numeric(df_calc.get('LWMA_10_Low', df_calc.get('lwma_10_low', low_s)), errors='coerce').fillna(low_s).values
+        lw5h = pd.to_numeric(df_calc.get('LWMA_5_High', df_calc.get('lwma_5_high', high_s)), errors='coerce').fillna(high_s).values
+        lw10h = pd.to_numeric(df_calc.get('LWMA_10_High', df_calc.get('lwma_10_high', high_s)), errors='coerce').fillna(high_s).values
 
         lwma_low_zone = np.maximum(lw5l, lw10l)
         lwma_high_zone = np.minimum(lw5h, lw10h)
-        atrs = pd.to_numeric(df_calc['ATR_14'], errors='coerce').fillna(0.001).values if 'ATR_14' in df_calc.columns else np.full(len(df_calc), 0.001)
-        atrs = np.where(np.isnan(atrs) | (atrs <= 0), 0.001, atrs)
+        if 'ATR_14' in df_calc.columns and not df_calc['ATR_14'].isna().all():
+            atr_s = df_calc['ATR_14']
+        elif 'atr_14' in df_calc.columns and not df_calc['atr_14'].isna().all():
+            atr_s = df_calc['atr_14']
+        else:
+            from utils.indicators import calculate_atr
+            atr_s = calculate_atr(df_calc, 14)
+        atrs = np.maximum(pd.to_numeric(atr_s, errors='coerce').fillna(0.001).values, 1e-4)
         buffer = profile.zone_buffer_ratio * atrs
 
         low_oos = low_s.values
@@ -190,8 +213,8 @@ def run_fit_proper_test(
         if profile.mandate_zzl:
             close_s = pd.to_numeric(df_calc['close'], errors='coerce').fillna(0.0)
             close_oos = close_s.values
-            ema_val = pd.to_numeric(df_calc['EMA_50'], errors='coerce').fillna(close_s).values if 'EMA_50' in df_calc.columns else close_oos
-            sma_val = pd.to_numeric(df_calc['SMA_20'], errors='coerce').fillna(close_s).values if 'SMA_20' in df_calc.columns else close_oos
+            ema_val = pd.to_numeric(df_calc.get('EMA_50', df_calc.get('ema_50', close_s)), errors='coerce').fillna(close_s).values
+            sma_val = pd.to_numeric(df_calc.get('SMA_20', df_calc.get('sma_20', close_s)), errors='coerce').fillna(close_s).values
             is_valid_buy = is_valid_buy & (close_oos >= ema_val) & (sma_val >= ema_val)
             is_valid_sell = is_valid_sell & (close_oos <= ema_val) & (sma_val <= ema_val)
 
@@ -258,30 +281,34 @@ def run_fit_proper_test(
         is_run_b = pd.to_numeric(df_calc['is_running_bull'], errors='coerce').fillna(0).values.astype(bool) if 'is_running_bull' in df_calc.columns else np.zeros(len(df_calc), dtype=bool)
         is_run_s = pd.to_numeric(df_calc['is_running_bear'], errors='coerce').fillna(0).values.astype(bool) if 'is_running_bear' in df_calc.columns else np.zeros(len(df_calc), dtype=bool)
 
-        runner_regime_mask = is_brk_b | is_brk_s | is_run_b | is_run_s | (is_exp & ~is_sq)
-        normal_regime_mask = is_sq | (~runner_regime_mask)
-
-        regime_mask = runner_regime_mask if mode_str == "runner" else normal_regime_mask
-
-        buy_signals  = (p_win >= cal_th) & is_valid_buy  & has_trigger_buy  & (~forbid_b) & sq_b & regime_mask
-        sell_signals = (p_win >= cal_th) & is_valid_sell & has_trigger_sell & (~forbid_s) & sq_s & regime_mask
+        is_unified = mode_str in ("unified", "profit") or getattr(researcher, "model_unified", None) is not None or ('Target_Class' in df_calc.columns)
+        if is_unified:
+            buy_signals  = (p_buy >= cal_th) & (p_buy > p_sell)
+            sell_signals = (p_sell >= cal_th) & (p_sell > p_buy)
+        else:
+            runner_regime_mask = is_brk_b | is_brk_s | is_run_b | is_run_s | (is_exp & ~is_sq)
+            normal_regime_mask = is_sq | (~runner_regime_mask)
+            regime_mask = runner_regime_mask if mode_str == "runner" else normal_regime_mask
+            buy_signals  = (p_buy >= cal_th) & (p_buy >= p_sell) & is_valid_buy  & has_trigger_buy  & (~forbid_b) & sq_b & regime_mask
+            sell_signals = (p_sell >= cal_th) & (p_sell >= p_buy) & is_valid_sell & has_trigger_sell & (~forbid_s) & sq_s & regime_mask
 
         # Resolusi sinyal ganda di bar yang sama (Mutual Exclusion via EMA 50)
         both_mask = buy_signals & sell_signals
         if np.any(both_mask):
-            ema_val = df_calc['EMA_50'].values if 'EMA_50' in df_calc.columns else df_calc['close'].values
+            ema_val = df_calc['EMA_50'].values if 'EMA_50' in df_calc.columns else (df_calc['ema_50'].values if 'ema_50' in df_calc.columns else df_calc['close'].values)
             close_val = df_calc['close'].values
             buy_signals = buy_signals & (~both_mask | (close_val >= ema_val))
             sell_signals = sell_signals & (~both_mask | (close_val < ema_val))
 
         # 6. Kalkulasi SL & TP Adaptif per Candle dari ATR sesuai Profile
         close_prices = df_calc['close'].values
-        sl_pct = np.clip((profile.sl_atr_mult * atrs) / close_prices, 0.0005, 0.15)
+        sl_pct = np.clip((profile.sl_atr_mult * atrs) / np.maximum(close_prices, 1e-4), 0.0005, 0.15)
 
-        if mode_str == "normal":
-            tp_pct = np.clip((profile.rr_normal * profile.sl_atr_mult * atrs) / close_prices, 0.001, 0.80)
+        if mode_str in ("normal", "unified", "profit"):
+            target_rr = getattr(profile, 'rr_normal', 1.5)
         else:
-            tp_pct = np.clip((profile.rr_runner * profile.sl_atr_mult * atrs) / close_prices, 0.001, 0.80)
+            target_rr = getattr(profile, 'rr_runner', 3.5)
+        tp_pct = np.clip((target_rr * profile.sl_atr_mult * atrs) / np.maximum(close_prices, 1e-4), 0.001, 0.80)
 
         # 7. Cooldown State Machine — mencegah spam sinyal di zona yang sama
         MIN_COOLDOWN_BARS = profile.min_cooldown_bars
@@ -303,6 +330,16 @@ def run_fit_proper_test(
 
         import vectorbt as vbt
 
+        # Estimasi timeframe frekuensi dinamis dari indeks lilin
+        freq_str = '5m'
+        if isinstance(df_calc.index, pd.DatetimeIndex) and len(df_calc) > 2:
+            try:
+                median_delta = (pd.Series(df_calc.index[1:]) - pd.Series(df_calc.index[:-1])).median()
+                minutes = max(1, int(median_delta.total_seconds() // 60))
+                freq_str = f"{minutes}m"
+            except Exception:
+                freq_str = '5m'
+
         spread_fee = 0.00015 # Standar spread institusional ~30 poin pada emas/forex
         portfolio = vbt.Portfolio.from_signals(
             close=pd.Series(close_prices, index=df_calc.index),
@@ -311,7 +348,7 @@ def run_fit_proper_test(
             sl_stop=pd.Series(sl_pct, index=df_calc.index),
             tp_stop=pd.Series(tp_pct, index=df_calc.index),
             fees=spread_fee,
-            freq='5m'
+            freq=freq_str
         )
 
         stats = portfolio.stats()

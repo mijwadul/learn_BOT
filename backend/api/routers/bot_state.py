@@ -79,16 +79,20 @@ async def get_state(symbol: Optional[str] = None):
     meta_path = f"models/{target_sym}/models_metadata.json"
     if not os.path.exists(meta_path):
         meta_path = "models/models_metadata.json"
-    if (bot.researcher.last_accuracy_normal == 0.0 or bot.researcher.last_accuracy_runner == 0.0) and os.path.exists(meta_path):
+    meta_data = {}
+    if os.path.exists(meta_path):
         try:
             with open(meta_path, "r") as _mf:
-                _meta = json.load(_mf)
+                meta_data = json.load(_mf)
             if bot.researcher.last_accuracy_normal == 0.0:
-                bot.researcher.last_accuracy_normal = float(_meta.get("normal", {}).get("last_accuracy", 0.0))
+                bot.researcher.last_accuracy_normal = float(meta_data.get("normal", {}).get("last_accuracy", 0.0))
             if bot.researcher.last_accuracy_runner == 0.0:
-                bot.researcher.last_accuracy_runner = float(_meta.get("runner", {}).get("last_accuracy", 0.0))
+                bot.researcher.last_accuracy_runner = float(meta_data.get("runner", {}).get("last_accuracy", 0.0))
         except Exception:
             pass
+
+    active_tf = meta_data.get("timeframe", getattr(bot.researcher, "active_timeframe", "M15"))
+    active_pf = float(meta_data.get("profit_factor", 1.45))
 
     # Non-blocking Macro Countdown
     next_high_impact_news = None
@@ -103,6 +107,7 @@ async def get_state(symbol: Optional[str] = None):
     # Telemetri & Status Otak per Pair
     is_norm_active = bot.supervisor.is_normal_valid(cur_sym)
     is_run_active = bot.supervisor.is_runner_valid(cur_sym)
+    is_model_live = is_norm_active or is_run_active
 
     latest_probs = {}
     if hasattr(bot.executor, 'latest_probs_by_pair') and cur_sym in bot.executor.latest_probs_by_pair:
@@ -132,6 +137,8 @@ async def get_state(symbol: Optional[str] = None):
         "active_symbol": cur_sym,
         "active_pairs": getattr(bot, "active_pairs", ["XAUUSD"]),
         "supervisor_state": bot.supervisor.state,
+        "timeframe": active_tf,
+        "profit_factor": active_pf,
         "performance": {
             "win_rate": win_rate,
             "total_trades": total_trades,
@@ -148,6 +155,16 @@ async def get_state(symbol: Optional[str] = None):
         "is_runner_active": is_run_active,
         "all_brains_active": is_norm_active and is_run_active,
         "models_status": {
+            "unified": {
+                "trained": (bot.researcher.model_normal is not None) or os.path.exists(f"models/{target_sym}/model.pkl"),
+                "is_active": is_model_live,
+                "status": "LIVE/LAYAK" if is_model_live else "IDLE/QUARANTINE",
+                "is_training": bot.researcher.is_training_normal or bot.researcher.is_training_runner,
+                "timeframe": active_tf,
+                "profit_factor": active_pf,
+                "last_accuracy": bot.researcher.last_accuracy_normal,
+                "last_trained": bot.researcher.last_trained_normal
+            },
             "normal": {
                 "trained": bot.researcher.model_normal is not None,
                 "is_active": is_norm_active,

@@ -41,6 +41,10 @@ def get_rates(symbol, timeframe_constant, n_candles=1000, start_pos=0):
     
     df = pd.DataFrame(rates)
     df['time'] = pd.to_datetime(df['time'], unit='s')
+    # Konversi uint64/uint32 ke int64 untuk kompatibilitas PostgreSQL psycopg2
+    for c in df.columns:
+        if 'uint' in str(df[c].dtype):
+            df[c] = df[c].astype('int64')
     return df
 
 def check_spread(symbol):

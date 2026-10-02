@@ -211,20 +211,24 @@ class RiskService:
                 logging.warning(f"[HIT_RUN LIMIT] Order ditolak: Sudah ada 1 posisi Hit & Run aktif (Tiket {hr_positions[0].ticket}).")
                 return False
 
-        # 4. Mode RUNNER: Scale-in diperbolehkan HANYA jika posisi sebelumnya sudah running profit
+        # 4. Pyramiding Control & Scale-In Validation (Semua Mode: RUNNER, PROFIT, UNIFIED)
         same_dir_positions = [p for p in positions if p.type == action] if positions else []
-        if trade_mode == "RUNNER" and len(same_dir_positions) > 0:
+        if len(same_dir_positions) >= self.max_pyramiding:
+            logging.warning(
+                f"[PYRAMIDING LIMIT] ⛔ Order {action_name} ({trade_mode}) ditolak: "
+                f"Maksimal posisi aktif searah ({self.max_pyramiding}) sudah tercapai."
+            )
+            return False
+
+        # Scale-in hanya diizinkan jika SELURUH posisi searah yang sudah ada sedang dalam keadaan floating profit
+        if len(same_dir_positions) > 0:
             for p in same_dir_positions:
                 if p.profit <= 0:
-                    logging.warning(f"[RUNNER PYRAMIDING] Posisi Runner sebelumnya (Tiket {p.ticket}) belum profit (${p.profit:.2f}). Scale-In ditolak.")
+                    logging.warning(
+                        f"[SCALE-IN REJECT] ⛔ Scale-in ditolak: Posisi sebelumnya #{p.ticket} "
+                        f"belum profit (${p.profit:.2f} <= 0). Dilarang averaging down pada posisi merugi."
+                    )
                     return False
-            logging.info(f"[RUNNER PYRAMIDING] ✅ Semua ({len(same_dir_positions)}) Runner profit. Scale-In diizinkan.")
-        elif trade_mode != "RUNNER":
-            th_pct = Config.get_ai_threshold(symbol=symbol, mode='normal')
-            entry_thresh = th_pct / 100.0 if th_pct > 1.0 else th_pct
-            is_high_prob = prob_runner is not None and prob_runner >= entry_thresh
-            if not is_high_prob and len(same_dir_positions) >= self.max_pyramiding:
-                logging.warning(f"[PYRAMIDING] Limit dinamis {self.max_pyramiding} tercapai. Order ditolak.")
-                return False
+            logging.info(f"[PYRAMIDING] ✅ Semua ({len(same_dir_positions)}) posisi searah sebelumnya profit. Scale-in diizinkan.")
 
         return True

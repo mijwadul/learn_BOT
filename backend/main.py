@@ -29,7 +29,43 @@ async def lifespan(app: FastAPI):
         logging.info("✅ [STARTUP] Database initialized & schema migrations completed.")
     except Exception as e:
         logging.warning(f"⚠️ [STARTUP] DB initialization deferred: {e}")
+
     yield
+
+    # ─── Graceful Teardown ───────────────────────────────────────────
+    logging.info("🛑 [SHUTDOWN] Memulai graceful shutdown...")
+
+    # 1. Hentikan Executor Task (live trading loop)
+    executor_task = getattr(bot, "executor_task", None)
+    if executor_task and not executor_task.done():
+        try:
+            bot.executor.running = False
+        except Exception:
+            pass
+        executor_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(executor_task), timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        logging.info("✅ [SHUTDOWN] Executor task dihentikan.")
+
+    # 2. Tutup koneksi MetaTrader 5
+    try:
+        from utils.mt5_utils import shutdown_mt5
+        shutdown_mt5()
+        logging.info("✅ [SHUTDOWN] Koneksi MetaTrader5 ditutup.")
+    except Exception as e:
+        logging.warning(f"⚠️ [SHUTDOWN] MT5 shutdown gagal: {e}")
+
+    # 3. Bersihkan pool koneksi SQLAlchemy (async engine)
+    try:
+        from database.connection import engine
+        await engine.dispose()
+        logging.info("✅ [SHUTDOWN] Pool koneksi database dibersihkan.")
+    except Exception as e:
+        logging.warning(f"⚠️ [SHUTDOWN] DB engine dispose gagal: {e}")
+
+    logging.info("✅ [SHUTDOWN] Graceful shutdown selesai.")
 
 app = FastAPI(
     title="AvantGarde Bot API", 

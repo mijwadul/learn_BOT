@@ -43,6 +43,7 @@ class ExecutorAgent:
             "normal": 0.5,
             "runner": 0.5
         }
+        self.last_executed_bar_time = {}
         self.position_modes = self.position_tracker.position_modes
 
     @property
@@ -153,10 +154,10 @@ class ExecutorAgent:
                                     clean_p = pair.upper()
                                     self.data_miner.set_symbol(clean_p)
                                     self.researcher.set_symbol(clean_p)
-                                    df_live = await asyncio.to_thread(self.data_miner.fetch_and_merge_data, 30)
+                                    df_live = await asyncio.to_thread(self.data_miner.fetch_and_merge_data, 60)
                                     if df_live is not None and not df_live.empty:
                                         last_row = df_live.iloc[[-1]]
-                                        probs = await asyncio.to_thread(self.researcher.get_live_probabilities, last_row)
+                                        probs = await asyncio.to_thread(self.researcher.get_live_probabilities, df_live)
                                         self.latest_dfs_by_pair[clean_p] = df_live
                                         self.latest_dfs_by_pair[broker_p] = df_live
                                         self.latest_probs_by_pair[clean_p] = probs
@@ -182,9 +183,9 @@ class ExecutorAgent:
                                         # atau candle ditutup melanggar struktur kaedah BBMA (Close tembus Lower BB / EMA 50 untuk Buy).
                                         last_row_s = df_live.iloc[-1] if len(df_live) > 0 else None
                                         close_p = float(last_row_s.get('close', 0.0)) if last_row_s is not None else 0.0
-                                        ema_50 = float(last_row_s.get('EMA_50', 0.0)) if last_row_s is not None else 0.0
-                                        bb_low = float(last_row_s.get('BB_Lower', 0.0)) if last_row_s is not None else 0.0
-                                        bb_upp = float(last_row_s.get('BB_Upper', 0.0)) if last_row_s is not None else 0.0
+                                        ema_50 = float(last_row_s.get('ema_50', last_row_s.get('EMA_50', 0.0))) if last_row_s is not None else 0.0
+                                        bb_low = float(last_row_s.get('bb_lower', last_row_s.get('BB_Lower', 0.0))) if last_row_s is not None else 0.0
+                                        bb_upp = float(last_row_s.get('bb_upper', last_row_s.get('BB_Upper', 0.0))) if last_row_s is not None else 0.0
 
                                         # Exit Buy Runner: sinyal lawan SELL sangat kuat (>= 65%) ATAU close menembus ke bawah Lower BB / EMA 50
                                         exit_buy_runner = (p_sell_r >= 0.65) or (bb_low > 0 and close_p < bb_low)
@@ -217,13 +218,13 @@ class ExecutorAgent:
                             from agents.research import get_profile
                             profile = get_profile(clean_pair)
 
-                            df_live = await asyncio.to_thread(self.data_miner.fetch_and_merge_data, 30)
+                            df_live = await asyncio.to_thread(self.data_miner.fetch_and_merge_data, 60)
                             if df_live is not None and not df_live.empty:
                                 if 'adx' not in df_live.columns or df_live['adx'].isna().all():
                                     from utils.indicators import calculate_adx
                                     df_live['adx'] = calculate_adx(df_live, 14)
                                 last_row = df_live.iloc[[-1]]
-                                probs = await asyncio.to_thread(self.researcher.get_live_probabilities, last_row)
+                                probs = await asyncio.to_thread(self.researcher.get_live_probabilities, df_live)
                                 self.latest_df_live = df_live
                                 self.latest_probs = probs
                                 self.latest_dfs_by_pair[clean_pair] = df_live
@@ -265,108 +266,32 @@ class ExecutorAgent:
                                 }
 
                                 if best_prob >= entry_threshold:
-                                    # Major Trend Resolution & Kaedah Zon Zero Loss (ZZL)
-                                    ema_50_val = row_data.get('EMA_50', 0.0)
-                                    sma_20_val = row_data.get('SMA_20', 0.0)
-                                    close_val = row_data.get('close', 0.0)
-
-                                    if abs(max_buy - max_sell) < 1e-4:
-                                        if close_val >= ema_50_val:
-                                            action_type = mt5.ORDER_TYPE_BUY
-                                            preferred_mode = "RUNNER" if p_buy_r >= p_buy_n else "HIT_RUN"
-                                            used_prob = p_buy_r if preferred_mode == "RUNNER" else p_buy_n
-                                        else:
-                                            action_type = mt5.ORDER_TYPE_SELL
-                                            preferred_mode = "RUNNER" if p_sell_r >= p_sell_n else "HIT_RUN"
-                                            used_prob = p_sell_r if preferred_mode == "RUNNER" else p_sell_n
-                                    elif max_buy > max_sell:
+                                    p_buy = float(probs.get("buy", probs.get("normal_buy", 0.0)))
+                                    p_sell = float(probs.get("sell", probs.get("normal_sell", 0.0)))
+                                    
+                                    if p_buy > p_sell:
                                         action_type = mt5.ORDER_TYPE_BUY
-                                        preferred_mode = "RUNNER" if p_buy_r >= p_buy_n else "HIT_RUN"
-                                        used_prob = p_buy_r if preferred_mode == "RUNNER" else p_buy_n
+                                        used_prob = p_buy
                                     else:
                                         action_type = mt5.ORDER_TYPE_SELL
-                                        preferred_mode = "RUNNER" if p_sell_r >= p_sell_n else "HIT_RUN"
-                                        used_prob = p_sell_r if preferred_mode == "RUNNER" else p_sell_n
+                                        used_prob = p_sell
 
-                                    # Filter Zon Zero Loss (ZZL) Wajib jika dimandatkan oleh profile instrumen (misal XAUUSD)
-                                    is_zzl_valid = True
-                                    if profile.mandate_zzl:
-                                        if action_type == mt5.ORDER_TYPE_BUY and (close_val < ema_50_val or (sma_20_val > 0 and sma_20_val < ema_50_val)):
-                                            is_zzl_valid = False
-                                            logging.info(f"[{clean_pair}] Sinyal BUY ({used_prob*100:.1f}%) dibatalkan: Melanggar Kaedah Zon Zero Loss (Close < EMA 50 atau Mid BB < EMA 50).")
-                                        elif action_type == mt5.ORDER_TYPE_SELL and (close_val > ema_50_val or (sma_20_val > 0 and sma_20_val > ema_50_val)):
-                                            is_zzl_valid = False
-                                            logging.info(f"[{clean_pair}] Sinyal SELL ({used_prob*100:.1f}%) dibatalkan: Melanggar Kaedah Zon Zero Loss (Close > EMA 50 atau Mid BB > EMA 50).")
+                                    trade_mode = "PROFIT"
+                                    logging.info(
+                                        f"[{clean_pair}] 🎯 AI Signal Detected: {action_type} (Prob: {used_prob*100:.1f}%) "
+                                        f"Timeframe: {getattr(self.researcher, 'active_timeframe', 'M5')}"
+                                    )
 
-                                    # Anti Counter-Trend Topography Guard & Squeeze Filter
-                                    forbid_b = bool(row_data.get('forbid_buy', 0))
-                                    forbid_s = bool(row_data.get('forbid_sell', 0))
-                                    sq_b = bool(row_data.get('is_squeeze_buy_allowed', 1))
-                                    sq_s = bool(row_data.get('is_squeeze_sell_allowed', 1))
-                                    is_topography_valid = True
-
-                                    if action_type == mt5.ORDER_TYPE_BUY:
-                                        if forbid_b:
-                                            is_topography_valid = False
-                                            logging.info(f"[{clean_pair}] Sinyal BUY ({used_prob*100:.1f}%) dibatalkan: Anti Counter-Trend Guard (Market sedang Running Bearish / Breakdown).")
-                                        elif not sq_b:
-                                            is_topography_valid = False
-                                            logging.info(f"[{clean_pair}] Sinyal BUY ({used_prob*100:.1f}%) dibatalkan: Squeeze Filter (Hanya boleh Buy di Lower BB saat sideways).")
-                                    elif action_type == mt5.ORDER_TYPE_SELL:
-                                        if forbid_s:
-                                            is_topography_valid = False
-                                            logging.info(f"[{clean_pair}] Sinyal SELL ({used_prob*100:.1f}%) dibatalkan: Anti Counter-Trend Guard (Market sedang Running Bullish / Breakout).")
-                                        elif not sq_s:
-                                            is_topography_valid = False
-                                            logging.info(f"[{clean_pair}] Sinyal SELL ({used_prob*100:.1f}%) dibatalkan: Squeeze Filter (Hanya boleh Sell di Upper BB saat sideways).")
-
+                                    close_val = float(row_data.get('close', 0.0))
                                     # Hitung Dynamic Structural SL (Support/Resistance terdekat & Setup Invalidation)
                                     sl_dist = self.calculate_dynamic_structural_sl(
                                         broker_p, action_type, close_val, df_live, row_data
                                     )
 
-                                    # ---------------------------------------------------------------
-                                    # Dynamic Regime Hand-off State Machine (Hit & Run vs Runner)
-                                    # ---------------------------------------------------------------
-                                    is_sq = bool(row_data.get('is_bb_squeeze', 0))
-                                    is_exp = bool(row_data.get('is_bb_expanding', 0))
-                                    is_brk_b = bool(row_data.get('is_breakout_bull', 0))
-                                    is_brk_s = bool(row_data.get('is_breakout_bear', 0))
-                                    is_run_b = bool(row_data.get('is_running_bull', 0))
-                                    is_run_s = bool(row_data.get('is_running_bear', 0))
-
-                                    is_runner_habitat = is_brk_b or is_brk_s or is_run_b or is_run_s or (is_exp and not is_sq) or (regime_name == "TRENDING")
-
-                                    if is_runner_habitat and not is_sq:
-                                        # Pasar Breakout / Trending: Mandat eksekusi dipegang oleh RUNNER
-                                        trade_mode = "RUNNER"
-                                        used_prob = p_buy_r if action_type == mt5.ORDER_TYPE_BUY else p_sell_r
-                                        logging.info(
-                                            f"[{clean_pair}] 🚀 [REGIME HAND-OFF] Pasar BREAKOUT & TRENDING: "
-                                            f"Mandat dipegang RUNNER (Prob: {used_prob*100:.1f}%)"
-                                        )
-                                    else:
-                                        # Pasar Sideways / Squeeze / Bouncing Range: Mandat eksekusi dipegang oleh HIT_RUN
-                                        trade_mode = "HIT_RUN"
-                                        used_prob = p_buy_n if action_type == mt5.ORDER_TYPE_BUY else p_sell_n
-                                        logging.info(
-                                            f"[{clean_pair}] 🛡️ [REGIME HAND-OFF] Pasar SIDEWAYS / SQUEEZE: "
-                                            f"Mandat dipegang HIT_RUN (Prob: {used_prob*100:.1f}%)"
-                                        )
-
-                                    # Runner Protection: Dilarang keras mengeksekusi RUNNER di dalam Squeeze mati
-                                    if trade_mode == "RUNNER" and is_sq:
-                                        allow_execution = False
-                                        logging.info(f"[{clean_pair}] Sinyal RUNNER dibatalkan: Pasar sedang Squeeze (Bukan habitat Runner).")
-
-                                    # Partial Live check (Pair-aware Brain Activation)
-                                    allow_execution = is_zzl_valid and is_topography_valid
-                                    if trade_mode == "RUNNER" and not self.supervisor.is_runner_valid(clean_pair):
-                                        allow_execution = False
-                                        logging.info(f"[{clean_pair}] Sinyal RUNNER dibatalkan karena Otak Runner untuk {clean_pair} nonaktif/quarantine.")
-                                    elif trade_mode == "HIT_RUN" and not self.supervisor.is_normal_valid(clean_pair):
-                                        allow_execution = False
-                                        logging.info(f"[{clean_pair}] Sinyal HIT_RUN dibatalkan karena Otak Normal untuk {clean_pair} nonaktif/quarantine.")
+                                    # Supervisor active guard
+                                    allow_execution = self.supervisor.is_normal_valid(clean_pair) or self.supervisor.is_runner_valid(clean_pair)
+                                    if not allow_execution:
+                                        logging.info(f"[{clean_pair}] Sinyal dibatalkan karena trading untuk {clean_pair} sedang nonaktif.")
 
                                     # Evaluasi Friksi Biaya: Rasio Spread terhadap Volatilitas (ATR)
                                     sym_info = mt5.symbol_info(broker_p)
@@ -384,36 +309,31 @@ class ExecutorAgent:
                                                 f"({friction_ratio*100:.1f}% > batas {max_friction*100:.1f}% ATR | Spread: {spread_points} pts, ATR: {atr_val:.4f})"
                                             )
 
-                                    # Spasial Re-entry Proximity (Kandidat berada di sekitar zona interaksi MA)
+                                    # Telemetri Proksimitas Spasial Indikator BBMA & 4 Garis LWMA
                                     if allow_execution:
-                                        lwma_5_h = row_data.get('LWMA_5_High', 0)
-                                        lwma_10_h = row_data.get('LWMA_10_High', 0)
-                                        lwma_5_l = row_data.get('LWMA_5_Low', 0)
-                                        lwma_10_l = row_data.get('LWMA_10_Low', 0)
-                                        high_price = row_data.get('high', 0)
-                                        low_price = row_data.get('low', 0)
-                                        reentry_buffer = profile.zone_buffer_ratio * (atr_val if atr_val > 0 else (50 * point))
+                                        lwma_5_h = float(row_data.get('lwma_5_high', row_data.get('LWMA_5_High', 0.0)))
+                                        lwma_10_h = float(row_data.get('lwma_10_high', row_data.get('LWMA_10_High', 0.0)))
+                                        lwma_5_l = float(row_data.get('lwma_5_low', row_data.get('LWMA_5_Low', 0.0)))
+                                        lwma_10_l = float(row_data.get('lwma_10_low', row_data.get('LWMA_10_Low', 0.0)))
+                                        logging.debug(
+                                            f"[{clean_pair}] Topografi LWMA: 5H={lwma_5_h:.4f}, 10H={lwma_10_h:.4f}, "
+                                            f"5L={lwma_5_l:.4f}, 10L={lwma_10_l:.4f}"
+                                        )
 
-                                        # Evaluasi jendela 3 candle terakhir agar konfirmasi pasca-sentuhan MA tetap sah
-                                        recent_min_low = float(df_live['low'].tail(3).min()) if (df_live is not None and len(df_live) >= 3) else low_price
-                                        recent_max_high = float(df_live['high'].tail(3).max()) if (df_live is not None and len(df_live) >= 3) else high_price
-
-                                        if action_type == mt5.ORDER_TYPE_SELL:
-                                            reentry_min = min(lwma_5_h, lwma_10_h) - reentry_buffer
-                                            if recent_max_high < reentry_min:
-                                                allow_execution = False
-                                                logging.info(f"[{clean_pair}] Sinyal SELL ({used_prob*100:.1f}%) belum menguji zona Re-entry LWMA High (High 3 bar: {recent_max_high:.4f} < {reentry_min:.4f})")
-                                        elif action_type == mt5.ORDER_TYPE_BUY:
-                                            reentry_max = max(lwma_5_l, lwma_10_l) + reentry_buffer
-                                            if recent_min_low > reentry_max:
-                                                allow_execution = False
-                                                logging.info(f"[{clean_pair}] Sinyal BUY ({used_prob*100:.1f}%) belum menguji zona Re-entry LWMA Low (Low 3 bar: {recent_min_low:.4f} > {reentry_max:.4f})")
+                                    # TD-02: Bar-Lock Concurrency Guard (Cegah spam order pada candle yang sama)
+                                    current_bar_ts = str(df_live.index[-1]) if (hasattr(df_live, 'index') and len(df_live) > 0) else None
+                                    if current_bar_ts and self.last_executed_bar_time.get(clean_pair) == current_bar_ts:
+                                        allow_execution = False
+                                        logging.debug(f"[{clean_pair}] Bar-Lock aktif: Candle {current_bar_ts} sudah dieksekusi. Lewati.")
 
                                     # Institutional Risk Service Validation (Anti-Hedging, News Blackout, Hit-Run Limit, Pyramiding)
                                     if allow_execution and self.risk_service.validate_execution_allowed(broker_p, action_type, trade_mode, used_prob):
                                         action_str = 'BUY' if action_type == mt5.ORDER_TYPE_BUY else 'SELL'
                                         logging.info(f"[SIGNAL] {clean_pair} Multiclass Entry: {action_str} | Mode: {trade_mode} | Prob: {used_prob:.2f} | Dynamic SL Dist: {sl_dist:.5f}")
-                                        self.execute_order(action_type, sl_dist, trade_mode=trade_mode, prob_runner=used_prob, row_data=row_data, symbol=broker_p, df_live=df_live)
+                                        order_res = self.execute_order(action_type, sl_dist, trade_mode=trade_mode, prob_runner=used_prob, row_data=row_data, symbol=broker_p, df_live=df_live)
+                                        if order_res and getattr(order_res, 'retcode', None) == mt5.TRADE_RETCODE_DONE:
+                                            if current_bar_ts:
+                                                self.last_executed_bar_time[clean_pair] = current_bar_ts
                         except Exception as e:
                             logging.error(f"[SIGNAL_CHECK] Error evaluasi sinyal {pair}: {e}", exc_info=True)
 
@@ -480,10 +400,10 @@ class ExecutorAgent:
         recent_df = df_live.iloc[-lookback:]
 
         last_candle = df_live.iloc[-1]
-        sma_20 = float(last_candle.get('SMA_20', 0.0))
-        ema_50 = float(last_candle.get('EMA_50', 0.0))
-        bb_lower = float(last_candle.get('BB_Lower', 0.0))
-        bb_upper = float(last_candle.get('BB_Upper', 0.0))
+        sma_20 = float(last_candle.get('sma_20', last_candle.get('SMA_20', 0.0)))
+        ema_50 = float(last_candle.get('ema_50', last_candle.get('EMA_50', 0.0)))
+        bb_lower = float(last_candle.get('bb_lower', last_candle.get('BB_Lower', 0.0)))
+        bb_upper = float(last_candle.get('bb_upper', last_candle.get('BB_Upper', 0.0)))
 
         if action == mt5.ORDER_TYPE_BUY:
             swing_low = float(recent_df['low'].min())
@@ -573,10 +493,11 @@ class ExecutorAgent:
         from agents.research import get_profile
         profile = get_profile(target_symbol)
 
-        is_runner_mode = "RUNNER" in (trade_mode or "").upper()
+        mode_str = (trade_mode or "PROFIT").upper()
+        is_runner_mode = ("RUNNER" in mode_str) or ("PROFIT" in mode_str) or ("UNIFIED" in mode_str)
         if is_runner_mode:
             max_learned_rr = getattr(self.researcher, 'max_runner_rr', profile.rr_runner) if self.researcher else profile.rr_runner
-            runner_rr = min(profile.rr_runner, max_learned_rr)
+            runner_rr = max(2.5, min(profile.rr_runner, max_learned_rr))
             tp_abs = float(sl_distance * runner_rr)
         else:
             tp_abs = float(sl_distance * profile.rr_normal)
@@ -723,14 +644,10 @@ class ExecutorAgent:
                     return
 
                 if self.researcher:
-                    self.researcher.set_symbol(clean_p)
-                    if self.researcher.model_normal is not None:
-                        fb_normal = self.data_miner.load_live_decision_chunk(mode="normal", symbol=clean_p)
-                        self.researcher.micro_retrain("normal", df_recent, fb_normal)
-
-                    if self.researcher.model_runner is not None:
-                        fb_runner = self.data_miner.load_live_decision_chunk(mode="runner", symbol=clean_p)
-                        self.researcher.micro_retrain("runner", df_recent, fb_runner)
+                    active_m = getattr(self.researcher, 'model_unified', None) or self.researcher.model_normal or self.researcher.model_runner
+                    if active_m is not None:
+                        fb_data = self.data_miner.load_live_decision_chunk(mode="unified", symbol=clean_p)
+                        self.researcher.micro_retrain("unified", df_recent, fb_data, symbol=clean_p)
 
                 self.last_micro_retrain_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 logging.info(f"[WEEKLY ONLINE LEARNING] ✨ Sukses micro-retrain mingguan ({clean_p}) pada {self.last_micro_retrain_time}. Giliran pair berikutnya dijadwalkan minggu depan.")

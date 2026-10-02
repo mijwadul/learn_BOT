@@ -12,7 +12,7 @@ def extract_feature_importance(
 ) -> List[Dict[str, Any]]:
     """
     Mengekstrak Top-N Feature Importance dari model LightGBM yang sudah dilatih.
-    Digunakan untuk visualisasi bar chart di halaman Strategi (Dapur AI).
+    Digunakan untuk visualisasi bar chart Feature Attribution pada antarmuka pengguna.
 
     Args:
         model:           Model LightGBM (sklearn wrapper atau native booster).

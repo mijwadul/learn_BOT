@@ -91,7 +91,7 @@ async def get_strategy_model_status(symbol: Optional[str] = "XAUUSD"):
 
     # Deteksi pending model yang menunggu konfirmasi penyimpanan dari user
     pending_models = {}
-    for m in ["normal", "runner"]:
+    for m in ["unified", "normal", "runner"]:
         p_info = None
         if is_same_pair and hasattr(bot.researcher, "pending_training") and m in bot.researcher.pending_training:
             p_info = bot.researcher.pending_training[m].get("info")
@@ -99,15 +99,35 @@ async def get_strategy_model_status(symbol: Optional[str] = "XAUUSD"):
             p_info = ModelManager.get_pending_info(sym, m)
         if p_info:
             pending_models[m] = p_info
+    model_unified_pkl = Path("models") / sym / "model.pkl"
+    unified_trained = (model_unified_pkl.exists() or normal_trained or runner_trained)
+    timeframe = meta.get("timeframe", getattr(bot.researcher, "active_timeframe", "M5"))
+    profit_factor = float(meta.get("profit_factor", 1.0))
+    win_rate = float(meta.get("win_rate", 50.0))
 
     res = {
         "status": "success",
         "symbol": sym,
+        "timeframe": timeframe,
+        "profit_factor": profit_factor,
+        "win_rate": win_rate,
+        "is_model_active": is_normal_active or is_runner_active,
         "is_normal_active": is_normal_active,
         "is_runner_active": is_runner_active,
         "all_brains_active": is_normal_active and is_runner_active,
         "pending_models": pending_models,
         "models_status": {
+            "unified": {
+                "trained": unified_trained,
+                "is_active": is_normal_active or is_runner_active,
+                "status": "LIVE/LAYAK" if (is_normal_active or is_runner_active) else "IDLE/STANDBY",
+                "timeframe": timeframe,
+                "profit_factor": profit_factor,
+                "win_rate": win_rate,
+                "is_training": bot.researcher.is_training_normal or bot.researcher.is_training_runner if is_same_pair else False,
+                "last_accuracy": win_rate / 100.0,
+                "last_trained": meta.get("trained_at", last_train_normal)
+            },
             "normal": {
                 "trained": normal_trained,
                 "is_active": is_normal_active,
@@ -198,54 +218,60 @@ async def quarantine(req: ModeRequest):
         "is_runner_active": bot.supervisor.is_runner_valid(sym)
     }
 
+class TrainPairRequest(BaseModel):
+    symbol: Optional[str] = "XAUUSD"
+    auto_discover_tf: bool = True
+    timeframe: Optional[str] = None
+    force_rebuild: bool = False
+
+@router.post("/api/strategies/train-pair")
+async def train_pair(req: TrainPairRequest):
+    """Memicu pelatihan Model Tunggal per pair dengan Timeframe Discovery otomatis."""
+    target_symbol = (req.symbol or "XAUUSD").upper()
+    def _task():
+        try:
+            import importlib
+            import agents.research.target_labeler
+            import agents.research.feature_engineer
+            import agents.research.timeframe_finder
+            import agents.research.oos_evaluator
+            importlib.reload(agents.research.target_labeler)
+            importlib.reload(agents.research.feature_engineer)
+            importlib.reload(agents.research.timeframe_finder)
+            importlib.reload(agents.research.oos_evaluator)
+            bot.researcher.train_pair_model(
+                symbol=target_symbol,
+                auto_discover_tf=req.auto_discover_tf,
+                timeframe=req.timeframe,
+                data_miner=bot.data_miner,
+                force_rebuild=getattr(req, "force_rebuild", False)
+            )
+        except Exception as e:
+            logging.error(f"Train pair failed: {e}", exc_info=True)
+    threading.Thread(target=_task, daemon=True).start()
+    return {"status": "success", "message": f"Training model tunggal untuk {target_symbol} dimulai di background."}
+
 @router.post("/api/strategies/train")
 async def train_model(req: TrainRequest):
     target_symbol = (req.symbol or "XAUUSD").upper()
 
+    is_incremental = getattr(req, 'type', '') == 'incremental'
     def _train_task():
         try:
-            logging.info(f"Memulai pelatihan AI ({req.type}) untuk {target_symbol} - {req.mode} Mode...")
-
-            # Sinkronkan target symbol ke miner dan researcher
-            bot.data_miner.set_symbol(target_symbol)
-            bot.researcher.set_symbol(target_symbol)
-
-            total_chunks, data_generator = bot.data_miner.load_train_chunks(chunk_size=100000, mode=req.mode, symbol=target_symbol)
-            if total_chunks == 0 or data_generator is None:
-                logging.warning(f"⚠️ Training dibatalkan: Database {bot.data_miner.table_name} kosong. Jalankan Force Backfill MT5 terlebih dahulu.")
-                return
-                
-            total_test_chunks, test_generator = bot.data_miner.load_test_chunks(chunk_size=100000, symbol=target_symbol)
-
-            bot.researcher._current_train_type = req.type
-
-            if req.type == 'full':
-                bot.researcher.features = []
-                logging.info(f"[FULL TRAIN - {target_symbol}] Mode {req.mode.upper()} akan dilatih ulang dari awal dengan Optuna...")
-
-            if req.mode == 'normal':
-                bot.researcher.is_training_normal = True
-                try:
-                    result = bot.researcher.train_normal_mode(data_generator, total_chunks=total_chunks, data_miner=bot.data_miner, train_type=req.type)
-                    logging.info(f"✅ Pelatihan Normal ({req.type}) selesai. Hasil tersimpan sebagai PENDING model menunggu konfirmasi dialog.")
-                finally:
-                    bot.researcher.is_training_normal = False
-            elif req.mode == 'runner':
-                bot.researcher.is_training_runner = True
-                try:
-                    result = bot.researcher.train_runner_mode(data_generator, total_chunks=total_chunks, data_miner=bot.data_miner, train_type=req.type)
-                    logging.info(f"✅ Pelatihan Runner ({req.type}) selesai. Hasil tersimpan sebagai PENDING model menunggu konfirmasi dialog.")
-                finally:
-                    bot.researcher.is_training_runner = False
-
-            logging.info(f"✅ Pelatihan AI ({req.type}) untuk {req.mode} Mode ({target_symbol}) selesai diproses.")
+            logging.info(f"Memulai pelatihan AI Model Tunggal untuk {target_symbol} (Incremental={is_incremental})...")
+            bot.researcher.train_pair_model(
+                symbol=target_symbol,
+                auto_discover_tf=not is_incremental,
+                data_miner=bot.data_miner
+            )
+            logging.info(f"✅ Pelatihan AI Model Tunggal ({target_symbol}) selesai diproses.")
         except Exception as e:
             import traceback
             logging.error(f"Training failed: {e}")
             logging.error(traceback.format_exc())
 
     threading.Thread(target=_train_task, daemon=True).start()
-    return {"status": "success", "message": f"{req.type.capitalize()} Training {req.mode} mode started in background. Cek Logs untuk progress."}
+    return {"status": "success", "message": f"Training model {target_symbol} dimulai di background. Cek Logs untuk progress."}
 
 @router.post("/api/strategies/micro-train")
 async def trigger_micro_train(req: MicroTrainRequest = None):
@@ -272,13 +298,10 @@ async def trigger_micro_train(req: MicroTrainRequest = None):
 
             if bot.researcher:
                 bot.researcher.set_symbol(target_symbol)
-                if target_mode in ["normal", "all"] and bot.researcher.model_normal is not None:
-                    fb_normal = bot.data_miner.load_live_decision_chunk(mode="normal", symbol=target_symbol)
-                    bot.researcher.micro_retrain("normal", df_recent, fb_normal)
-
-                if target_mode in ["runner", "all"] and bot.researcher.model_runner is not None:
-                    fb_runner = bot.data_miner.load_live_decision_chunk(mode="runner", symbol=target_symbol)
-                    bot.researcher.micro_retrain("runner", df_recent, fb_runner)
+                active_m = getattr(bot.researcher, 'model_unified', None) or bot.researcher.model_normal or bot.researcher.model_runner
+                if active_m is not None:
+                    fb_data = bot.data_miner.load_live_decision_chunk(mode="unified", symbol=target_symbol)
+                    bot.researcher.micro_retrain("unified", df_recent, fb_data, symbol=target_symbol)
 
             bot.executor.last_micro_retrain_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logging.info(f"✅ [API MICRO-TRAIN] Micro-Retrain {target_symbol} selesai pada {bot.executor.last_micro_retrain_time}.")
@@ -358,7 +381,9 @@ async def confirm_save_model(req: ConfirmSaveModelRequest):
         success, msg, info = bot.researcher.apply_pending_model(mode)
         if success:
             passed = info.get("passed_oos", False)
-            if mode == "normal":
+            if mode == "unified":
+                bot.supervisor.set_model_validity(passed, passed, symbol=sym)
+            elif mode == "normal":
                 bot.supervisor.set_model_validity(passed, bot.supervisor.is_runner_valid(sym), symbol=sym)
             else:
                 bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(sym), passed, symbol=sym)
@@ -455,21 +480,35 @@ async def evaluate_oos(req: EvaluateOosRequest = EvaluateOosRequest()):
     canonical_symbol = target_symbol.upper().rstrip("MC")
     bot.researcher.set_symbol(canonical_symbol)
 
-    modes_to_evaluate = ["normal", "runner"] if req.mode.lower() == "all" else [req.mode.lower()]
+    req_m = str(req.mode or "all").lower()
+    if req_m in ("all", "unified"):
+        modes_to_evaluate = ["unified"]
+    else:
+        modes_to_evaluate = [req_m]
+
     models_dict = {}
     for m in modes_to_evaluate:
-        current_model = bot.researcher.model_normal if m == "normal" else bot.researcher.model_runner
+        current_model = getattr(bot.researcher, "model_unified", None)
+        if current_model is None:
+            current_model = bot.researcher.model_normal if m == "normal" else (bot.researcher.model_runner if m == "runner" else None)
         if current_model is None:
             bot.researcher.load_models()
-            current_model = bot.researcher.model_normal if m == "normal" else bot.researcher.model_runner
+            current_model = getattr(bot.researcher, "model_unified", None) or bot.researcher.model_normal or bot.researcher.model_runner
         if current_model is None:
             return {
                 "status": "error",
-                "message": f"Model {m.upper()} untuk {canonical_symbol} belum pernah dilatih atau tidak ditemukan di disk."
+                "message": f"Model AI untuk {canonical_symbol} belum pernah dilatih atau tidak ditemukan di disk."
             }
         models_dict[m] = current_model
 
     import pandas as pd
+    import importlib
+    import agents.research.target_labeler
+    import agents.research.feature_engineer
+    import agents.research.oos_evaluator
+    importlib.reload(agents.research.target_labeler)
+    importlib.reload(agents.research.feature_engineer)
+    importlib.reload(agents.research.oos_evaluator)
     from agents.research.oos_evaluator import run_fit_proper_test
     from agents.research.model_manager import ModelManager
 
@@ -559,7 +598,7 @@ async def get_feature_importance(
 ):
     """
     TD#1: Mengembalikan Top-N Feature Importance (Gain / Split) dari model yang sedang aktif.
-    Digunakan oleh halaman Strategi (Dapur AI) untuk visualisasi bar chart transparansi AI.
+    Digunakan oleh halaman Strategi / Incubator untuk visualisasi bar chart Feature Attribution transparansi AI.
     """
     sym = (symbol or "XAUUSD").upper()
     mode_clean = (mode or "normal").lower()
@@ -568,11 +607,19 @@ async def get_feature_importance(
     # Muat model dari in-memory researcher atau dari disk
     is_same_pair = (getattr(bot.researcher, "symbol", "XAUUSD").upper() == sym)
     if is_same_pair:
-        model = bot.researcher.model_normal if mode_clean == "normal" else bot.researcher.model_runner
+        model = getattr(bot.researcher, "model_unified", None)
+        if model is None:
+            model = bot.researcher.model_normal if mode_clean == "normal" else bot.researcher.model_runner
+        if model is None:
+            model = bot.researcher.model_normal or bot.researcher.model_runner
         features = list(getattr(bot.researcher, "features", []) or [])
     else:
         loaded = ModelManager.load_models(sym)
-        model = loaded.get("model_normal") if mode_clean == "normal" else loaded.get("model_runner")
+        model = loaded.get("model_unified")
+        if model is None:
+            model = loaded.get("model_normal") if mode_clean == "normal" else loaded.get("model_runner")
+        if model is None:
+            model = loaded.get("model_normal") or loaded.get("model_runner")
         features = loaded.get("features", [])
 
     if model is None:
@@ -708,63 +755,37 @@ class TrainingQueueManager:
                     bot.data_miner.set_symbol(sym)
                     bot.researcher.set_symbol(sym)
 
-                    total_chunks, data_generator = bot.data_miner.load_train_chunks(
-                        chunk_size=100000, mode=mode, symbol=sym
+                    bot.data_miner.set_symbol(sym)
+                    bot.researcher.set_symbol(sym)
+
+                    logging.info(f"🚀 [QUEUE WORKER] Menjalankan pelatihan Model Tunggal untuk {sym} (Auto-Timeframe Discovery)...")
+                    train_res = bot.researcher.train_pair_model(
+                        symbol=sym,
+                        auto_discover_tf=True,
+                        data_miner=bot.data_miner
                     )
 
-                    if total_chunks == 0 or data_generator is None:
-                        raise ValueError(f"Database {bot.data_miner.table_name} kosong atau tidak ada candle data.")
-
-                    bot.researcher._current_train_type = train_type
-                    if train_type == "full":
-                        bot.researcher.features = []
-
-                    if mode == "normal":
-                        bot.researcher.is_training_normal = True
-                        try:
-                            bot.researcher.train_normal_mode(
-                                data_generator,
-                                total_chunks=total_chunks,
-                                data_miner=bot.data_miner,
-                                train_type=train_type
-                            )
-                        finally:
-                            bot.researcher.is_training_normal = False
-                    else:
-                        bot.researcher.is_training_runner = True
-                        try:
-                            bot.researcher.train_runner_mode(
-                                data_generator,
-                                total_chunks=total_chunks,
-                                data_miner=bot.data_miner,
-                                train_type=train_type
-                            )
-                        finally:
-                            bot.researcher.is_training_runner = False
-
-                    p_info = bot.researcher.pending_training.get(mode, {}).get("info", {})
-                    acc = float(p_info.get("candidate_accuracy", 0.0))
-                    passed = bool(p_info.get("passed_oos", False))
+                    acc = float(train_res.get("win_rate", 50.0)) / 100.0
+                    pf = float(train_res.get("profit_factor", 1.0))
+                    tf_chosen = train_res.get("timeframe", "M15")
+                    passed = train_res.get("success", False) and (pf >= 1.0)
 
                     with self._lock:
                         task["accuracy"] = acc
+                        task["profit_factor"] = pf
+                        task["timeframe"] = tf_chosen
                         task["passed_oos"] = passed
 
                     if self.auto_apply:
-                        apply_success, apply_msg, _ = bot.researcher.apply_pending_model(mode)
-                        if apply_success:
-                            if mode == "normal":
-                                bot.supervisor.set_model_validity(passed, bot.supervisor.is_runner_valid(sym), symbol=sym)
-                            else:
-                                bot.supervisor.set_model_validity(bot.supervisor.is_normal_valid(sym), passed, symbol=sym)
-                            logging.info(f"✅ [QUEUE WORKER] Model {mode} ({sym}) auto-applied: {apply_msg}")
+                        bot.supervisor.set_model_validity(passed, passed, symbol=sym)
+                        logging.info(f"✅ [QUEUE WORKER] Model Tunggal {sym} ({tf_chosen}) auto-applied: LULUS={passed} (PF={pf:.2f})")
 
                     with self._lock:
                         task["status"] = "completed"
                         task["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        task["progress"] = f"Selesai! Win Rate OOS: {acc*100:.1f}% ({'LULUS' if passed else 'TIDAK LULUS'})"
+                        task["progress"] = f"Selesai! TF: {tf_chosen}, WR: {acc*100:.1f}%, PF: {pf:.2f} ({'LULUS' if passed else 'TIDAK LULUS'})"
 
-                    logging.info(f"✅ [QUEUE WORKER] Task {task['id']} selesai: {sym} {mode} - Acc: {acc*100:.1f}%.")
+                    logging.info(f"✅ [QUEUE WORKER] Task {task['id']} selesai: {sym} ({tf_chosen}) - WR: {acc*100:.1f}%, PF: {pf:.2f}.")
 
                 except Exception as ex:
                     import traceback
@@ -796,11 +817,15 @@ class TrainingQueueManager:
                             bot.connect_mt5()
                         except Exception as e_mt5:
                             logging.warning(f"Gagal menghubungkan MT5: {e_mt5}")
-                    import asyncio
                     try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running() and (bot.executor_task is None or bot.executor_task.done()):
-                            bot.executor_task = loop.create_task(bot.executor.monitor_market())
+                        from .. import dependencies
+                        if dependencies.main_loop and dependencies.main_loop.is_running():
+                            def _start_monitor():
+                                if bot.executor_task is None or bot.executor_task.done():
+                                    bot.executor_task = dependencies.main_loop.create_task(bot.executor.monitor_market())
+                            dependencies.main_loop.call_soon_threadsafe(_start_monitor)
+                        else:
+                            logging.warning("Executor loop dispatch skipped: Main event loop is not running.")
                     except Exception as e_loop:
                         logging.warning(f"Executor loop dispatch info: {e_loop}")
                 else:
@@ -809,11 +834,17 @@ class TrainingQueueManager:
                     bot.active_since = None
                     bot.supervisor.state = "idle"
                     bot.executor.running = False
-                    if bot.executor_task:
-                        try:
+                    try:
+                        from .. import dependencies
+                        if dependencies.main_loop and dependencies.main_loop.is_running():
+                            def _cancel_monitor():
+                                if bot.executor_task and not bot.executor_task.done():
+                                    bot.executor_task.cancel()
+                            dependencies.main_loop.call_soon_threadsafe(_cancel_monitor)
+                        elif bot.executor_task:
                             bot.executor_task.cancel()
-                        except Exception:
-                            pass
+                    except Exception as e_cancel:
+                        logging.debug(f"Error cancelling executor task: {e_cancel}")
         except Exception as e_fatal:
             logging.error(f"[QUEUE WORKER FATAL ERROR] {e_fatal}")
             with self._lock:

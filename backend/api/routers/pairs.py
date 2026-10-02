@@ -52,22 +52,12 @@ def save_registered_pairs(pairs: List[str]):
 
 def discover_available_pairs() -> List[str]:
     """
-    Hanya mengembalikan pair yang terdaftar resmi di registered_pairs.json
-    dan subfolder models/{PAIR}/ yang valid (default awal hanya XAUUSD).
-    Tidak memindai tabel sembarang di database.
+    Hanya mengembalikan pair yang terdaftar resmi di registered_pairs.json.
+    TIDAK memindai folder models/ untuk mencegah pair 'ghost' muncul otomatis
+    tanpa didaftarkan secara eksplisit oleh pengguna.
     """
     pairs = set(load_registered_pairs())
     pairs.add("XAUUSD")
-    
-    # Pindai folder models/ untuk subfolder pair yang dibuat
-    models_dir = Path("models")
-    if models_dir.exists():
-        for item in models_dir.iterdir():
-            if item.is_dir() and not item.name.startswith(".") and not item.name.startswith("_"):
-                sym = item.name.upper()
-                if len(sym) >= 3 and sym.isalnum():
-                    pairs.add(sym)
-
     return sorted(list(pairs))
 
 @router.get("/api/pairs")
@@ -82,15 +72,9 @@ async def list_pairs():
     result = []
     for sym in discovered:
         clean_sym = sym.upper()
-        norm_pkl = Path("models") / clean_sym / "model_normal.pkl"
-        run_pkl = Path("models") / clean_sym / "model_runner.pkl"
+        # Arsitektur 1 model unified per pair: model.pkl
+        model_pkl = Path("models") / clean_sym / "model.pkl"
         meta_file = Path("models") / clean_sym / "models_metadata.json"
-
-        # Fallback root untuk XAUUSD jika belum dipindah
-        if clean_sym == "XAUUSD" and not norm_pkl.exists():
-            norm_pkl = Path("models/model_normal.pkl")
-            run_pkl = Path("models/model_runner.pkl")
-            meta_file = Path("models/models_metadata.json")
 
         meta = {}
         if meta_file.exists():
@@ -104,15 +88,27 @@ async def list_pairs():
         table_name = get_market_table_name(clean_sym)
         row_count = get_db_size(clean_sym)
 
+        has_model = model_pkl.exists()
+        win_rate = float(meta.get("win_rate", meta.get("normal", {}).get("last_accuracy", 0.0)))
+        profit_factor = float(meta.get("profit_factor", 0.0))
+        timeframe = meta.get("timeframe", "-")
+        trained_at = meta.get("trained_at", meta.get("normal", {}).get("last_trained_at", None))
+
         result.append({
             "symbol": clean_sym,
             "broker_symbol": broker_sym,
             "table_name": table_name,
             "row_count": row_count,
-            "has_normal_model": norm_pkl.exists(),
-            "has_runner_model": run_pkl.exists(),
-            "last_accuracy_normal": float(meta.get("normal", {}).get("last_accuracy", 0.0)),
-            "last_accuracy_runner": float(meta.get("runner", {}).get("last_accuracy", 0.0)),
+            "has_model": has_model,
+            # Aliases backward-compat untuk komponen UI lama
+            "has_normal_model": has_model,
+            "has_runner_model": has_model,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "timeframe": timeframe,
+            "trained_at": trained_at,
+            "last_accuracy_normal": win_rate,
+            "last_accuracy_runner": win_rate,
             "is_active": clean_sym in active_set,
         })
 
@@ -133,20 +129,24 @@ async def add_pair(req: PairAddRequest):
     if not clean_sym:
         return {"status": "error", "message": "Nama symbol tidak boleh kosong."}
 
-    # Buat subfolder otak
+    # Buat subfolder model untuk pair baru
     folder = Path("models") / clean_sym
     folder.mkdir(parents=True, exist_ok=True)
 
     broker_sym = resolve_broker_symbol(clean_sym)
 
-    # Inisialisasi metadata kosong jika belum ada
+    # Inisialisasi metadata kosong (format unified) jika belum ada
     meta_path = folder / "models_metadata.json"
     if not meta_path.exists():
         with open(meta_path, "w") as f:
             json.dump({
                 "symbol": clean_sym,
-                "normal": {"last_accuracy": 0.0, "last_trained_at": None, "trained": False},
-                "runner": {"last_accuracy": 0.0, "last_trained_at": None, "trained": False}
+                "model_file": "model.pkl",
+                "timeframe": None,
+                "win_rate": 0.0,
+                "profit_factor": 0.0,
+                "trained_at": None,
+                "features": []
             }, f, indent=2)
 
     # Simpan ke daftar registered_pairs.json
@@ -169,20 +169,45 @@ async def add_pair(req: PairAddRequest):
 @router.post("/api/pairs/remove")
 async def remove_pair(req: PairAddRequest):
     """
-    Menghapus pair dari daftar pemantauan (XAUUSD dilindungi tidak bisa dihapus).
+    Menghapus pair dari daftar pemantauan beserta seluruh data model-nya.
+    XAUUSD dilindungi tidak bisa dihapus (pair default sistem).
     """
+    import shutil
     clean_sym = req.symbol.strip().upper()
     if clean_sym == "XAUUSD":
         return {"status": "error", "message": "XAUUSD adalah pair default dan tidak dapat dihapus."}
-    
+
+    removed_from_json = False
     current_reg = load_registered_pairs()
     if clean_sym in current_reg:
         current_reg.remove(clean_sym)
         save_registered_pairs(current_reg)
-        if hasattr(bot, "active_pairs") and clean_sym in bot.active_pairs:
-            bot.active_pairs.remove(clean_sym)
-        return {"status": "success", "message": f"Pair {clean_sym} berhasil dihapus dari daftar."}
-    return {"status": "error", "message": f"Pair {clean_sym} tidak ditemukan dalam daftar."}
+        removed_from_json = True
+
+    if hasattr(bot, "active_pairs") and clean_sym in bot.active_pairs:
+        bot.active_pairs.remove(clean_sym)
+        # Jangan biarkan active_pairs kosong
+        if not bot.active_pairs:
+            bot.active_pairs = ["XAUUSD"]
+
+    # Hapus folder models/{SYMBOL}/ beserta seluruh isinya (model.pkl, metadata, pending)
+    model_folder = Path("models") / clean_sym
+    folder_deleted = False
+    if model_folder.exists() and model_folder.is_dir():
+        try:
+            shutil.rmtree(model_folder)
+            folder_deleted = True
+            logging.info(f"[PAIRS] Folder model {model_folder} berhasil dihapus.")
+        except Exception as e:
+            logging.error(f"[PAIRS] Gagal menghapus folder model {model_folder}: {e}")
+            return {"status": "error", "message": f"Pair {clean_sym} dihapus dari registry, namun folder model gagal dihapus: {e}"}
+
+    if removed_from_json or folder_deleted:
+        return {
+            "status": "success",
+            "message": f"Pair {clean_sym} berhasil dihapus dari registry{'dan folder model' if folder_deleted else ''}."
+        }
+    return {"status": "error", "message": f"Pair {clean_sym} tidak ditemukan dalam daftar registry maupun folder model."}
 
 @router.post("/api/pairs/toggle")
 async def toggle_pair(req: PairToggleRequest):

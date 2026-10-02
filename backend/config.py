@@ -33,6 +33,7 @@ class Config:
     MAGIC_NUMBER_BASE = int(os.getenv("MAGIC_NUMBER_BASE", "234000"))
     MAGIC_NUMBER_NORMAL = int(os.getenv("MAGIC_NUMBER_NORMAL", "234001"))
     MAGIC_NUMBER_RUNNER = int(os.getenv("MAGIC_NUMBER_RUNNER", "234002"))
+    MAGIC_NUMBER_UNIFIED = int(os.getenv("MAGIC_NUMBER_UNIFIED", "234003"))
     MAGIC_NUMBER = MAGIC_NUMBER_BASE # Backward compatibility
     
     # Institutional Risk & Execution Protocols

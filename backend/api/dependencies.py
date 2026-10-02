@@ -48,14 +48,43 @@ sync_state = {
 }
 
 class WebSocketLogHandler(logging.Handler):
+    """
+    Handler log yang mengirimkan baris log ke klien WebSocket.
+    Guard:
+    - Hanya menjadwalkan coroutine jika ada setidaknya 1 klien aktif.
+    - Throttle 60 msg/detik untuk INFO, 200 msg/detik untuk WARNING+
+      agar training intensif tidak membanjiri event loop.
+    """
+    _last_emit: float = 0.0
+    _emit_count: int = 0
+    _RATE_LIMIT_INFO = 60       # max INFO log/detik
+    _RATE_LIMIT_WARN = 200      # max WARNING/ERROR/CRITICAL log/detik
+
     def emit(self, record):
         try:
+            # Guard 1: skip jika tidak ada klien terhubung
+            if not manager_logs.active_connections:
+                return
+            # Guard 2: skip jika loop belum siap atau sudah ditutup
+            if not main_loop or main_loop.is_closed() or not main_loop.is_running():
+                return
+            # Guard 3: throttle per level
+            import time
+            now = time.monotonic()
+            rate_limit = self._RATE_LIMIT_INFO if record.levelno <= logging.INFO else self._RATE_LIMIT_WARN
+            if now - self._last_emit < 1.0:
+                WebSocketLogHandler._emit_count += 1
+                if WebSocketLogHandler._emit_count > rate_limit:
+                    return
+            else:
+                WebSocketLogHandler._last_emit = now
+                WebSocketLogHandler._emit_count = 0
+
             log_entry = self.format(record)
-            if main_loop and not main_loop.is_closed():
-                asyncio.run_coroutine_threadsafe(
-                    manager_logs.broadcast(json.dumps({"type": "log", "message": log_entry})),
-                    main_loop
-                )
+            asyncio.run_coroutine_threadsafe(
+                manager_logs.broadcast(json.dumps({"type": "log", "message": log_entry})),
+                main_loop
+            )
         except Exception:
             pass
 
@@ -73,22 +102,16 @@ class BotState:
                     reg = json.load(f)
                     if isinstance(reg, list):
                         loaded_pairs = [str(p).strip().upper() for p in reg if str(p).strip()]
-            
-            # Auto-discovery: Otomatis mendeteksi jika ada subfolder model baru yang ditambahkan
-            models_dir = os.path.join(os.path.dirname(__file__), "..", "models")
-            if os.path.exists(models_dir):
-                for item in os.listdir(models_dir):
-                    item_path = os.path.join(models_dir, item)
-                    if os.path.isdir(item_path) and not item.startswith((".", "_")):
-                        sym = item.strip().upper()
-                        if len(sym) >= 3 and sym.isalnum() and sym not in loaded_pairs:
-                            loaded_pairs.append(sym)
+
+            # Pastikan XAUUSD selalu ada sebagai pair default
+            if "XAUUSD" not in loaded_pairs:
+                loaded_pairs.insert(0, "XAUUSD")
 
             if loaded_pairs:
                 self.active_pairs = loaded_pairs
                 self.active_symbol = "XAUUSD" if "XAUUSD" in self.active_pairs else self.active_pairs[0]
         except Exception as e:
-            logging.warning(f"[BotState] Gagal memuat daftar pair dinamis: {e}")
+            logging.warning(f"[BotState] Gagal memuat daftar pair dari registered_pairs.json: {e}")
         
         # Initialize Agents
         self.supervisor = SupervisorAgent()

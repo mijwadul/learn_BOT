@@ -57,17 +57,16 @@ def fetch_historical_data_chunks(symbol: str = "XAUUSD", chunk_size: int = 10000
     """
     table_name = get_market_table_name(symbol)
     try:
-        query = f'SELECT * FROM "{table_name}"'
+        query = f'SELECT * FROM "{table_name}" ORDER BY time ASC'
         for chunk in pd.read_sql(query, con=sync_engine, chunksize=chunk_size):
             if not chunk.empty and 'time' in chunk.columns:
                 chunk['time'] = pd.to_datetime(chunk['time'])
-                chunk.sort_values('time', inplace=True)
                 chunk.set_index('time', inplace=True)
             yield chunk
     except Exception as e:
         if "xauusd" in table_name:
             try:
-                query_fb = 'SELECT * FROM "market_data_merged"'
+                query_fb = 'SELECT * FROM "market_data_merged" ORDER BY time ASC'
                 for chunk in pd.read_sql(query_fb, con=sync_engine, chunksize=chunk_size):
                     if not chunk.empty and 'time' in chunk.columns:
                         chunk['time'] = pd.to_datetime(chunk['time'])

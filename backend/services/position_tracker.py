@@ -121,21 +121,28 @@ class PositionTracker:
         Deteksi Mode Posisi yang Tangguh (Multi-Layer: Magic Number -> Cache -> Database -> Comment)
         """
         magic = getattr(pos, 'magic', 0)
+        unified_magic = getattr(Config, 'MAGIC_NUMBER_UNIFIED', 234003)
+        if magic == unified_magic:
+            return "PROFIT"
         if magic == Config.MAGIC_NUMBER_RUNNER:
             return "RUNNER"
-        if magic == Config.MAGIC_NUMBER_NORMAL:
-            return "NORMAL"
             
         ticket = pos.ticket
         if ticket in self.position_modes:
             return self.position_modes[ticket]
             
         comment = (pos.comment or "").upper()
+        if "PROFIT" in comment or "UNIFIED" in comment:
+            self.position_modes[ticket] = "PROFIT"
+            return "PROFIT"
         if "RUNNER" in comment:
             self.position_modes[ticket] = "RUNNER"
             return "RUNNER"
         if "HIT_RUN" in comment:
             self.position_modes[ticket] = "NORMAL"
+            return "NORMAL"
+
+        if magic == Config.MAGIC_NUMBER_NORMAL:
             return "NORMAL"
             
         try:
@@ -143,7 +150,13 @@ class PositionTracker:
             with Session(sync_engine) as session:
                 t_rec = session.query(TradeLog).filter(TradeLog.ticket == ticket).first()
                 if t_rec and t_rec.mode:
-                    mode = "RUNNER" if "RUNNER" in t_rec.mode.upper() else "NORMAL"
+                    rec_m = t_rec.mode.upper()
+                    if "PROFIT" in rec_m or "UNIFIED" in rec_m:
+                        mode = "PROFIT"
+                    elif "RUNNER" in rec_m:
+                        mode = "RUNNER"
+                    else:
+                        mode = "NORMAL"
                     self.position_modes[ticket] = mode
                     return mode
         except Exception:
@@ -167,7 +180,7 @@ class PositionTracker:
             for pos in positions:
                 mode = self.detect_position_mode(pos)
                 self.position_modes[pos.ticket] = mode
-                is_runner = (mode == "RUNNER")
+                is_runner = mode in ("RUNNER", "PROFIT", "UNIFIED")
                 self.get_or_recover_initial_risk(pos, is_runner)
                 pos_sym = symbol or pos.symbol
 
@@ -255,7 +268,7 @@ class PositionTracker:
             point = sym_info.point if sym_info and sym_info.point else 0.01
 
             mode = self.detect_position_mode(pos)
-            is_runner = (mode == "RUNNER")
+            is_runner = mode in ("RUNNER", "PROFIT", "UNIFIED")
             initial_risk = self.get_or_recover_initial_risk(pos, is_runner)
             
             # Cek apakah posisi sudah berada di Break-Even

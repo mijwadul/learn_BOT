@@ -19,7 +19,8 @@ router = APIRouter(tags=["Data Sync & Database Health"])
 class SyncRequest(BaseModel):
     symbol: Optional[str] = "XAUUSD"
     force_rebuild: Optional[bool] = False
-    total_candles: Optional[int] = 5000000
+    total_candles: Optional[int] = None
+    timeframe: Optional[str] = "M1"
 
 @router.post("/api/data/sync")
 async def sync_data_endpoint(req: Optional[SyncRequest] = None):
@@ -28,6 +29,7 @@ async def sync_data_endpoint(req: Optional[SyncRequest] = None):
     Menarik selisih candle baru sejak record terakhir dan me-append ke tabel pair bersangkutan.
     """
     target_symbol = (req.symbol if req and req.symbol else Config.SYMBOL) or "XAUUSD"
+    target_tf = (req.timeframe if req and req.timeframe else "M1")
 
     with sync_lock:
         if sync_state["is_syncing"]:
@@ -47,7 +49,7 @@ async def sync_data_endpoint(req: Optional[SyncRequest] = None):
             sync_state["sync_type"] = "incremental"
             sync_state["symbol"] = bot.data_miner.canonical_symbol
             sync_state["progress"] = 0
-            sync_state["message"] = f"Mengecek candle terbaru {bot.data_miner.canonical_symbol} dari MT5..."
+            sync_state["message"] = f"Mengecek candle terbaru ({target_tf}) {bot.data_miner.canonical_symbol} dari MT5..."
             sync_state["error"] = None
 
         try:
@@ -56,7 +58,7 @@ async def sync_data_endpoint(req: Optional[SyncRequest] = None):
             except Exception:
                 pass
                 
-            inserted, msg = bot.data_miner.sync_latest_data()
+            inserted, msg = bot.data_miner.sync_latest_data(timeframe=target_tf)
             with sync_lock:
                 sync_state["inserted_rows"] = inserted
                 sync_state["last_synced_at"] = datetime.now().isoformat()
@@ -87,7 +89,8 @@ async def force_backfill_endpoint(req: Optional[SyncRequest] = None):
     Men-drop tabel khusus pair dan men-download ulang candle secara penuh.
     """
     target_symbol = (req.symbol if req and req.symbol else Config.SYMBOL) or "XAUUSD"
-    total_candles = req.total_candles if req and req.total_candles else 5000000
+    total_candles = req.total_candles if (req and req.total_candles) else None
+    target_tf = (req.timeframe if req and req.timeframe else "M1")
 
     with sync_lock:
         if sync_state["is_syncing"]:
@@ -109,24 +112,25 @@ async def force_backfill_endpoint(req: Optional[SyncRequest] = None):
             sync_state["sync_type"] = "backfill"
             sync_state["symbol"] = bot.data_miner.canonical_symbol
             sync_state["progress"] = 0
-            sync_state["message"] = f"Memulai Force Backfill ({total_candles:,} candles) untuk {bot.data_miner.canonical_symbol}..."
+            sync_state["message"] = f"Menarik seluruh riwayat MT5 ({target_tf}) untuk {bot.data_miner.canonical_symbol}..."
             sync_state["error"] = None
         
         def progress_cb(current_b, total_b, cur, tot):
             with sync_lock:
-                sync_state["progress"] = int((current_b / max(1, total_b)) * 100)
-                sync_state["message"] = f"Menyimpan batch {current_b}/{total_b} ({sync_state['progress']}%) ke tabel {bot.data_miner.table_name}..."
+                sync_state["progress"] = min(99, current_b * 3)
+                sync_state["message"] = f"Streaming batch {current_b} ({cur:,} candle {target_tf}) ke tabel {bot.data_miner.table_name}..."
 
         try:
             inserted = bot.data_miner.backfill_data(
                 total_candles=total_candles,
+                timeframe=target_tf,
                 progress_callback=progress_cb,
                 force_rebuild=True
             )
             with sync_lock:
                 sync_state["inserted_rows"] = inserted
                 sync_state["last_synced_at"] = datetime.now().isoformat()
-                sync_state["message"] = f"Sukses Force Backfill: {inserted:,} candle tersimpan ke tabel {bot.data_miner.table_name}."
+                sync_state["message"] = f"Sukses Rebuild: {inserted:,} candle ({target_tf}) tersimpan ke tabel {bot.data_miner.table_name}."
                 sync_state["progress"] = 100
         except Exception as e:
             logging.error(f"Error during backfill ({target_symbol}): {e}")
@@ -177,14 +181,34 @@ async def get_database_health(symbol: Optional[str] = None):
         row_count = await asyncio.to_thread(get_db_size, sym)
         min_date, max_date = await asyncio.to_thread(get_db_date_range, sym)
 
+        active_tf = "M1"
+        TF_MAP = {
+            "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4, "D1": mt5.TIMEFRAME_D1
+        }
+        tf_const = TF_MAP.get(active_tf.upper(), mt5.TIMEFRAME_M1)
+
         mt5_latest_time = None
         if bot.mt5_connected:
             try:
-                rates_last = await asyncio.to_thread(mt5.copy_rates_from_pos, broker_sym, mt5.TIMEFRAME_M1, 0, 1)
+                rates_last = await asyncio.to_thread(mt5.copy_rates_from_pos, broker_sym, tf_const, 0, 1)
                 if rates_last is not None and len(rates_last) > 0:
                     mt5_latest_time = pd.to_datetime(rates_last[0]['time'], unit='s').isoformat()
             except Exception:
                 pass
+
+        recent_rows = []
+        try:
+            with sync_engine.connect() as conn:
+                df_rec = pd.read_sql(
+                    text(f'SELECT "time", open, high, low, close, tick_volume, sma_20, ema_50 FROM "{table_name}" ORDER BY "time" DESC LIMIT 6'),
+                    con=conn
+                )
+                if not df_rec.empty:
+                    df_rec['time'] = df_rec['time'].astype(str)
+                    recent_rows = df_rec.to_dict(orient="records")
+        except Exception:
+            pass
 
         return {
             "status": "success",
@@ -196,6 +220,8 @@ async def get_database_health(symbol: Optional[str] = None):
             "active_symbol": sym,
             "broker_symbol": broker_sym,
             "table_name": table_name,
+            "timeframe": active_tf,
+            "recent_rows": recent_rows,
             "is_syncing": sync_state.get("is_syncing", False),
             "sync_progress": sync_state.get("progress", 0),
             "last_synced_at": sync_state.get("last_synced_at")

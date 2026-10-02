@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import joblib
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -36,9 +37,16 @@ class ModelManager:
         return d
 
     @staticmethod
-    def get_model_path(symbol: str, mode: str) -> str:
+    def get_model_path(symbol: str, mode: str = "unified") -> str:
         d = ModelManager.get_model_dir(symbol)
-        return os.path.join(d, f"model_{mode}.pkl")
+        clean_mode = str(mode or "unified").strip().lower()
+        if clean_mode in ("unified", "primary", "single", ""):
+            return os.path.join(d, "model.pkl")
+        specific_path = os.path.join(d, f"model_{clean_mode}.pkl")
+        if os.path.exists(specific_path):
+            return specific_path
+        # Fallback ke unified model.pkl
+        return os.path.join(d, "model.pkl")
 
     @staticmethod
     def get_candidate_model_path(symbol: str, mode: str) -> str:
@@ -350,49 +358,136 @@ class ModelManager:
         return None
 
     @staticmethod
+    def save_unified_model(
+        symbol: str,
+        model: Any,
+        features: list,
+        timeframe: str = "M5",
+        win_rate: float = 0.0,
+        profit_factor: float = 0.0,
+        optimal_threshold: float = 0.50,
+        oos_scorecard: Optional[Dict[str, Any]] = None,
+        extra_meta: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Menyimpan model tunggal per pair (model.pkl) beserta metrik profit dan timeframenya.
+        """
+        try:
+            sym = str(symbol or "XAUUSD").upper()
+            d = ModelManager.get_model_dir(sym)
+            model_path = os.path.join(d, "model.pkl")
+            joblib.dump(model, model_path)
+
+            # TD-12: Bersihkan file legacy dual-model jika ada agar directory 100% SSOT (hanya model.pkl)
+            for legacy_f in ["model_normal.pkl", "model_runner.pkl"]:
+                leg_p = os.path.join(d, legacy_f)
+                if os.path.exists(leg_p):
+                    try:
+                        os.remove(leg_p)
+                        logger.info(f"🧹 [SSOT CLEANUP] Menghapus legacy dual-model file: {leg_p}")
+                    except Exception:
+                        pass
+
+            meta_path = ModelManager.get_metadata_path(sym)
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            meta_data = {
+                "symbol": sym,
+                "model_file": "model.pkl",
+                "timeframe": timeframe,
+                "win_rate": win_rate,
+                "profit_factor": profit_factor,
+                "optimal_threshold": optimal_threshold,
+                "features": features,
+                "trained_at": now_str,
+                "oos_scorecard": ModelManager._clean_scorecard(oos_scorecard),
+                # Kompatibilitas mundur
+                "normal": {
+                    "last_accuracy": win_rate / 100.0 if win_rate > 1.0 else win_rate,
+                    "last_trained_at": now_str,
+                    "optimal_threshold": optimal_threshold,
+                    "trained": True,
+                    "oos_scorecard": ModelManager._clean_scorecard(oos_scorecard)
+                },
+                "runner": {
+                    "last_accuracy": win_rate / 100.0 if win_rate > 1.0 else win_rate,
+                    "last_trained_at": now_str,
+                    "optimal_threshold": optimal_threshold,
+                    "trained": True,
+                    "max_runner_rr": 3.0,
+                    "oos_scorecard": ModelManager._clean_scorecard(oos_scorecard)
+                }
+            }
+            if extra_meta:
+                meta_data.update(extra_meta)
+
+            cleaned_meta = sanitize_json_floats(meta_data)
+            with open(meta_path, "w") as f:
+                json.dump(cleaned_meta, f, indent=2)
+
+            logger.info(f"💾 [MODEL MANAGER - {sym}] Berhasil menyimpan model tunggal di {model_path} (TF: {timeframe}, PF: {profit_factor:.2f}).")
+            return True
+        except Exception as e:
+            logger.error(f"Gagal menyimpan model tunggal untuk {symbol}: {e}")
+            return False
+
+    @staticmethod
     def load_models(symbol: str) -> Dict[str, Any]:
         """
         Memuat model dan metadata untuk symbol tertentu.
-        Mengembalikan dictionary berisi model_normal, model_runner, features, metadata.
+        Mendukung model tunggal (model.pkl) dengan kompatibilitas penuh.
         """
         sym = str(symbol or "XAUUSD").upper()
         res = {
+            "model_unified": None,
             "model_normal": None,
             "model_runner": None,
+            "timeframe": "M5",
             "features": [],
             "last_accuracy_normal": 0.0,
             "last_trained_normal": None,
-            "optimal_threshold_normal": 0.54,
+            "optimal_threshold_normal": 0.50,
             "last_accuracy_runner": 0.0,
             "last_trained_runner": None,
-            "optimal_threshold_runner": 0.54,
-            "max_runner_rr": 5.0,
+            "optimal_threshold_runner": 0.50,
+            "profit_factor": 1.0,
+            "win_rate": 50.0,
+            "max_runner_rr": 3.0,
             "loaded": False
         }
         try:
+            d = ModelManager.get_model_dir(sym)
+            path_unified = os.path.join(d, "model.pkl")
             path_normal = ModelManager.get_model_path(sym, "normal")
             path_runner = ModelManager.get_model_path(sym, "runner")
             meta_path = ModelManager.get_metadata_path(sym)
 
-            # Fallback ke root models/ jika file belum dipindahkan
-            target_normal = path_normal if os.path.exists(path_normal) else "models/model_normal.pkl"
-            target_runner = path_runner if os.path.exists(path_runner) else "models/model_runner.pkl"
-
             loaded_any = False
-            if os.path.exists(target_normal) and os.path.getsize(target_normal) > 100:
-                res["model_normal"] = joblib.load(target_normal)
-                loaded_any = True
-                logger.info(f"[RESEARCHER-{sym}] Model Normal loaded from {target_normal}")
 
-            if os.path.exists(target_runner) and os.path.getsize(target_runner) > 100:
-                res["model_runner"] = joblib.load(target_runner)
+            # Prioritaskan Model Tunggal Baru (model.pkl)
+            if os.path.exists(path_unified) and os.path.getsize(path_unified) > 100:
+                unified_model = joblib.load(path_unified)
+                res["model_unified"] = unified_model
+                res["model_normal"] = unified_model
+                res["model_runner"] = unified_model
                 loaded_any = True
-                logger.info(f"[RESEARCHER-{sym}] Model Runner loaded from {target_runner}")
+                logger.info(f"[RESEARCHER-{sym}] Model Tunggal (model.pkl) berhasil dimuat.")
+            else:
+                target_normal = path_normal if os.path.exists(path_normal) else "models/model_normal.pkl"
+                target_runner = path_runner if os.path.exists(path_runner) else "models/model_runner.pkl"
+
+                if os.path.exists(target_normal) and os.path.getsize(target_normal) > 100:
+                    res["model_normal"] = joblib.load(target_normal)
+                    loaded_any = True
+                    logger.info(f"[RESEARCHER-{sym}] Model Normal loaded from {target_normal}")
+
+                if os.path.exists(target_runner) and os.path.getsize(target_runner) > 100:
+                    res["model_runner"] = joblib.load(target_runner)
+                    loaded_any = True
+                    logger.info(f"[RESEARCHER-{sym}] Model Runner loaded from {target_runner}")
 
             if loaded_any:
                 res["loaded"] = True
-                # Extract features dari model yang tersimpan
-                m = res["model_normal"] or res["model_runner"]
+                m = res["model_unified"] or res["model_normal"] or res["model_runner"]
                 if hasattr(m, 'feature_name_'):
                     res["features"] = list(m.feature_name_)
                 elif hasattr(m, 'booster_'):
@@ -404,22 +499,20 @@ class ModelManager:
                     try:
                         with open(target_meta, "r") as f:
                             meta = json.load(f)
-                        res["last_accuracy_normal"] = float(meta.get("normal", {}).get("last_accuracy", 0.0))
-                        res["last_trained_normal"] = meta.get("normal", {}).get("last_trained_at")
-                        res["optimal_threshold_normal"] = float(meta.get("normal", {}).get("optimal_threshold", 0.54))
-                        res["last_accuracy_runner"] = float(meta.get("runner", {}).get("last_accuracy", 0.0))
-                        res["last_trained_runner"] = meta.get("runner", {}).get("last_trained_at")
-                        res["optimal_threshold_runner"] = float(meta.get("runner", {}).get("optimal_threshold", 0.54))
-                        res["max_runner_rr"] = float(meta.get("runner", {}).get("max_runner_rr", 5.0))
+                        res["timeframe"] = meta.get("timeframe", "M5")
+                        res["profit_factor"] = float(meta.get("profit_factor", 1.0))
+                        res["win_rate"] = float(meta.get("win_rate", 50.0))
+                        res["last_accuracy_normal"] = float(meta.get("normal", {}).get("last_accuracy", meta.get("win_rate", 50.0) / 100.0))
+                        res["last_trained_normal"] = meta.get("normal", {}).get("last_trained_at", meta.get("trained_at"))
+                        res["optimal_threshold_normal"] = float(meta.get("optimal_threshold", meta.get("normal", {}).get("optimal_threshold", 0.50)))
+                        res["last_accuracy_runner"] = float(meta.get("runner", {}).get("last_accuracy", meta.get("win_rate", 50.0) / 100.0))
+                        res["last_trained_runner"] = meta.get("runner", {}).get("last_trained_at", meta.get("trained_at"))
+                        res["optimal_threshold_runner"] = float(meta.get("optimal_threshold", meta.get("runner", {}).get("optimal_threshold", 0.50)))
+                        res["max_runner_rr"] = float(meta.get("runner", {}).get("max_runner_rr", 3.0))
                         res["oos_scorecard"] = meta.get("oos_scorecard", {
                             "normal": meta.get("normal", {}).get("oos_scorecard"),
                             "runner": meta.get("runner", {}).get("oos_scorecard")
                         })
-                        logger.info(
-                            f"[RESEARCHER-{sym}] Metadata loaded: Normal Acc={res['last_accuracy_normal']*100:.1f}% "
-                            f"(Thresh: {res['optimal_threshold_normal']*100:.1f}%), Runner Acc={res['last_accuracy_runner']*100:.1f}% "
-                            f"(Thresh: {res['optimal_threshold_runner']*100:.1f}%), Max Runner RR={res['max_runner_rr']:.1f}R"
-                        )
                     except Exception as em:
                         logger.warning(f"Gagal membaca metadata {target_meta}: {em}")
 

@@ -242,3 +242,153 @@ def optimize_hyperparameters(
     )
 
     return best_params_clean
+
+
+def optimize_unified_multiclass(
+    X: pd.DataFrame,
+    y: Any,
+    sample_weights: Optional[np.ndarray] = None,
+    n_trials: int = 25,
+    symbol: str = "XAUUSD"
+) -> Dict[str, Any]:
+    """
+    Optuna Auto-Tuning untuk Model Tunggal Multiclass (0=Neutral, 1=BUY, 2=SELL).
+    Memaksimalkan Out-of-Fold Profit Factor, Expectancy (+R), dan Win Rate
+    menggunakan Purged Walk-Forward Cross Validation.
+    """
+    y = np.array(y, dtype=int)
+    n_samples = len(X)
+    folds = build_purged_folds(n_samples, purge_len=150)
+
+    logger.info(f"🔬 [OPTUNA UNIFIED] Memulai Tuning Hyperparameter Multiclass ({n_trials} Trials) untuk {symbol}...")
+    logger.info(f"   CV Splits: {len(folds)} Purged Folds pada {n_samples:,} baris.")
+
+    best_score = -999.0
+    best_threshold = 0.45
+
+    def objective(trial):
+        nonlocal best_score, best_threshold
+
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 80, 250),
+            'learning_rate': trial.suggest_float('learning_rate', 0.015, 0.08, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 6),
+            'num_leaves': trial.suggest_int('num_leaves', 15, 45),
+            'min_child_samples': trial.suggest_int('min_child_samples', 20, 150),
+            'subsample': trial.suggest_float('subsample', 0.65, 0.95),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.60, 0.95),
+            'reg_alpha': trial.suggest_float('reg_alpha', 1e-2, 5.0, log=True),
+            'reg_lambda': trial.suggest_float('reg_lambda', 1e-2, 5.0, log=True),
+            'objective': 'multiclass',
+            'num_class': 3,
+            'random_state': 42,
+            'verbose': -1,
+            'n_jobs': -1
+        }
+        trial_threshold = trial.suggest_float('entry_threshold', 0.40, 0.58)
+
+        fold_scores = []
+        fold_pfs = []
+        fold_wrs = []
+        fold_trades = []
+
+        for (tr_s, tr_e, va_s, va_e) in folds:
+            X_tr, y_tr = X.iloc[tr_s:tr_e], y[tr_s:tr_e]
+            X_va, y_va = X.iloc[va_s:va_e], y[va_s:va_e]
+
+            # Lewati jika kelas tidak representatif
+            unique_classes = set(y_tr)
+            if len(unique_classes) < 2:
+                continue
+
+            sw_tr = sample_weights[tr_s:tr_e] if sample_weights is not None else None
+            clf = lgb.LGBMClassifier(**params)
+            clf.fit(X_tr, y_tr, sample_weight=sw_tr)
+
+            probs = clf.predict_proba(X_va)
+            classes = list(getattr(clf, 'classes_', [0, 1, 2]))
+            idx_b = classes.index(1) if 1 in classes else -1
+            idx_s = classes.index(2) if 2 in classes else -1
+
+            p_b = probs[:, idx_b] if idx_b >= 0 else np.zeros(len(X_va))
+            p_s = probs[:, idx_s] if idx_s >= 0 else np.zeros(len(X_va))
+
+            buy_sig = (p_b >= trial_threshold) & (p_b > p_s)
+            sell_sig = (p_s >= trial_threshold) & (p_s > p_b)
+
+            wins = 0
+            losses = 0
+            gross_p = 0.0
+            gross_l = 0.0
+
+            for i in range(len(y_va)):
+                act = y_va[i]
+                if buy_sig[i]:
+                    if act == 1:
+                        wins += 1
+                        gross_p += 1.5
+                    elif act == 2:
+                        # TD-07: Penalti asimetris berat jika model memprediksi BUY saat pasar crashing (SELL)
+                        losses += 1
+                        gross_l += 2.5
+                    else:
+                        losses += 1
+                        gross_l += 1.0
+                elif sell_sig[i]:
+                    if act == 2:
+                        wins += 1
+                        gross_p += 1.5
+                    elif act == 1:
+                        # TD-07: Penalti asimetris berat jika model memprediksi SELL saat pasar rally (BUY)
+                        losses += 1
+                        gross_l += 2.5
+                    else:
+                        losses += 1
+                        gross_l += 1.0
+
+            trades = wins + losses
+            fold_trades.append(trades)
+            if trades >= 3:
+                wr = wins / trades
+                pf = gross_p / max(1e-4, gross_l)
+                exp = (gross_p - gross_l) / trades
+                score = (pf - 1.0) * min(trades / 15.0, 1.0) + exp + (wr - 0.40)
+                fold_scores.append(score)
+                fold_pfs.append(pf)
+                fold_wrs.append(wr)
+            else:
+                fold_scores.append(-2.0)
+                fold_pfs.append(0.5)
+                fold_wrs.append(0.0)
+
+        if fold_scores:
+            avg_score = float(np.mean(fold_scores))
+            avg_pf = float(np.mean(fold_pfs))
+            avg_wr = float(np.mean(fold_wrs))
+            total_tr = sum(fold_trades)
+        else:
+            avg_score = -5.0
+            avg_pf = 0.0
+            avg_wr = 0.0
+            total_tr = 0
+
+        if avg_score > best_score:
+            best_score = avg_score
+            best_threshold = trial_threshold
+
+        return avg_score
+
+    study = optuna.create_study(direction='maximize')
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study.optimize(objective, n_trials=n_trials)
+
+    best_p = study.best_params.copy()
+    opt_thresh = best_p.pop('entry_threshold', best_threshold)
+    best_p['optimal_threshold'] = float(opt_thresh)
+
+    logger.info(
+        f"🏆 [OPTUNA UNIFIED SELESAI] Best Score={study.best_value:.4f} | "
+        f"Optimal Threshold={opt_thresh*100:.1f}%\n"
+        f"   Hyperparameters: {best_p}"
+    )
+    return best_p

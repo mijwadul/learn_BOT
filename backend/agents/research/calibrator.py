@@ -38,8 +38,15 @@ def calibrate_optimal_threshold(
 
     probs = model.predict_proba(X_cal)
     classes = list(getattr(model, 'classes_', [0, 1]))
-    idx_win = classes.index(1) if 1 in classes else (1 if probs.shape[1] > 1 else 0)
-    p_win = probs[:, idx_win] if probs.shape[1] > idx_win else probs[:, -1]
+    is_multiclass = 2 in classes
+    if is_multiclass:
+        idx_buy = classes.index(1) if 1 in classes else 1
+        idx_sell = classes.index(2) if 2 in classes else 2
+        p_buy = probs[:, idx_buy]
+        p_sell = probs[:, idx_sell]
+    else:
+        idx_win = classes.index(1) if 1 in classes else (1 if probs.shape[1] > 1 else 0)
+        p_win = probs[:, idx_win] if probs.shape[1] > idx_win else probs[:, -1]
 
     rr_ratio = profile.rr_normal if mode == 'normal' else profile.rr_runner
     target_wr = (profile.oos_criteria_normal["min_win_rate"] if mode == 'normal' else profile.oos_criteria_runner["min_win_rate"]) / 100.0
@@ -50,52 +57,40 @@ def calibrate_optimal_threshold(
     best_th = 0.50 if mode == 'runner' else 0.54
     best_stats = {}
 
-    # Filter habitat rezim saat kalibrasi
-    if mode == 'runner':
-        col_rb = 'is_running_bull' if 'is_running_bull' in X_cal.columns else ('feat_is_running_bull' if 'feat_is_running_bull' in X_cal.columns else None)
-        col_rs = 'is_running_bear' if 'is_running_bear' in X_cal.columns else ('feat_is_running_bear' if 'feat_is_running_bear' in X_cal.columns else None)
-        col_bb = 'is_breakout_bull' if 'is_breakout_bull' in X_cal.columns else ('feat_is_breakout_bull' if 'feat_is_breakout_bull' in X_cal.columns else None)
-        col_bs = 'is_breakout_bear' if 'is_breakout_bear' in X_cal.columns else ('feat_is_breakout_bear' if 'feat_is_breakout_bear' in X_cal.columns else None)
+    # Hapus filter rezim kaku lama (is_bb_squeeze); evaluasi murni pada seluruh data validasi
+    regime_filter = np.ones(len(X_cal), dtype=bool)
 
-        f_run_b = (X_cal[col_rb] == 1) if col_rb else np.zeros(len(X_cal), dtype=bool)
-        f_run_s = (X_cal[col_rs] == 1) if col_rs else np.zeros(len(X_cal), dtype=bool)
-        f_brk_b = (X_cal[col_bb] == 1) if col_bb else np.zeros(len(X_cal), dtype=bool)
-        f_brk_s = (X_cal[col_bs] == 1) if col_bs else np.zeros(len(X_cal), dtype=bool)
-        feat_run = (f_run_b | f_run_s | f_brk_b | f_brk_s)
-
-        if feat_run.sum() >= 10:
-            regime_filter = feat_run.values if hasattr(feat_run, 'values') else np.array(feat_run, dtype=bool)
-        else:
-            regime_filter = np.ones(len(X_cal), dtype=bool)
-    else:
-        col_sq = 'is_bb_squeeze' if 'is_bb_squeeze' in X_cal.columns else ('feat_is_bb_squeeze' if 'feat_is_bb_squeeze' in X_cal.columns else None)
-        f_sq = (X_cal[col_sq] == 1) if col_sq else np.zeros(len(X_cal), dtype=bool)
-        if f_sq.sum() >= 10:
-            regime_filter = f_sq.values if hasattr(f_sq, 'values') else np.array(f_sq, dtype=bool)
-        else:
-            regime_filter = np.ones(len(X_cal), dtype=bool)
-
-    # Candidate threshold disesuaikan dengan profil instrumen:
-    if mode == 'runner':
-        candidate_thresholds = np.linspace(0.35, 0.65, 31)
-        effective_min_signals = max(min_signals, int(regime_filter.sum() * 0.02))
-    else:
-        candidate_thresholds = np.linspace(0.42, 0.70, 29)
-        effective_min_signals = max(min_signals, int(regime_filter.sum() * 0.02))
+    candidate_thresholds = np.linspace(0.38, 0.65, 28)
+    effective_min_signals = max(min_signals, 15)
 
     for th in candidate_thresholds:
-        pred_trade = (p_win >= th) & regime_filter
-        n_trades = int(pred_trade.sum())
-        if n_trades < effective_min_signals:
-            continue
+        if is_multiclass:
+            buy_trade = (p_buy >= th) & (p_buy > p_sell)
+            sell_trade = (p_sell >= th) & (p_sell > p_buy)
+            n_trades = int(buy_trade.sum() + sell_trade.sum())
+            if n_trades < effective_min_signals:
+                continue
 
-        wins = int((pred_trade & (y_cal == 1)).sum())
-        losses = n_trades - wins
+            wins = int((buy_trade & (y_cal == 1)).sum() + (sell_trade & (y_cal == 2)).sum())
+            losses = n_trades - wins
+            # TD-07 Asymmetric penalty: rugi salah arah bobotnya 2.5R
+            opp_losses = int((buy_trade & (y_cal == 2)).sum() + (sell_trade & (y_cal == 1)).sum())
+            chop_losses = losses - opp_losses
+            gross_profit = wins * 1.5
+            gross_loss = max(chop_losses * 1.0 + opp_losses * 2.5, 0.001)
+        else:
+            pred_trade = (p_win >= th)
+            n_trades = int(pred_trade.sum())
+            if n_trades < effective_min_signals:
+                continue
+            wins = int((pred_trade & (y_cal == 1)).sum())
+            losses = n_trades - wins
+            gross_profit = wins * rr_ratio
+            gross_loss = max(losses * 1.0, 0.001)
+
         wr = wins / n_trades
-        gross_profit = wins * rr_ratio
-        gross_loss = max(losses * 1.0, 0.001)
         pf = gross_profit / gross_loss
-        expectancy = (wr * rr_ratio) - ((1.0 - wr) * 1.0)
+        expectancy = (gross_profit - gross_loss) / n_trades
 
         # Penalti keras jika metrik di bawah standar kelulusan profile
         wr_penalty = 0.0

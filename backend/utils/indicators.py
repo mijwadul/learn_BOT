@@ -59,11 +59,21 @@ def calculate_bbma(df):
     # EMA
     df['EMA_50'] = calculate_ema(df['close'], 50)
     
-    # LWMA
+    # LWMA (4 Garis Terpisah)
     df['LWMA_5_High'] = calculate_lwma(df['high'], 5)
     df['LWMA_10_High'] = calculate_lwma(df['high'], 10)
     df['LWMA_5_Low'] = calculate_lwma(df['low'], 5)
     df['LWMA_10_Low'] = calculate_lwma(df['low'], 10)
+
+    # Standard Lowercase Aliases for DB and ML Pipeline
+    df['sma_20'] = df['SMA_20']
+    df['bb_upper'] = df['BB_Upper']
+    df['bb_lower'] = df['BB_Lower']
+    df['ema_50'] = df['EMA_50']
+    df['lwma_5_high'] = df['LWMA_5_High']
+    df['lwma_10_high'] = df['LWMA_10_High']
+    df['lwma_5_low'] = df['LWMA_5_Low']
+    df['lwma_10_low'] = df['LWMA_10_Low']
     
     # Jarak Topografi
     df['dist_Close_EMA50'] = df['close'] - df['EMA_50']
@@ -248,8 +258,11 @@ def calculate_bbma_sequence_features(df: pd.DataFrame, lookback: int = 30) -> pd
 
     # ----------------------------------------------------------------
     # 1. BARS SINCE LAST TRIGGER EVENT (CSA / CSAK / CSM)
+    # Vectorized: forward-fill index last occurrence via np.maximum.accumulate
     # Hasil: float [1, lookback+1]. Makin kecil = makin fresh / relevan.
     # ----------------------------------------------------------------
+    idx_arr = np.arange(n, dtype=np.float64)
+
     for col_flag, result_col in [
         ('is_CSA_Buy',     'bars_since_csa_buy'),
         ('is_CSA_Sell',    'bars_since_csa_sell'),
@@ -265,13 +278,15 @@ def calculate_bbma_sequence_features(df: pd.DataFrame, lookback: int = 30) -> pd
             continue
 
         flags = pd.to_numeric(df[col_flag], errors='coerce').fillna(0.0).values.astype(float)
-        result = np.full(n, float(lookback + 1))
-        for i in range(n):
-            for lag in range(1, min(lookback + 1, i + 1)):
-                if flags[i - lag] == 1.0:
-                    result[i] = float(lag)
-                    break
-        df[result_col] = result
+        # last_event_idx[i] = index terakhir di mana flags == 1, atau -1 jika belum pernah
+        last_event_idx = np.where(flags == 1.0, idx_arr, -1.0)
+        last_event_idx = np.maximum.accumulate(last_event_idx)
+        # bars_since = selisih index saat ini dengan index terakhir event
+        bars_since = np.where(last_event_idx >= 0, idx_arr - last_event_idx, float(lookback + 1))
+        # Clamp ke [1, lookback+1]: bar yang sama dianggap belum ada event sebelumnya
+        bars_since = np.where(bars_since == 0.0, float(lookback + 1), bars_since)
+        bars_since = np.clip(bars_since, 1.0, float(lookback + 1))
+        df[result_col] = bars_since
 
     # ----------------------------------------------------------------
     # 2. FRESHNESS SCORE (Exponential decay dari kekinian event)
@@ -289,7 +304,7 @@ def calculate_bbma_sequence_features(df: pd.DataFrame, lookback: int = 30) -> pd
 
     # ----------------------------------------------------------------
     # 3. TRIGGER CANDLE MOMENTUM RATIO
-    # Kekuatan body candle pemicu relatif terhadap ATR saat itu terjadi.
+    # Vectorized: fancy-indexing array origin_idx tanpa Python loop
     # ----------------------------------------------------------------
     close_s = pd.to_numeric(df['close'], errors='coerce').fillna(0.0)
     open_s  = pd.to_numeric(df['open'], errors='coerce').fillna(close_s)
@@ -308,15 +323,12 @@ def calculate_bbma_sequence_features(df: pd.DataFrame, lookback: int = 30) -> pd
         ('bars_since_csm_buy',   'trigger_momentum_csm_buy'),
         ('bars_since_csm_sell',  'trigger_momentum_csm_sell'),
     ]:
-        bars_arr = df[bars_col].values
-        result = np.zeros(n)
-        for i in range(n):
-            lag = int(bars_arr[i])
-            if 1 <= lag <= lookback:
-                origin_idx = i - lag
-                if origin_idx >= 0:
-                    result[i] = body_sizes[origin_idx] / atr_safe[origin_idx]
-        df[result_col] = result
+        bars_arr = df[bars_col].values.astype(np.float64)
+        valid_mask = (bars_arr >= 1.0) & (bars_arr <= lookback)
+        origin_idx = (idx_arr - bars_arr).astype(np.int64)
+        origin_idx_safe = np.clip(origin_idx, 0, n - 1)
+        momentum = body_sizes[origin_idx_safe] / atr_safe[origin_idx_safe]
+        df[result_col] = np.where(valid_mask, momentum, 0.0)
 
     # ----------------------------------------------------------------
     # 4. KOMPOSIT TRIGGER SCORE PER ARAH

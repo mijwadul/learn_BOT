@@ -148,114 +148,92 @@ class DataMinerAgent:
                     
         return df
 
-    def fetch_and_merge_data(self, n_candles=2000, start_pos=0):
-        # Ambil profil timeframe fraktal per pair dari Config
+    def get_pair_timeframe(self) -> str:
+        """Membaca timeframe aktif dari model metadata jika tersedia, fallback ke Config."""
+        try:
+            from agents.research.model_manager import ModelManager
+            meta = ModelManager.load_models(self.canonical_symbol)
+            if meta and meta.get("timeframe"):
+                return meta.get("timeframe")
+        except Exception:
+            pass
         tf_profile = Config.get_timeframe_profile(self.canonical_symbol)
-        entry_tf_str = tf_profile.get("entry_tf", "M5")
-        setup_tf_str = tf_profile.get("setup_tf", "M15")
-        trend_tf_str = tf_profile.get("trend_tf", "H1")
+        return tf_profile.get("entry_tf", "M5")
 
-        TF_MAP = {
-            "M1": (mt5.TIMEFRAME_M1, 1),
-            "M5": (mt5.TIMEFRAME_M5, 5),
-            "M15": (mt5.TIMEFRAME_M15, 15),
-            "M30": (mt5.TIMEFRAME_M30, 30),
-            "H1": (mt5.TIMEFRAME_H1, 60),
-            "H4": (mt5.TIMEFRAME_H4, 240),
-            "D1": (mt5.TIMEFRAME_D1, 1440),
-        }
-
-        tf_base_const, tf_base_min = TF_MAP.get(entry_tf_str, (mt5.TIMEFRAME_M5, 5))
-        tf_setup_const, tf_setup_min = TF_MAP.get(setup_tf_str, (mt5.TIMEFRAME_M15, 15))
-        tf_trend_const, tf_trend_min = TF_MAP.get(trend_tf_str, (mt5.TIMEFRAME_H1, 60))
-
-        ratio_setup = max(1, int(tf_setup_min / tf_base_min))
-        ratio_trend = max(1, int(tf_trend_min / tf_base_min))
+    def fetch_and_calculate_bbma(self, n_candles=2000, start_pos=0, timeframe=None):
+        """
+        Menarik data harga dari MT5 dan menghitung indikator BBMA murni:
+        - OHLC & Tick Volume
+        - Bollinger Bands (20, 2): sma_20, bb_upper, bb_lower
+        - EMA 50: ema_50
+        - 4 Garis LWMA Terpisah: lwma_5_high, lwma_10_high, lwma_5_low, lwma_10_low
+        """
+        tf_str = timeframe or self.get_pair_timeframe() or "M15"
+        from agents.research.timeframe_finder import get_mt5_timeframe_constant, resample_m1_df
+        tf_const = get_mt5_timeframe_constant(tf_str)
+        warmup = 100
 
         logging.info(
-            f"Fetching multi-timeframe data for {self.canonical_symbol} [{self.broker_symbol}] "
-            f"(Base: {entry_tf_str}, Setup: {setup_tf_str}, Trend: {trend_tf_str}, count: {n_candles})..."
+            f"Fetching OHLCV + BBMA data for {self.canonical_symbol} [{self.broker_symbol}] "
+            f"(Timeframe: {tf_str}, count: {n_candles})..."
         )
-        
-        warmup_base = 200
-        df_base = get_rates(self.broker_symbol, tf_base_const, n_candles + warmup_base, start_pos=start_pos)
-        
-        start_pos_setup = max(0, int(start_pos / ratio_setup) - 5)
-        n_candles_setup = int(n_candles / ratio_setup) + 100
-        df_setup = get_rates(self.broker_symbol, tf_setup_const, n_candles_setup, start_pos=start_pos_setup)
-        
-        start_pos_trend = max(0, int(start_pos / ratio_trend) - 5)
-        n_candles_trend = int(n_candles / ratio_trend) + 100
-        df_trend = get_rates(self.broker_symbol, tf_trend_const, n_candles_trend, start_pos=start_pos_trend)
-        
-        if df_base is None or df_setup is None or df_trend is None:
-            # Ini normal jika kita meminta data yang lebih tua dari kapasitas maksimal broker
-            return None
 
-        # Set index
-        df_base.set_index('time', inplace=True)
-        df_setup.set_index('time', inplace=True)
-        df_trend.set_index('time', inplace=True)
+        if tf_const is not None:
+            # Native MT5 timeframe (M1..M30, H1..H12, D1)
+            df = get_rates(self.broker_symbol, tf_const, n_candles + warmup, start_pos=start_pos)
+            if df is None or df.empty:
+                return None
+            df.set_index('time', inplace=True)
+        else:
+            # Custom Non-Native Timeframe (M7, M35, etc.) via Synthetic M1 Live Aggregator
+            import re
+            m_min = re.match(r"^M(\d+)$", tf_str.upper())
+            mins = int(m_min.group(1)) if m_min else 15
+            m1_needed = min((n_candles + warmup) * mins, 80000)
+            df_m1 = get_rates(self.broker_symbol, mt5.TIMEFRAME_M1, m1_needed, start_pos=start_pos)
+            if df_m1 is None or df_m1.empty:
+                return None
+            df_m1.set_index('time', inplace=True)
+            df = resample_m1_df(df_m1, tf_str)
 
-        # Feature engineering BBMA & ADX per timeframe
-        from utils.indicators import calculate_atr, calculate_adx, calculate_bbma_sequence_features, calculate_fractal_origin
-        df_base = calculate_bbma(df_base)
-        df_base['ATR_14'] = calculate_atr(df_base, 14)
-        df_base['adx'] = calculate_adx(df_base, 14)
-        
-        df_setup = calculate_bbma(df_setup)
-        df_setup['adx'] = calculate_adx(df_setup, 14)
-        
-        df_trend = calculate_bbma(df_trend)
-        df_trend['adx'] = calculate_adx(df_trend, 14)
-        
-        # Anti-Leakage MTF Merging: shift(1) for higher timeframes before merging to avoid lookahead bias
-        df_setup_shifted = df_setup.shift(1)
-        df_trend_shifted = df_trend.shift(1)
-        
-        # Suffix fraktal (_setup & _trend) serta kompatibilitas mundur (_m5 & _m15)
-        df_merged = df_base.join(df_setup_shifted.add_suffix('_setup'), how='left')
-        df_merged = df_merged.join(df_trend_shifted.add_suffix('_trend'), how='left')
-        df_merged = df_merged.join(df_setup_shifted.add_suffix('_m5'), how='left')
-        df_merged = df_merged.join(df_trend_shifted.add_suffix('_m15'), how='left')
-        
-        # Forward fill AFTER joining
-        df_merged.ffill(inplace=True)
-        df_merged.dropna(inplace=True)
+        df = calculate_bbma(df)
 
-        # Hitung BBMA Sequence Features (bars_since_csa/csak/csm, freshness, trigger_score, dll.)
-        # Dilakukan di sini agar fitur fraktal tersedia baik di live feed maupun training batch.
-        try:
-            df_merged = calculate_bbma_sequence_features(df_merged, lookback=30)
-        except Exception as e_seq:
-            logging.debug(f"[MERGE] Gagal hitung BBMA sequence features: {e_seq}")
+        # Standardize nama kolom ke lowercase
+        col_mapping = {
+            'SMA_20': 'sma_20',
+            'BB_Upper': 'bb_upper',
+            'BB_Lower': 'bb_lower',
+            'EMA_50': 'ema_50',
+            'LWMA_5_High': 'lwma_5_high',
+            'LWMA_10_High': 'lwma_10_high',
+            'LWMA_5_Low': 'lwma_5_low',
+            'LWMA_10_Low': 'lwma_10_low',
+        }
+        for old_c, new_c in col_mapping.items():
+            if old_c in df.columns:
+                df[new_c] = df[old_c]
 
-        # Hitung Fractal Origin (di TF mana Re-entry sedang aktif secara simultan)
-        try:
-            df_merged = calculate_fractal_origin(df_merged)
-        except Exception as e_frac:
-            logging.debug(f"[MERGE] Gagal hitung Fractal Origin: {e_frac}")
-        
-        # Tambahkan data makro
-        df_merged = self.merge_macro_data(df_merged)
-        
-        # Tandai kolom symbol canonical & metadata timeframe
-        df_merged['symbol'] = self.canonical_symbol
-        df_merged['entry_timeframe'] = entry_tf_str
-        df_merged['setup_timeframe'] = setup_tf_str
-        df_merged['trend_timeframe'] = trend_tf_str
+        df['symbol'] = self.canonical_symbol
 
-        # Konversi semua tipe data unsigned int (uint8, uint16, uint32, uint64) ke int64
-        for col in df_merged.columns:
-            if str(df_merged[col].dtype).startswith('uint'):
-                df_merged[col] = df_merged[col].astype('int64')
-                
-        # Potong (slice) bagian warmup agar kita hanya mereturn data asli yang diminta
-        if len(df_merged) > n_candles:
-            df_merged = df_merged.iloc[-n_candles:]
-        
-        logging.info(f"Data merged successfully for {self.canonical_symbol} ({entry_tf_str}). Shape: {df_merged.shape}")
-        return df_merged
+        # 16 Kolom Murni Database Sesuai Spesifikasi (termasuk spread riil MT5):
+        target_cols = [
+            'open', 'high', 'low', 'close', 'tick_volume', 'spread',
+            'sma_20', 'bb_upper', 'bb_lower', 'ema_50',
+            'lwma_5_high', 'lwma_10_high', 'lwma_5_low', 'lwma_10_low',
+            'symbol'
+        ]
+        available_cols = [c for c in target_cols if c in df.columns]
+        df = df[available_cols].dropna().copy()
+
+        if len(df) > n_candles:
+            df = df.iloc[-n_candles:]
+
+        logging.info(f"OHLCV + BBMA data siap untuk {self.canonical_symbol} ({tf_str}). Shape: {df.shape}")
+        return df
+
+    def fetch_and_merge_data(self, n_candles=2000, start_pos=0, timeframe=None):
+        """Kompatibilitas mundur: mengarahkan langsung ke fetch_and_calculate_bbma."""
+        return self.fetch_and_calculate_bbma(n_candles=n_candles, start_pos=start_pos, timeframe=timeframe)
 
 
     def _save_market_data(self, df, if_exists='append'):
@@ -268,9 +246,14 @@ class DataMinerAgent:
             return 0
 
         # Pastikan index bersih dari duplikasi dan timezone-naive
-        df = df[~df.index.duplicated(keep='last')].sort_index()
+        df = df[~df.index.duplicated(keep='last')].sort_index().copy()
         if hasattr(df.index, 'tzinfo') and df.index.tzinfo is not None:
             df.index = df.index.tz_localize(None)
+
+        # Konversi tipe data unsigned integer (uint64/uint32) ke signed integer (int64) untuk PostgreSQL psycopg2
+        for col in df.columns:
+            if 'uint' in str(df[col].dtype):
+                df[col] = df[col].astype('int64')
 
         # Pastikan kolom-kolom baru ada di database jika tabel sudah terbentuk
         try:
@@ -318,15 +301,13 @@ class DataMinerAgent:
         return len(df)
 
 
-    def sync_latest_data(self):
+    def sync_latest_data(self, timeframe="M1"):
         """
         Sinkronisasi Cepat (Incremental Sync):
-        HANYA mengunduh candle baru sejak record terakhir di database hingga saat ini dari MT5.
-        TIDAK AKAN me-rebuild atau men-drop tabel pair.
+        Mengunduh candle baru sejak record terakhir di database hingga saat ini dari MT5.
         """
         logging.info(f"[SYNC] Memeriksa data terbaru dari MT5 untuk {self.canonical_symbol} [{self.broker_symbol}] pada {self.table_name}...")
         
-        # 1. Cek timestamp terakhir di tabel pair
         last_time = None
         try:
             with sync_engine.connect() as conn:
@@ -351,10 +332,23 @@ class DataMinerAgent:
             logging.warning(f"[SYNC] Tidak dapat membaca MAX(time) dari {self.table_name}: {e}")
             last_time = None
 
-        # 2. Cek candle terakhir dari MT5
+        tf_str = timeframe or "M1"
+        TF_MAP = {
+            "M1": mt5.TIMEFRAME_M1,
+            "M5": mt5.TIMEFRAME_M5,
+            "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30,
+            "H1": mt5.TIMEFRAME_H1,
+            "H4": mt5.TIMEFRAME_H4,
+            "D1": mt5.TIMEFRAME_D1,
+        }
+        tf_const = TF_MAP.get(tf_str.upper(), mt5.TIMEFRAME_M1)
+        tf_min_map = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440}
+        tf_minutes = tf_min_map.get(tf_str.upper(), 1)
+
         rates_latest = None
         try:
-            rates_latest = mt5.copy_rates_from_pos(self.broker_symbol, mt5.TIMEFRAME_M1, 0, 1)
+            rates_latest = mt5.copy_rates_from_pos(self.broker_symbol, tf_const, 0, 1)
         except Exception as e:
             logging.error(f"[SYNC] Error saat copy_rates_from_pos MT5 ({self.broker_symbol}): {e}")
 
@@ -370,11 +364,11 @@ class DataMinerAgent:
         # 3. Hitung selisih
         if last_time is not None:
             diff_seconds = (mt5_latest_time - last_time).total_seconds()
-            missing_candles = int(diff_seconds // 60)
-            logging.info(f"[SYNC] {self.canonical_symbol} DB Max Time: {last_time} | MT5 Current Time: {mt5_latest_time} | Gap: {missing_candles} candles")
+            missing_candles = int(diff_seconds // (60 * tf_minutes))
+            logging.info(f"[SYNC] {self.canonical_symbol} ({tf_str}) DB Max Time: {last_time} | MT5 Current Time: {mt5_latest_time} | Gap: {missing_candles} candles")
 
             if missing_candles <= 0:
-                msg = f"Database {self.canonical_symbol} sudah up-to-date (Record: {last_time}). Tidak ada candle baru di MT5."
+                msg = f"Database {self.canonical_symbol} ({tf_str}) sudah up-to-date (Record: {last_time}). Tidak ada candle baru di MT5."
                 logging.info(f"[SYNC] {msg}")
                 return 0, msg
                 
@@ -382,12 +376,12 @@ class DataMinerAgent:
             candles_to_fetch = min(missing_candles, 50000)
         else:
             # Jika database belum ada data sama sekali, ambil 5.000 candle terakhir
-            logging.info(f"[SYNC] Database {self.canonical_symbol} belum memiliki data. Mengambil 5.000 candle terakhir.")
+            logging.info(f"[SYNC] Database {self.canonical_symbol} belum memiliki data. Mengambil 5.000 candle terakhir ({tf_str}).")
             candles_to_fetch = 5000
 
         # 4. Ambil data dari MT5 mulai dari bar 0 (paling baru)
-        logging.info(f"[SYNC] Mengambil {candles_to_fetch} candle terbaru dari MT5 ({self.broker_symbol})...")
-        df = self.fetch_and_merge_data(n_candles=candles_to_fetch, start_pos=0)
+        logging.info(f"[SYNC] Mengambil {candles_to_fetch} candle terbaru dari MT5 ({self.broker_symbol}, {tf_str})...")
+        df = self.fetch_and_merge_data(n_candles=candles_to_fetch, start_pos=0, timeframe=tf_str)
 
         if df is None or df.empty:
             msg = f"Gagal memproses candle dari MT5 ({self.broker_symbol})."
@@ -411,7 +405,7 @@ class DataMinerAgent:
         # 6. Simpan (APPEND) ke PostgreSQL tanpa drop menggunakan batch aman
         try:
             inserted = self._save_market_data(df_new, if_exists='append')
-            msg = f"Sukses menyambungkan {inserted:,} candle baru ke tabel {self.table_name}!"
+            msg = f"Sukses menyambungkan {inserted:,} candle baru ke tabel {self.table_name} ({tf_str})!"
             logging.info(f"[SYNC SUCCESS] {msg}")
             return inserted, msg
         except Exception as e:
@@ -419,153 +413,135 @@ class DataMinerAgent:
             logging.error(f"[SYNC ERROR] {err_msg}")
             return 0, err_msg
 
-    def backfill_data(self, total_candles=20000, progress_callback=None, force_rebuild=False):
-        logging.info(f"Starting Historical Backfill untuk {self.canonical_symbol} [{self.broker_symbol}] pada {self.table_name} (Force={force_rebuild})...")
-        sample_df = None
+    def backfill_data(self, total_candles=None, progress_callback=None, force_rebuild=False, timeframe="M1"):
+        tf_str = timeframe or "M1"
+        TF_MAP = {
+            "M1": mt5.TIMEFRAME_M1,
+            "M5": mt5.TIMEFRAME_M5,
+            "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30,
+            "H1": mt5.TIMEFRAME_H1,
+            "H4": mt5.TIMEFRAME_H4,
+            "D1": mt5.TIMEFRAME_D1,
+        }
+        tf_const = TF_MAP.get(tf_str.upper(), mt5.TIMEFRAME_M1)
+        tf_min_map = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440}
+        tf_minutes = tf_min_map.get(tf_str.upper(), 1)
+
+        logging.info(f"Starting Historical Backfill untuk {self.canonical_symbol} [{self.broker_symbol}] pada {self.table_name} (TF={tf_str}, Force={force_rebuild})...")
         
         if force_rebuild:
             try:
                 with sync_engine.begin() as conn:
                     conn.execute(text(f'DROP TABLE IF EXISTS "{self.table_name}"'))
-                logging.warning(f"Table {self.table_name} dropped for forced rebuild.")
+                logging.info(f"Tabel {self.table_name} di-drop untuk full rebuild.")
             except Exception as e:
-                logging.error(f"Failed to drop table {self.table_name}: {e}")
-                
-        try:
-            # Check schema first
-            query = f'SELECT * FROM "{self.table_name}" LIMIT 1'
-            sample_df = pd.read_sql(query, con=sync_engine)
-                
-            # Check last date in DB
-            query_max = f'SELECT MAX(time) as last_time FROM "{self.table_name}"'
-            last_date_df = pd.read_sql(query_max, con=sync_engine)
-            last_time = pd.to_datetime(last_date_df['last_time'].iloc[0])
-        except Exception as e:
-            logging.info(f"Existing table {self.table_name} missing or empty. Detail: {e}")
+                logging.error(f"Gagal drop tabel {self.table_name}: {e}")
             last_time = pd.NaT
-
-        if force_rebuild:
-            last_time = pd.NaT
+        else:
+            try:
+                query_max = f'SELECT MAX(time) as last_time FROM "{self.table_name}"'
+                last_date_df = pd.read_sql(query_max, con=sync_engine)
+                last_time = pd.to_datetime(last_date_df['last_time'].iloc[0])
+            except Exception:
+                last_time = pd.NaT
 
         if pd.isna(last_time):
-            logging.info(f"No existing data found for {self.canonical_symbol} (or forced rebuild). Downloading {total_candles} candles.")
-            candles_to_fetch = total_candles
-            if_exists = 'replace' if force_rebuild else 'append'
+            chunk_size_mt5 = 50000
+            current_pos = 0
+            batch_idx = 0
+            total_inserted = 0
+
+            while True:
+                req_count = chunk_size_mt5
+                if total_candles is not None:
+                    remaining = total_candles - total_inserted
+                    if remaining <= 0:
+                        break
+                    req_count = min(chunk_size_mt5, remaining)
+
+                df = self.fetch_and_merge_data(n_candles=req_count, start_pos=current_pos, timeframe=tf_str)
+                if df is None or df.empty:
+                    break
+
+                actual_len = len(df)
+                current_if_exists = 'replace' if (force_rebuild and batch_idx == 0) else 'append'
+                rows = self._save_market_data(df, if_exists=current_if_exists)
+                total_inserted += rows
+                current_pos += actual_len
+                batch_idx += 1
+
+                logging.info(f"[DB Backfill] Batch {batch_idx} ({rows:,} rows, pos {current_pos:,}) tersimpan ke {self.table_name}. Total: {total_inserted:,}")
+                if progress_callback:
+                    progress_callback(batch_idx, batch_idx + 1, total_inserted, total_inserted)
+
+                import gc
+                del df
+                gc.collect()
+
+                if actual_len < req_count:
+                    break
+
+            logging.info(f"Backfill selesai untuk {self.canonical_symbol}. Total: {total_inserted:,} candle.")
+            return total_inserted
         else:
-            # Check latest candle directly from MT5 if available
             rates_last = None
             try:
-                rates_last = mt5.copy_rates_from_pos(self.broker_symbol, mt5.TIMEFRAME_M1, 0, 1)
+                rates_last = mt5.copy_rates_from_pos(self.broker_symbol, tf_const, 0, 1)
             except Exception as e:
-                logging.warning(f"Failed to query latest MT5 candle for {self.broker_symbol}: {e}")
-                
-            last_time_naive = last_time.tz_localize(None) if (hasattr(last_time, 'tzinfo') and last_time.tzinfo is not None) else last_time
+                logging.warning(f"Gagal cek candle MT5: {e}")
 
+            last_time_naive = last_time.tz_localize(None) if (hasattr(last_time, 'tzinfo') and last_time.tzinfo is not None) else last_time
             if rates_last is not None and len(rates_last) > 0:
                 latest_mt5_time = pd.to_datetime(rates_last[0]['time'], unit='s')
-                missing_seconds = (latest_mt5_time - last_time_naive).total_seconds()
-                missing_minutes = int(missing_seconds / 60)
-                logging.info(f"[{self.canonical_symbol}] Latest MT5 time: {latest_mt5_time}, DB max time: {last_time_naive}. Missing minutes: {missing_minutes}")
+                missing_minutes = int((latest_mt5_time - last_time_naive).total_seconds() / (60 * tf_minutes))
             else:
                 now_utc = datetime.now(timezone.utc)
                 last_time_utc = last_time.tz_localize('UTC') if last_time.tzinfo is None else last_time
-                missing_minutes = int((now_utc - last_time_utc).total_seconds() / 60)
+                missing_minutes = int((now_utc - last_time_utc).total_seconds() / (60 * tf_minutes))
 
             if missing_minutes <= 0:
-                logging.info(f"Database {self.table_name} is already up to date with MT5. Last record: {last_time}")
+                logging.info(f"Database {self.table_name} sudah sinkron. Record terakhir: {last_time}")
                 return 0
-                
+
             candles_to_fetch = missing_minutes + 100
-            logging.info(f"Found existing data up to {last_time}. Fetching ~{candles_to_fetch} new candles.")
-            if_exists = 'append'
-
-        # Probe kapasitas riil history broker agar tidak mencoba jutaan candle kosong di masa lalu
-        if pd.isna(last_time) or candles_to_fetch > 100000:
-            try:
-                mt5.symbol_select(self.broker_symbol, True)
-                probe_rates = mt5.copy_rates_from_pos(self.broker_symbol, mt5.TIMEFRAME_M1, 0, candles_to_fetch)
-                if probe_rates is not None and len(probe_rates) > 0:
-                    real_available = len(probe_rates)
-                    if real_available < candles_to_fetch:
-                        logging.info(f"[{self.canonical_symbol}] MT5 trade server memiliki {real_available:,} candle M1 (permintaan awal: {candles_to_fetch:,}). Menyesuaikan...")
-                        candles_to_fetch = real_available
-            except Exception as e:
-                logging.debug(f"Probing candle limit skipped: {e}")
-
-        # Ensure we don't fetch more than total_candles if missing is huge
-        candles_to_fetch = min(candles_to_fetch, total_candles)
-        
-        # CHUNKED DOWNLOAD LOGIC
-        chunk_size_mt5 = 100000
-        total_mt5_batches = (candles_to_fetch + chunk_size_mt5 - 1) // chunk_size_mt5
-        logging.info(f"Starting chunked MT5 download for {candles_to_fetch:,} candles ({self.canonical_symbol}) in {total_mt5_batches} batches...")
-        
-        total_inserted = 0
-        
-        for batch_idx in range(total_mt5_batches):
-            # Calculate start_pos to fetch oldest data first
-            remaining = candles_to_fetch - (batch_idx * chunk_size_mt5)
-            current_chunk_size = min(chunk_size_mt5, remaining)
-            start_pos = remaining - current_chunk_size
-            
-            df = self.fetch_and_merge_data(n_candles=current_chunk_size, start_pos=start_pos)
-            
-            if df is None or df.empty:
-                logging.warning(f"Batch {batch_idx+1}/{total_mt5_batches} (pos {start_pos}, count {current_chunk_size}) mengembalikan data kosong. Melanjutkan...")
-                continue
-                
-            # Handle new column schema alterations only on the first batch if sample_df exists
-            if batch_idx == 0 and sample_df is not None:
-                missing_cols = set(df.columns) - set(sample_df.columns)
-                if missing_cols:
-                    try:
-                        print(f"[*] Terdeteksi ada {len(missing_cols)} kolom baru di {self.table_name}: {missing_cols}")
-                        with sync_engine.begin() as conn:
-                            for col in missing_cols:
-                                dtype_str = str(df[col].dtype)
-                                if 'float' in dtype_str:
-                                    sql_type = 'FLOAT'
-                                elif 'int' in dtype_str:
-                                    sql_type = 'BIGINT'
-                                elif 'bool' in dtype_str:
-                                    sql_type = 'BOOLEAN'
-                                else:
-                                    sql_type = 'TEXT'
-                                print(f"[*] Menambahkan kolom baru: ALTER TABLE \"{self.table_name}\" ADD COLUMN \"{col}\" {sql_type}")
-                                conn.execute(text(f'ALTER TABLE "{self.table_name}" ADD COLUMN "{col}" {sql_type}'))
-                        print(f"[*] Semua kolom baru berhasil ditambahkan ke tabel {self.table_name}!")
-                    except Exception as e:
-                        logging.error(f"Failed to add missing columns to database {self.table_name}: {e}")
-
-            # Filter incremental data
-            if not pd.isna(last_time):
-                last_time_cmp = last_time.tz_localize(None) if (hasattr(last_time, 'tzinfo') and last_time.tzinfo is not None) else last_time
+            df = self.fetch_and_merge_data(n_candles=candles_to_fetch, start_pos=0, timeframe=tf_str)
+            if df is not None and not df.empty:
                 df_index_cmp = df.index.tz_localize(None) if (hasattr(df.index, 'tzinfo') and df.index.tzinfo is not None) else df.index
-                df = df[df_index_cmp > last_time_cmp]
-                if hasattr(df.index, 'tzinfo') and df.index.tzinfo is not None:
-                    df.index = df.index.tz_localize(None)
-                
-            if not df.empty:
-                current_if_exists = 'replace' if (force_rebuild and batch_idx == 0) else 'append'
-                rows_in_chunk = self._save_market_data(df, if_exists=current_if_exists)
-                total_inserted += rows_in_chunk
-                pct = ((batch_idx + 1) / total_mt5_batches) * 100
-                logging.info(f"[DB Progress] MT5 Batch {batch_idx+1}/{total_mt5_batches} selesai: {rows_in_chunk:,} baris ({pct:.1f}%) tersimpan ke tabel {self.table_name}.")
-                
-                if progress_callback:
-                    progress_callback(batch_idx + 1, total_mt5_batches, batch_idx + 1, total_mt5_batches)
-                    
-        logging.info(f"Backfill/Incremental complete for {self.canonical_symbol}. Total inserted: {total_inserted:,}")
-        return total_inserted
+                df = df[df_index_cmp > last_time_naive]
+                if not df.empty:
+                    rows = self._save_market_data(df, if_exists='append')
+                    logging.info(f"Incremental sync selesai. Ditambahkan {rows:,} baris ke {self.table_name}.")
+                    return rows
+            return 0
 
-    def load_from_db(self, symbol=None):
+    def load_from_db(self, symbol=None, chunk_size=50000, max_candles=None):
         if symbol:
             self.set_symbol(symbol)
-        logging.info(f"Loading all data from {self.table_name} for training...")
         try:
-            df = pd.read_sql(f'SELECT * FROM "{self.table_name}" ORDER BY time ASC', con=sync_engine, index_col='time')
-            df.index = pd.to_datetime(df.index)
-            logging.info(f"Loaded {len(df)} rows from {self.table_name}.")
+            if max_candles:
+                query = f'SELECT * FROM (SELECT * FROM "{self.table_name}" ORDER BY time DESC LIMIT {max_candles}) sub ORDER BY time ASC'
+            else:
+                query = f'SELECT * FROM "{self.table_name}" ORDER BY time ASC'
+
+            chunks = []
+            for chunk in pd.read_sql(query, con=sync_engine, chunksize=chunk_size):
+                if 'time' in chunk.columns:
+                    chunk['time'] = pd.to_datetime(chunk['time'])
+                chunks.append(chunk)
+
+            if not chunks:
+                return pd.DataFrame()
+
+            df = pd.concat(chunks, ignore_index=True)
+            if 'time' in df.columns:
+                df.set_index('time', inplace=True)
+            elif not isinstance(df.index, pd.DatetimeIndex) and 'time' in df.index.names:
+                df.index = pd.to_datetime(df.index)
+
+            del chunks
+            import gc
+            gc.collect()
             return df
         except Exception as e:
             logging.error(f"Failed to load data from {self.table_name}: {e}")

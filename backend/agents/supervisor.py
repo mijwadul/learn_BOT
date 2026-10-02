@@ -60,18 +60,18 @@ class SupervisorAgent:
                     "normal": self._model_valid_normal,
                     "runner": self._model_valid_runner
                 }
-            if target in ('normal', 'all', 'both'):
-                logging.warning(f"[MANUAL OVERRIDE] Otak Normal ({sym}) dipaksa LIVE.")
+            if target in ('normal', 'all', 'both', 'unified', 'profit'):
+                logging.warning(f"[MANUAL OVERRIDE] Otak Normal/Unified ({sym}) dipaksa LIVE.")
                 self._pair_brain_validity[sym]["normal"] = True
-            if target in ('runner', 'all', 'both'):
-                logging.warning(f"[MANUAL OVERRIDE] Otak Runner ({sym}) dipaksa LIVE.")
+            if target in ('runner', 'all', 'both', 'unified', 'profit'):
+                logging.warning(f"[MANUAL OVERRIDE] Otak Runner/Unified ({sym}) dipaksa LIVE.")
                 self._pair_brain_validity[sym]["runner"] = True
         else:
-            if target in ('normal', 'all', 'both'):
-                logging.warning("[MANUAL OVERRIDE] Otak Normal (Scalp 1:2) dipaksa LIVE.")
+            if target in ('normal', 'all', 'both', 'unified', 'profit'):
+                logging.warning("[MANUAL OVERRIDE] Otak Normal/Unified dipaksa LIVE.")
                 self._model_valid_normal = True
-            if target in ('runner', 'all', 'both'):
-                logging.warning("[MANUAL OVERRIDE] Otak Runner (Trend 1:5) dipaksa LIVE.")
+            if target in ('runner', 'all', 'both', 'unified', 'profit'):
+                logging.warning("[MANUAL OVERRIDE] Otak Runner/Unified dipaksa LIVE.")
                 self._model_valid_runner = True
             
         if self.state != 'live' and self.is_any_model_valid():
@@ -87,18 +87,18 @@ class SupervisorAgent:
                     "normal": self._model_valid_normal,
                     "runner": self._model_valid_runner
                 }
-            if target in ('normal', 'all', 'both'):
-                logging.warning(f"[ISOLATED BREAKER] Otak Normal ({sym}) dinonaktifkan.")
+            if target in ('normal', 'all', 'both', 'unified', 'profit'):
+                logging.warning(f"[ISOLATED BREAKER] Otak Normal/Unified ({sym}) dinonaktifkan.")
                 self._pair_brain_validity[sym]["normal"] = False
-            if target in ('runner', 'all', 'both'):
-                logging.warning(f"[ISOLATED BREAKER] Otak Runner ({sym}) dinonaktifkan.")
+            if target in ('runner', 'all', 'both', 'unified', 'profit'):
+                logging.warning(f"[ISOLATED BREAKER] Otak Runner/Unified ({sym}) dinonaktifkan.")
                 self._pair_brain_validity[sym]["runner"] = False
         else:
-            if target in ('normal', 'all', 'both'):
-                logging.warning("[ISOLATED BREAKER] Otak Normal (Scalp 1:2) dinonaktifkan.")
+            if target in ('normal', 'all', 'both', 'unified', 'profit'):
+                logging.warning("[ISOLATED BREAKER] Otak Normal/Unified dinonaktifkan.")
                 self._model_valid_normal = False
-            if target in ('runner', 'all', 'both'):
-                logging.warning("[ISOLATED BREAKER] Otak Runner (Trend 1:5) dinonaktifkan.")
+            if target in ('runner', 'all', 'both', 'unified', 'profit'):
+                logging.warning("[ISOLATED BREAKER] Otak Runner/Unified dinonaktifkan.")
                 self._model_valid_runner = False
             
         if not self.is_any_model_valid() and self.state == 'live':
